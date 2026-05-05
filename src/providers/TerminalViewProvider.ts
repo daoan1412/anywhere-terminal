@@ -2,6 +2,7 @@ import * as vscode from "vscode";
 import type { SessionManager } from "../session/SessionManager";
 import { readTerminalConfig, readTerminalSettings } from "../settings/SettingsReader";
 import type { WebViewToExtensionMessage } from "../types/messages";
+import { openExternalLink } from "./openExternalLink";
 import { getTerminalHtml } from "./webviewHtml";
 
 /**
@@ -247,6 +248,12 @@ export class TerminalViewProvider implements vscode.WebviewViewProvider {
           // Track the active pane session ID for split-pane-aware command routing
           if (typeof message.activeSessionId === "string") {
             this._lastActivePaneSessionId = message.activeSessionId;
+          }
+          break;
+
+        case "openLink":
+          if (typeof message.url === "string") {
+            void openExternalLink(message.url);
           }
           break;
 

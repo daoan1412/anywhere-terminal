@@ -168,7 +168,11 @@ export class TerminalFactory {
 
     // Load addons
     const fitAddon = new FitAddon();
-    const webLinksAddon = new WebLinksAddon();
+    // VS Code webviews block window.open, so route the click through the
+    // extension host which calls vscode.env.openExternal().
+    const webLinksAddon = new WebLinksAddon((_event, uri) => {
+      this.postMessage({ type: "openLink", url: uri });
+    });
     terminal.loadAddon(fitAddon);
     terminal.loadAddon(webLinksAddon);
 

@@ -48,7 +48,9 @@ flowchart TD
     D -->|"No"| S{"Escape key?"}
     S -->|"Yes + selection"| T["Clear selection\nreturn false"]
     S -->|"Yes + no selection"| U["return true\n(pass to shell)"]
-    S -->|"No"| F
+    S -->|"No"| SE{"Shift+Enter\n(no other modifier)?"}
+    SE -->|"Yes"| SE1["Send \\x1b\\r (ESC+CR)\nvia postMessage input\nreturn false"]
+    SE -->|"No"| F
 
     style J fill:#354,stroke:#6a6
     style K fill:#543,stroke:#a66
@@ -366,6 +368,11 @@ We maintain an explicit list of key combinations to intercept. Everything else p
 | Cmd+K | **Intercepted** (always) | Clear terminal + postMessage clear |
 | Cmd+A | **Intercepted** | Select all |
 | Cmd+Backspace | **Intercepted** | Line kill (`\x15` via postMessage input) |
+| Shift+Enter | **Intercepted** | Send `\x1b\r` (ESC+CR) so REPLs like Claude Code insert a newline instead of submitting |
+| Cmd+Left (macOS) | **Intercepted** | Send `\x01` (Ctrl+A) — readline beginning-of-line |
+| Cmd+Right (macOS) | **Intercepted** | Send `\x05` (Ctrl+E) — readline end-of-line |
+| Option+Left (macOS) | **Intercepted** | Send `\x1bb` (ESC+b) — readline backward-word |
+| Option+Right (macOS) | **Intercepted** | Send `\x1bf` (ESC+f) — readline forward-word |
 | Cmd+P | → VS Code | File picker (not intercepted) |
 | Cmd+Shift+P | → VS Code | Command palette (not intercepted) |
 | Cmd+B | → VS Code | Toggle sidebar (not intercepted) |

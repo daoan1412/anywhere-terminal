@@ -3,6 +3,7 @@ import * as vscode from "vscode";
 import type { SessionManager } from "../session/SessionManager";
 import { readTerminalConfig, readTerminalSettings } from "../settings/SettingsReader";
 import type { WebViewToExtensionMessage } from "../types/messages";
+import { openExternalLink } from "./openExternalLink";
 import { getTerminalHtml } from "./webviewHtml";
 
 /**
@@ -190,6 +191,12 @@ export class TerminalEditorProvider {
         case "clear":
           if (typeof message.tabId === "string") {
             this.sessionManager.clearScrollback(message.tabId);
+          }
+          break;
+
+        case "openLink":
+          if (typeof message.url === "string") {
+            void openExternalLink(message.url);
           }
           break;
 

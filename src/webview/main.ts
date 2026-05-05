@@ -342,6 +342,74 @@ function bootstrap(): void {
   document.addEventListener("compositionend", () => {
     isComposing = false;
   });
+  // Document-level capture handler — runs before xterm so events are
+  // intercepted even if the embedding host (or another listener) would
+  // otherwise consume them.
+  //
+  // Handled here:
+  // - Shift+Enter → ESC+CR (\x1b\r) so REPLs like Claude Code insert a
+  //   newline instead of submitting.
+  // - Cmd+Left / Cmd+Right (macOS) → Ctrl+A / Ctrl+E so readline-style
+  //   shells jump to start/end of line. xterm.js does not bind these by
+  //   default; this matches Terminal.app / iTerm2 / VS Code's terminal.
+  // - Option+Left / Option+Right (macOS) → ESC+b / ESC+f for readline
+  //   word-jump (backward-word / forward-word). xterm.js's default
+  //   behavior with `macOptionIsMeta: false` does not produce these.
+  const isMac = navigator.platform.includes("Mac");
+  document.addEventListener(
+    "keydown",
+    (e: KeyboardEvent) => {
+      if (isComposing) {
+        return;
+      }
+      const tabId = store.activeTabId;
+      const targetId = tabId ? (store.tabActivePaneIds.get(tabId) ?? tabId) : null;
+      if (!targetId) {
+        return;
+      }
+
+      // Shift+Enter → ESC+CR
+      if (e.key === "Enter" && e.shiftKey && !e.metaKey && !e.ctrlKey && !e.altKey) {
+        vscode.postMessage({ type: "input", tabId: targetId, data: "\x1b\r" });
+        e.preventDefault();
+        e.stopPropagation();
+        return;
+      }
+
+      // macOS: Cmd+Left → start of line (\x01), Cmd+Right → end of line (\x05)
+      if (isMac && e.metaKey && !e.ctrlKey && !e.altKey && !e.shiftKey) {
+        if (e.key === "ArrowLeft") {
+          vscode.postMessage({ type: "input", tabId: targetId, data: "\x01" });
+          e.preventDefault();
+          e.stopPropagation();
+          return;
+        }
+        if (e.key === "ArrowRight") {
+          vscode.postMessage({ type: "input", tabId: targetId, data: "\x05" });
+          e.preventDefault();
+          e.stopPropagation();
+          return;
+        }
+      }
+
+      // macOS: Option+Left → backward-word (\x1bb), Option+Right → forward-word (\x1bf)
+      if (isMac && e.altKey && !e.metaKey && !e.ctrlKey && !e.shiftKey) {
+        if (e.key === "ArrowLeft") {
+          vscode.postMessage({ type: "input", tabId: targetId, data: "\x1bb" });
+          e.preventDefault();
+          e.stopPropagation();
+          return;
+        }
+        if (e.key === "ArrowRight") {
+          vscode.postMessage({ type: "input", tabId: targetId, data: "\x1bf" });
+          e.preventDefault();
+          e.stopPropagation();
+          return;
+        }
+      }
+    },
+    true,
+  );
   document.addEventListener("keydown", (e: KeyboardEvent) => {
     if (handleTabKeyboardShortcut(e, { terminals: store.terminals, activeTabId: store.activeTabId, switchTab })) {
       e.preventDefault();
