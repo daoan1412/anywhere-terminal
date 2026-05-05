@@ -33,6 +33,8 @@ function makeKeyEvent(
     key: string;
     metaKey: boolean;
     ctrlKey: boolean;
+    shiftKey: boolean;
+    altKey: boolean;
   }> = {},
 ): KeyboardEvent {
   return {
@@ -40,6 +42,8 @@ function makeKeyEvent(
     key: "a",
     metaKey: false,
     ctrlKey: false,
+    shiftKey: false,
+    altKey: false,
     ...overrides,
   } as unknown as KeyboardEvent;
 }
@@ -366,6 +370,23 @@ describe("createKeyEventHandler", () => {
 
       expect(result).toBe(true);
       expect(terminal.hasSelection).not.toHaveBeenCalled();
+    });
+  });
+
+  // ─── Shift+Enter passthrough ────────────────────────────────────
+  // Shift+Enter is handled at the document-level capture handler in main.ts,
+  // not in this module. The handler here should just pass it through.
+
+  describe("Shift+Enter passthrough", () => {
+    it("returns true for bare Shift+Enter (handled elsewhere)", () => {
+      const postMessage = vi.fn();
+      const deps = createDeps({ postMessage });
+      const handler = createKeyEventHandler(deps);
+
+      const result = handler(makeKeyEvent({ key: "Enter", shiftKey: true }));
+
+      expect(result).toBe(true);
+      expect(postMessage).not.toHaveBeenCalled();
     });
   });
 

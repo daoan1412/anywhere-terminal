@@ -66,6 +66,10 @@ export function createKeyEventHandler(deps: KeyHandlerDeps): (event: KeyboardEve
       return true;
     }
 
+    // Note: Shift+Enter is intercepted at the document-level capture handler in
+    // main.ts (it must run before xterm and any other listener). It posts
+    // \x1b\r (ESC+CR) so REPLs like Claude Code insert a newline.
+
     // Check for platform modifier (Cmd on macOS, Ctrl on others)
     const modifier = isMac ? event.metaKey : event.ctrlKey;
 
