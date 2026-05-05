@@ -193,6 +193,12 @@ export class TerminalEditorProvider {
           }
           break;
 
+        case "openLink":
+          if (typeof message.url === "string" && /^https?:\/\//i.test(message.url)) {
+            void vscode.env.openExternal(vscode.Uri.parse(message.url));
+          }
+          break;
+
         default:
           break;
       }

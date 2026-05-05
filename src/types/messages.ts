@@ -101,6 +101,13 @@ export interface FocusMessage {
   activeSessionId?: string;
 }
 
+/** Request the extension host to open an external link (e.g. Cmd+Click on a URL in the terminal). */
+export interface OpenLinkMessage {
+  type: "openLink";
+  /** Absolute URL to open in the user's default browser */
+  url: string;
+}
+
 /**
  * All messages that can be sent from the WebView to the Extension Host.
  * Use msg.type as the discriminant in switch/case for exhaustive handling.
@@ -116,7 +123,8 @@ export type WebViewToExtensionMessage =
   | AckMessage
   | RequestSplitSessionMessage
   | RequestCloseSplitPaneMessage
-  | FocusMessage;
+  | FocusMessage
+  | OpenLinkMessage;
 
 // ─── Extension → WebView Messages ───────────────────────────────────
 

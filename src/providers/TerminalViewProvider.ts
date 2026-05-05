@@ -250,6 +250,12 @@ export class TerminalViewProvider implements vscode.WebviewViewProvider {
           }
           break;
 
+        case "openLink":
+          if (typeof message.url === "string" && /^https?:\/\//i.test(message.url)) {
+            void vscode.env.openExternal(vscode.Uri.parse(message.url));
+          }
+          break;
+
         default:
           // Silently ignore unknown message types
           break;
