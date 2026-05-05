@@ -2,6 +2,7 @@ import * as vscode from "vscode";
 import type { SessionManager } from "../session/SessionManager";
 import { readTerminalConfig, readTerminalSettings } from "../settings/SettingsReader";
 import type { WebViewToExtensionMessage } from "../types/messages";
+import { openExternalLink } from "./openExternalLink";
 import { getTerminalHtml } from "./webviewHtml";
 
 /**
@@ -251,8 +252,8 @@ export class TerminalViewProvider implements vscode.WebviewViewProvider {
           break;
 
         case "openLink":
-          if (typeof message.url === "string" && /^https?:\/\//i.test(message.url)) {
-            void vscode.env.openExternal(vscode.Uri.parse(message.url));
+          if (typeof message.url === "string") {
+            void openExternalLink(message.url);
           }
           break;
 
