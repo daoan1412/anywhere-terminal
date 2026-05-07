@@ -55,10 +55,15 @@ export function getTerminalHtml(
       height: 30px;
       background: var(--vscode-editorGroupHeader-tabsBackground, var(--vscode-sideBar-background));
       align-items: center;
-      overflow: hidden;
+      overflow-x: auto;
+      overflow-y: hidden;
       user-select: none;
       font-size: 12px;
       font-family: var(--vscode-font-family, sans-serif);
+      scrollbar-width: none;
+    }
+    #tab-bar::-webkit-scrollbar {
+      display: none;
     }
     #tab-bar.visible {
       display: flex;
@@ -74,6 +79,7 @@ export function getTerminalHtml(
       background: var(--vscode-tab-inactiveBackground, transparent);
       border-right: 1px solid var(--vscode-tab-border, transparent);
       gap: 6px;
+      flex-shrink: 0;
     }
     .tab-item:hover {
       background: var(--vscode-tab-hoverBackground, rgba(255,255,255,0.05));
@@ -97,6 +103,7 @@ export function getTerminalHtml(
       font-size: 12px;
       padding: 0;
       opacity: 0;
+      flex-shrink: 0;
     }
     .tab-item:hover .tab-close,
     .tab-item.active .tab-close {
@@ -118,6 +125,7 @@ export function getTerminalHtml(
       border: none;
       font-size: 16px;
       padding: 0;
+      flex-shrink: 0;
     }
     .tab-add:hover {
       background: var(--vscode-toolbar-hoverBackground, rgba(255,255,255,0.1));
