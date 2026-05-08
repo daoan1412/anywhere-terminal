@@ -1,0 +1,16 @@
+{
+  "hooks": {
+    "SubagentStart": [
+      {
+        "matcher": "asm-knowledge-extract",
+        "hooks": [
+          {
+            "type": "command",
+            "command": ".agents/skills/asimov-core/claude/hooks/knowledge-extract-session.sh",
+            "timeout": 10000
+          }
+        ]
+      }
+    ]
+  }
+}

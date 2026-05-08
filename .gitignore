@@ -29,3 +29,13 @@ session-ses_*
 .opencode/opencode.jsonc
 .opencode/plugins/cyberk-flow.ts
 .gitnexus
+
+# asimov
+asimov/changes/**/.sessions
+asimov/.memory.db*
+asimov/memory.db*
+.agents/skills/asimov-*
+.claude/skills/asimov-*
+.claude/agents/asimov
+.opencode/agents/asimov
+.code-review-graph/
