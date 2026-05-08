@@ -1,6 +1,36 @@
 {
   "version": 1,
   "skills": {
+    "asimov-archive": {
+      "source": "cyberk-dev/asimov",
+      "sourceType": "github",
+      "skillPath": "skills/asimov-archive/SKILL.md",
+      "computedHash": "6dedd1f883f42b659b7840b7c38451bce2bf9a7da04522ad8718c21cd27d0c1e"
+    },
+    "asimov-build": {
+      "source": "cyberk-dev/asimov",
+      "sourceType": "github",
+      "skillPath": "skills/asimov-build/SKILL.md",
+      "computedHash": "0471da3420d79cf7757ac13e9b1294c39dbda877f0575e57ffd6677b9ae72273"
+    },
+    "asimov-core": {
+      "source": "cyberk-dev/asimov",
+      "sourceType": "github",
+      "skillPath": "skills/asimov-core/SKILL.md",
+      "computedHash": "720d8679cd4e5cbaf5345711a7940e5f7f58b68d53c878e76e78f4d1e914fbf3"
+    },
+    "asimov-plan": {
+      "source": "cyberk-dev/asimov",
+      "sourceType": "github",
+      "skillPath": "skills/asimov-plan/SKILL.md",
+      "computedHash": "49c0f1d8aed6a9d2b57170ce9334440351a1ce5918bd6d929ddeb7dde94c23c2"
+    },
+    "asimov-review": {
+      "source": "cyberk-dev/asimov",
+      "sourceType": "github",
+      "skillPath": "skills/asimov-review/SKILL.md",
+      "computedHash": "a3dcfd24fde0b201fad4696819931ba54787d0f79a000716d0ccba05c71e3b47"
+    },
     "cyberk-flow": {
       "source": "cyberk-dev/cyberk-skills",
       "sourceType": "github",

@@ -39,3 +39,6 @@ asimov/memory.db*
 .claude/agents/asimov
 .opencode/agents/asimov
 .code-review-graph/
+
+# asimov
+.opencode/plugins/asimov.ts

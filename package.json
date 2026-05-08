@@ -2,7 +2,7 @@
   "name": "anywhere-terminal",
   "displayName": "AnyWhere Terminal",
   "description": "Break free from the bottom panel! Put your terminal anywhere: Primary Sidebar, Secondary Sidebar, or multiple panels at once.",
-  "version": "0.5.0",
+  "version": "0.6.0",
   "publisher": "huybuidac",
   "license": "MIT",
   "icon": "media/icon.png",
@@ -23,7 +23,7 @@
     "secondary sidebar"
   ],
   "engines": {
-    "vscode": "^1.107.0"
+    "vscode": "^1.105.0"
   },
   "categories": [
     "Other"
@@ -419,7 +419,7 @@
     "@opencode-ai/plugin": "latest",
     "@types/mocha": "^10.0.10",
     "@types/node": "22.x",
-    "@types/vscode": "^1.107.0",
+    "@types/vscode": "1.105.0",
     "@vitest/coverage-v8": "^4.0.18",
     "@vscode/test-cli": "^0.0.12",
     "@vscode/test-electron": "^2.5.2",
