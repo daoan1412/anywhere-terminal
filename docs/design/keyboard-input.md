@@ -331,6 +331,14 @@ sequenceDiagram
     MH->>XT: terminal.write(previousCommand)
 ```
 
+### Pointer Click-to-Cursor
+
+Plain primary click in the live terminal viewport is treated as a shell prompt convenience. The webview maps the click to a terminal cell, compares it with `terminal.buffer.active.cursorX/cursorY`, and sends relative left/right cursor movement data through `terminal.input()`. The resulting data follows the same `terminal.onData` → `postMessage({ type: 'input' })` → PTY path as normal keystrokes.
+
+The handler does not run for modified clicks, non-primary clicks, double-clicks, drag gestures, active text selection, or scrolled-back viewports. It also skips alternate buffer and any `terminal.modes.mouseTrackingMode` other than `none`, preserving mouse handling for fullscreen TUI applications and mouse-aware CLIs such as OpenCode or Claude Code UI states.
+
+This behavior is not arbitrary cursor teleportation inside terminal applications. It sends normal terminal input, so it is expected to work best with shell/readline-style prompts and to stay out of the way when an application owns mouse input.
+
 ---
 
 ## 7. VS Code Keybinding Conflicts

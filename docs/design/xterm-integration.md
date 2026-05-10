@@ -226,6 +226,7 @@ sequenceDiagram
     TF->>XT: terminal.onResize(size => postMessage)
     TF->>XT: attachCustomKeyEventHandler(createKeyEventHandler)
     TF->>XT: terminal.onData(data => postMessage)
+    TF->>XT: createClickCursorHandler(container, terminal)
     TF->>XT: terminal.onTitleChange(title => updateTabBar)
 
     TF->>TF: Initialize split layout (createLeaf)
@@ -248,6 +249,13 @@ Each terminal instance has these event handlers:
 | `terminal.onTitleChange` | `(title) => instance.name = title; updateTabBar()` | Update tab name from OSC title |
 | `ResizeObserver` | Debounced: `ResizeCoordinator.debouncedFit()` | Auto-resize on container change (100ms debounce) |
 | `customKeyEventHandler` | `createKeyEventHandler(deps)` factory | Clipboard intercept, keybinding filter. See keyboard-input.md |
+| `mousedown`/`mouseup` on container | `createClickCursorHandler(deps)` factory | Plain-click cursor movement for normal-buffer shell prompts. See keyboard-input.md |
+
+### Click-to-Cursor Handler
+
+Each terminal container installs `createClickCursorHandler()` after `terminal.open(container)`. The handler maps an unmodified primary click to a terminal cell using the container bounds and current `cols`/`rows`, then calls `terminal.input()` with relative cursor movement data. That data flows through the existing `terminal.onData` handler and extension `input` message, so no additional IPC contract is required.
+
+The handler is intentionally conservative. It only sends movement while the active buffer is `normal`, `mouseTrackingMode` is `none`, the viewport is at the live prompt (`viewportY === baseY`), no text is selected, and the pointer gesture is a simple click rather than drag or double-click. When a TUI or mouse-aware CLI switches to alternate buffer or enables mouse tracking, clicks are left to xterm.js and the application.
 
 ### Disposal
 
@@ -412,6 +420,7 @@ src/webview/resize/XtermFitService.ts   — Custom fitTerminal() using xterm _co
 src/webview/resize/ResizeCoordinator.ts — ResizeObserver, debounce, visibility, location inference
 src/webview/theme/ThemeManager.ts       — CSS variable → ITheme, MutationObserver theme watching
 src/webview/state/WebviewStateStore.ts  — Centralized mutable state (terminals, layouts, config)
+src/webview/ClickCursorHandler.ts       — Plain-click prompt cursor movement guards and sequences
 src/webview/messaging/MessageRouter.ts  — Typed dispatch table for ExtensionToWebViewMessage
 src/webview/flow/FlowControl.ts         — Per-session ack batching
 src/webview/InputHandler.ts             — createKeyEventHandler() factory

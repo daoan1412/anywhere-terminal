@@ -10,6 +10,7 @@ import { WebLinksAddon } from "@xterm/addon-web-links";
 import { WebglAddon } from "@xterm/addon-webgl";
 import { Terminal } from "@xterm/xterm";
 import type { TerminalConfig } from "../../types/messages";
+import { createClickCursorHandler } from "../ClickCursorHandler";
 import { type ClipboardProvider, createKeyEventHandler } from "../InputHandler";
 import { fitTerminal as fitTerminalCore } from "../resize/XtermFitService";
 import { createLeaf, getAllSessionIds } from "../SplitModel";
@@ -178,6 +179,12 @@ export class TerminalFactory {
 
     // Open terminal in container
     terminal.open(container);
+
+    createClickCursorHandler({
+      container,
+      terminal,
+      sendInput: (data: string) => terminal.input(data),
+    });
 
     // Try to enable WebGL renderer for better rendering on Retina displays
     if (!this.webglFailed) {
