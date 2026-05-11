@@ -1,8 +1,8 @@
 {
   "name": "anywhere-terminal",
   "displayName": "AnyWhere Terminal",
-  "description": "Break free from the bottom panel! Put your terminal anywhere: Primary Sidebar, Secondary Sidebar, or multiple panels at once.",
-  "version": "0.6.1",
+  "description": "Run a real terminal anywhere in VS Code or Cursor — Primary Sidebar, Secondary Sidebar, bottom Panel, or as an editor tab. With tabs, split panes, theming, and WebGL rendering.",
+  "version": "0.8.0",
   "publisher": "huybuidac",
   "license": "MIT",
   "icon": "media/icon.png",
@@ -16,11 +16,18 @@
   "homepage": "https://github.com/huybuidac/anywhere-terminal#readme",
   "keywords": [
     "terminal",
-    "sidebar",
-    "panel",
-    "anywhere",
     "xterm",
-    "secondary sidebar"
+    "sidebar",
+    "secondary sidebar",
+    "panel",
+    "editor terminal",
+    "split",
+    "tabs",
+    "shell",
+    "cursor",
+    "node-pty",
+    "webgl",
+    "anywhere"
   ],
   "engines": {
     "vscode": "^1.105.0"
@@ -406,11 +413,7 @@
     "test:unit:watch": "vitest watch",
     "test:unit:coverage": "vitest run --coverage",
     "vsix": "rm -f anywhere-terminal-*.vsix && vsce package --no-dependencies",
-    "deploy": "rm -f anywhere-terminal-*.vsix && vsce package --no-dependencies && vsce publish --packagePath anywhere-terminal-*.vsix && ovsx publish anywhere-terminal-*.vsix",
-    "deploy:vsce": "rm -f anywhere-terminal-*.vsix && vsce package --no-dependencies && vsce publish --packagePath anywhere-terminal-*.vsix",
-    "deploy:ovsx": "rm -f anywhere-terminal-*.vsix && vsce package --no-dependencies && ovsx publish anywhere-terminal-*.vsix",
-    "deploy:patch": "rm -f anywhere-terminal-*.vsix && npm version patch --no-git-tag-version && vsce package --no-dependencies && vsce publish --packagePath anywhere-terminal-*.vsix && ovsx publish anywhere-terminal-*.vsix",
-    "deploy:minor": "rm -f anywhere-terminal-*.vsix && npm version minor --no-git-tag-version && vsce package --no-dependencies && vsce publish --packagePath anywhere-terminal-*.vsix && ovsx publish anywhere-terminal-*.vsix",
+    "release": "bash scripts/release.sh",
     "asm": "bun run .agents/skills/asimov-core/scripts/asm.ts"
   },
   "devDependencies": {
