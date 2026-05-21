@@ -11,6 +11,7 @@ import { WebglAddon } from "@xterm/addon-webgl";
 import { Terminal } from "@xterm/xterm";
 import type { TerminalConfig } from "../../types/messages";
 import { type ClipboardProvider, createKeyEventHandler } from "../InputHandler";
+import { FilePathLinkProvider } from "../links/FilePathLinkProvider";
 import { fitTerminal as fitTerminalCore } from "../resize/XtermFitService";
 import { createLeaf, getAllSessionIds } from "../SplitModel";
 import type { TerminalInstance, WebviewStateStore } from "../state/WebviewStateStore";
@@ -175,6 +176,19 @@ export class TerminalFactory {
     });
     terminal.loadAddon(fitAddon);
     terminal.loadAddon(webLinksAddon);
+
+    // Register a custom link provider for file paths in terminal output.
+    // Underlines + cursor:pointer come from xterm's built-in link decorations;
+    // activation posts an `openFile` message that the extension host resolves
+    // against the PTY's initial cwd and any workspace folder.
+    terminal.registerLinkProvider(
+      new FilePathLinkProvider({
+        terminal,
+        sessionId: id,
+        postMessage: (msg) => this.postMessage(msg),
+        platform: navigator.platform.includes("Win") ? "win32" : "posix",
+      }),
+    );
 
     // Open terminal in container
     terminal.open(container);

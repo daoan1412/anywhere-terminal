@@ -11,6 +11,26 @@ export const Uri = {
   file: (path: string) => ({ fsPath: path }),
 };
 
+// ─── FileType ───────────────────────────────────────────────────────
+
+export const FileType = {
+  Unknown: 0,
+  File: 1,
+  Directory: 2,
+  SymbolicLink: 64,
+} as const;
+
+// ─── Range ──────────────────────────────────────────────────────────
+
+export class Range {
+  start: { line: number; character: number };
+  end: { line: number; character: number };
+  constructor(startLine: number, startChar: number, endLine: number, endChar: number) {
+    this.start = { line: startLine, character: startChar };
+    this.end = { line: endLine, character: endChar };
+  }
+}
+
 // ─── env ────────────────────────────────────────────────────────────
 
 export const env = {
@@ -48,6 +68,7 @@ export const workspace: {
   onDidChangeConfiguration: (handler: (e: { affectsConfiguration: (section: string) => boolean }) => void) => {
     dispose: () => void;
   };
+  fs: { stat: (uri: { fsPath: string }) => Promise<{ type: number; ctime: number; mtime: number; size: number }> };
 } = {
   workspaceFolders: undefined,
   getConfiguration: (section = "") => createMockConfiguration(section),
@@ -61,6 +82,9 @@ export const workspace: {
         }
       },
     };
+  },
+  fs: {
+    stat: async (_uri) => ({ type: 1, ctime: 0, mtime: 0, size: 0 }),
   },
 };
 
@@ -122,7 +146,9 @@ function createMockWebviewPanel(
 
 export const window = {
   showInformationMessage: () => {},
-  showErrorMessage: () => {},
+  showErrorMessage: (_msg?: string) => Promise.resolve(undefined),
+  showWarningMessage: (_msg?: string, ..._rest: unknown[]) => Promise.resolve(undefined),
+  showTextDocument: (_uri?: unknown, _opts?: unknown) => Promise.resolve({}),
   createWebviewPanel: createMockWebviewPanel,
   registerWebviewViewProvider: (_viewType: string, _provider: unknown, _options?: unknown) => ({
     dispose: () => {},

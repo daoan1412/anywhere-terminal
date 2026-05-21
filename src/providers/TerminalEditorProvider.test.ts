@@ -56,7 +56,12 @@ vi.mock("../session/OutputBuffer", () => {
   return { OutputBuffer: MockOutputBuffer };
 });
 
+vi.mock("./openFileLink", () => ({
+  openFileLink: vi.fn(async () => {}),
+}));
+
 import { SessionManager } from "../session/SessionManager";
+import { openFileLink } from "./openFileLink";
 import { TerminalEditorProvider } from "./TerminalEditorProvider";
 
 // ─── Test Setup ─────────────────────────────────────────────────────
@@ -221,6 +226,48 @@ describe("TerminalEditorProvider.createPanel", () => {
     // Clean up
     d1.dispose();
     d2.dispose();
+    sm.dispose();
+  });
+
+  it("forwards an openFile message to openFileLink with the expected deps shape", async () => {
+    const ctx = createMockContext();
+    const sm = new SessionManager();
+    const vscode = await import("vscode");
+    const createSpy = vi.spyOn(vscode.window, "createWebviewPanel");
+
+    TerminalEditorProvider.createPanel(ctx, sm);
+
+    const panel = createSpy.mock.results[0].value;
+    // Initialize session via ready
+    for (const handler of panel.__messageHandlers) {
+      handler({ type: "ready" });
+    }
+
+    (openFileLink as unknown as ReturnType<typeof vi.fn>).mockClear();
+
+    const openFileMsg = {
+      type: "openFile" as const,
+      path: "src/foo.ts",
+      sessionId: "sess-EDITOR",
+      line: 7,
+    };
+    for (const handler of panel.__messageHandlers) {
+      handler(openFileMsg);
+    }
+
+    expect(openFileLink).toHaveBeenCalledTimes(1);
+    const [msgArg, depsArg] = (openFileLink as unknown as ReturnType<typeof vi.fn>).mock.calls[0];
+    expect(msgArg).toEqual(openFileMsg);
+    expect(depsArg).toEqual(
+      expect.objectContaining({
+        getInitialCwd: expect.any(Function),
+        stat: expect.any(Function),
+        showWarning: expect.any(Function),
+        showError: expect.any(Function),
+        showTextDocument: expect.any(Function),
+      }),
+    );
+
     sm.dispose();
   });
 });

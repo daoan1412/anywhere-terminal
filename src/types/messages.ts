@@ -108,6 +108,19 @@ export interface OpenLinkMessage {
   url: string;
 }
 
+/** Request the extension host to open a file detected in terminal output. */
+export interface OpenFileMessage {
+  type: "openFile";
+  /** Raw matched path text without any line/column suffix */
+  path: string;
+  /** Source terminal session id (used to look up the PTY's initial cwd) */
+  sessionId: string;
+  /** Optional 1-based line number parsed from the suffix */
+  line?: number;
+  /** Optional 1-based column number parsed from the suffix */
+  col?: number;
+}
+
 /**
  * All messages that can be sent from the WebView to the Extension Host.
  * Use msg.type as the discriminant in switch/case for exhaustive handling.
@@ -124,7 +137,8 @@ export type WebViewToExtensionMessage =
   | RequestSplitSessionMessage
   | RequestCloseSplitPaneMessage
   | FocusMessage
-  | OpenLinkMessage;
+  | OpenLinkMessage
+  | OpenFileMessage;
 
 // ─── Extension → WebView Messages ───────────────────────────────────
 

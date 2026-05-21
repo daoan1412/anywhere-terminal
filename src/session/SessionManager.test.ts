@@ -236,6 +236,41 @@ describe("SessionManager: createSession", () => {
   });
 });
 
+// ─── getInitialCwd ──────────────────────────────────────────────────
+
+describe("SessionManager: getInitialCwd", () => {
+  it("returns the explicit cwd passed to createSession", () => {
+    const sm = new SessionManager();
+    const webview = createMockWebview();
+
+    const id = sm.createSession("anywhereTerminal.sidebar", webview, { cwd: "/explicit/path" });
+
+    expect(sm.getInitialCwd(id)).toBe("/explicit/path");
+
+    sm.dispose();
+  });
+
+  it("returns the resolved fallback when no cwd is passed", () => {
+    // PtyManager.resolveWorkingDirectory() is mocked to "/tmp"
+    const sm = new SessionManager();
+    const webview = createMockWebview();
+
+    const id = sm.createSession("anywhereTerminal.sidebar", webview);
+
+    expect(sm.getInitialCwd(id)).toBe("/tmp");
+
+    sm.dispose();
+  });
+
+  it("returns undefined for an unknown session id", () => {
+    const sm = new SessionManager();
+
+    expect(sm.getInitialCwd("does-not-exist")).toBeUndefined();
+
+    sm.dispose();
+  });
+});
+
 // ─── writeToSession ─────────────────────────────────────────────────
 
 describe("SessionManager: writeToSession", () => {

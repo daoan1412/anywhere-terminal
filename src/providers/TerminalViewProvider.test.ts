@@ -94,8 +94,13 @@ vi.mock("../session/OutputBuffer", () => {
   return { OutputBuffer: MockOutputBuffer };
 });
 
+vi.mock("./openFileLink", () => ({
+  openFileLink: vi.fn(async () => {}),
+}));
+
 import type * as vscode from "vscode";
 import { SessionManager } from "../session/SessionManager";
+import { openFileLink } from "./openFileLink";
 import { TerminalViewProvider } from "./TerminalViewProvider";
 
 // ─── Test Setup ─────────────────────────────────────────────────────
@@ -217,6 +222,72 @@ describe("TerminalViewProvider: getActiveSessionId", () => {
     // The second session should be active
     const activeId = provider.getActiveSessionId();
     expect(activeId).toBe(tabs[1].id);
+
+    sm.dispose();
+  });
+});
+
+// ─── openFile dispatch ─────────────────────────────────────────────
+
+describe("TerminalViewProvider: openFile dispatch", () => {
+  it("forwards an openFile message to openFileLink with the expected deps shape", () => {
+    const sm = new SessionManager();
+    const provider = new TerminalViewProvider({ fsPath: "/mock/extension" } as vscode.Uri, sm, "sidebar");
+
+    const { webviewView, messageHandlers } = createMockWebviewView();
+    provider.resolveWebviewView(webviewView, {} as vscode.WebviewViewResolveContext, {} as vscode.CancellationToken);
+
+    // Initialize a session via ready
+    for (const handler of messageHandlers) {
+      handler({ type: "ready" });
+    }
+
+    const openFileMsg = {
+      type: "openFile" as const,
+      path: "src/foo.ts",
+      sessionId: "sess-XYZ",
+      line: 42,
+      col: 7,
+    };
+
+    for (const handler of messageHandlers) {
+      handler(openFileMsg);
+    }
+
+    expect(openFileLink).toHaveBeenCalledTimes(1);
+    const [msgArg, depsArg] = (openFileLink as unknown as ReturnType<typeof vi.fn>).mock.calls[0];
+    expect(msgArg).toEqual(openFileMsg);
+    expect(depsArg).toEqual(
+      expect.objectContaining({
+        getInitialCwd: expect.any(Function),
+        stat: expect.any(Function),
+        showWarning: expect.any(Function),
+        showError: expect.any(Function),
+        showTextDocument: expect.any(Function),
+      }),
+    );
+
+    sm.dispose();
+  });
+
+  it("ignores openFile messages with non-string path or sessionId", () => {
+    const sm = new SessionManager();
+    const provider = new TerminalViewProvider({ fsPath: "/mock/extension" } as vscode.Uri, sm, "sidebar");
+
+    const { webviewView, messageHandlers } = createMockWebviewView();
+    provider.resolveWebviewView(webviewView, {} as vscode.WebviewViewResolveContext, {} as vscode.CancellationToken);
+    for (const handler of messageHandlers) {
+      handler({ type: "ready" });
+    }
+
+    (openFileLink as unknown as ReturnType<typeof vi.fn>).mockClear();
+
+    for (const handler of messageHandlers) {
+      handler({ type: "openFile", path: 123 as unknown, sessionId: "x" });
+      handler({ type: "openFile", path: "x", sessionId: 0 as unknown });
+    }
+
+    expect(openFileLink).not.toHaveBeenCalled();
 
     sm.dispose();
   });

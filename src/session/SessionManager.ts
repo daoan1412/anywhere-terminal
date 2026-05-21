@@ -46,6 +46,8 @@ export interface TerminalSession {
   webview: MessageSender;
   /** Whether this session is a split pane (not a root tab). Split pane sessions are excluded from getTabsForView(). */
   isSplitPane: boolean;
+  /** Resolved cwd passed to the PTY at spawn time; used for resolving relative file paths in terminal links. */
+  initialCwd?: string;
 }
 
 /** Aggregate memory usage snapshot across all sessions. */
@@ -168,6 +170,7 @@ export class SessionManager {
       disposables: [],
       webview,
       isSplitPane,
+      initialCwd: cwd,
     };
 
     // Deactivate other sessions in the same view (only for root tab sessions)
@@ -287,6 +290,14 @@ export class SessionManager {
    */
   getSession(sessionId: string): TerminalSession | undefined {
     return this.sessions.get(sessionId);
+  }
+
+  /**
+   * Return the resolved cwd recorded at PTY spawn time, or undefined when the
+   * session is unknown.
+   */
+  getInitialCwd(sessionId: string): string | undefined {
+    return this.sessions.get(sessionId)?.initialCwd;
   }
 
   /**

@@ -4,6 +4,7 @@ import type { SessionManager } from "../session/SessionManager";
 import { readTerminalConfig, readTerminalSettings } from "../settings/SettingsReader";
 import type { WebViewToExtensionMessage } from "../types/messages";
 import { openExternalLink } from "./openExternalLink";
+import { openFileLink } from "./openFileLink";
 import { getTerminalHtml } from "./webviewHtml";
 
 /**
@@ -197,6 +198,19 @@ export class TerminalEditorProvider {
         case "openLink":
           if (typeof message.url === "string") {
             void openExternalLink(message.url);
+          }
+          break;
+
+        case "openFile":
+          if (typeof message.path === "string" && typeof message.sessionId === "string") {
+            void openFileLink(message, {
+              getInitialCwd: (id) => this.sessionManager.getInitialCwd(id),
+              workspaceFolders: vscode.workspace.workspaceFolders,
+              stat: (uri) => vscode.workspace.fs.stat(uri),
+              showWarning: vscode.window.showWarningMessage,
+              showError: vscode.window.showErrorMessage,
+              showTextDocument: vscode.window.showTextDocument,
+            });
           }
           break;
 
