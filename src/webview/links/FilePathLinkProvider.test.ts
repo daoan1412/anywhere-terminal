@@ -5,7 +5,11 @@ import { describe, expect, it, vi } from "vitest";
 import type { WebViewToExtensionMessage } from "../../types/messages";
 import { FilePathLinkProvider } from "./FilePathLinkProvider";
 
-/** Build a Terminal stub whose buffer.active.getLine returns a single line. */
+/**
+ * Build a Terminal stub whose buffer.active.getLine returns a single line at
+ * 0-based index 0. Tests then call provideLinks(1, ...) to match xterm.js's
+ * 1-based bufferLineNumber convention; the provider subtracts 1 internally.
+ */
 function makeTerminalStub(line: string): Terminal {
   return {
     buffer: {
@@ -21,7 +25,7 @@ function makeTerminalStub(line: string): Terminal {
   } as unknown as Terminal;
 }
 
-function collect(provider: FilePathLinkProvider, lineNumber = 0): ILink[] | undefined {
+function collect(provider: FilePathLinkProvider, lineNumber = 1): ILink[] | undefined {
   let captured: ILink[] | undefined;
   provider.provideLinks(lineNumber, (links) => {
     captured = links;
@@ -63,7 +67,40 @@ describe("FilePathLinkProvider.provideLinks", () => {
       postMessage,
       platform: "posix",
     });
+    // bufferLineNumber=99 → getLine(98) → undefined (stub only returns line at 0).
     expect(collect(provider, 99)).toBeUndefined();
+  });
+
+  it("converts xterm's 1-based bufferLineNumber to 0-based for getLine, sets range.y to the original 1-based value", () => {
+    // Regression test for the off-by-one that caused both: (a) underline
+    // rendered on the wrong row, and (b) path parsed from the line below
+    // the one the user actually hovered (manifesting as "File not found").
+    const seen: number[] = [];
+    const terminal = {
+      buffer: {
+        active: {
+          getLine: (n: number) => {
+            seen.push(n);
+            // The "real" content is at row 5 (1-based) = index 4 (0-based).
+            if (n === 4) {
+              return { translateToString: (_trimRight?: boolean) => "edit src/util.ts:7" } as unknown;
+            }
+            return undefined;
+          },
+        },
+      },
+    } as unknown as Terminal;
+    const provider = new FilePathLinkProvider({
+      terminal,
+      sessionId: "sess-1",
+      postMessage: vi.fn(),
+      platform: "posix",
+    });
+    const links = collect(provider, 5);
+    expect(seen).toEqual([4]); // not 5 — provider subtracted 1
+    expect(links).toHaveLength(1);
+    expect(links![0].range.start.y).toBe(5);
+    expect(links![0].range.end.y).toBe(5);
   });
 
   it("returns one ILink for `src/foo.ts:42`", () => {
@@ -83,8 +120,9 @@ describe("FilePathLinkProvider.provideLinks", () => {
     expect(link.decorations!.underline).toBe(true);
     expect(link.decorations!.pointerCursor).toBe(true);
     // index of "src/foo.ts:42" in "at src/foo.ts:42 fail" = 3; 1-based start = 4; end inclusive = 4 + 13 - 1 = 16.
-    expect(link.range.start).toEqual({ x: 4, y: 0 });
-    expect(link.range.end).toEqual({ x: 16, y: 0 });
+    // y === bufferLineNumber (1-based) — collect() called provideLinks(1, ...).
+    expect(link.range.start).toEqual({ x: 4, y: 1 });
+    expect(link.range.end).toEqual({ x: 16, y: 1 });
   });
 
   it("activate posts openFile message with parsed path, line, and sessionId", () => {

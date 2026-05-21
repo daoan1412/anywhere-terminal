@@ -32,6 +32,7 @@ vi.mock("../pty/PtySession", () => {
     kill = vi.fn();
     pause = vi.fn();
     resume = vi.fn();
+    setCurrentCwdSink = vi.fn();
     onData: ((data: string) => void) | null = null;
     onExit: ((code: number) => void) | null = null;
     constructor(id: string) {
@@ -261,10 +262,14 @@ describe("TerminalEditorProvider.createPanel", () => {
     expect(depsArg).toEqual(
       expect.objectContaining({
         getInitialCwd: expect.any(Function),
+        getCurrentCwd: expect.any(Function),
+        getLiveCwd: expect.any(Function),
         stat: expect.any(Function),
+        findFiles: expect.any(Function),
         showWarning: expect.any(Function),
         showError: expect.any(Function),
         showTextDocument: expect.any(Function),
+        showQuickPick: expect.any(Function),
       }),
     );
 

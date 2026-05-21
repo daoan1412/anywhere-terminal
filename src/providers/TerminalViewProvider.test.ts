@@ -38,6 +38,7 @@ vi.mock("../pty/PtySession", () => {
     kill = vi.fn();
     pause = vi.fn();
     resume = vi.fn();
+    setCurrentCwdSink = vi.fn();
     private _onDataCallback: ((data: string) => void) | undefined;
     private _onExitCallback: ((code: number) => void) | undefined;
 
@@ -260,10 +261,14 @@ describe("TerminalViewProvider: openFile dispatch", () => {
     expect(depsArg).toEqual(
       expect.objectContaining({
         getInitialCwd: expect.any(Function),
+        getCurrentCwd: expect.any(Function),
+        getLiveCwd: expect.any(Function),
         stat: expect.any(Function),
+        findFiles: expect.any(Function),
         showWarning: expect.any(Function),
         showError: expect.any(Function),
         showTextDocument: expect.any(Function),
+        showQuickPick: expect.any(Function),
       }),
     );
 

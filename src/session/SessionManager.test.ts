@@ -14,9 +14,15 @@ const mockPtySessions: Array<{
   write: ReturnType<typeof vi.fn>;
   resize: ReturnType<typeof vi.fn>;
   kill: ReturnType<typeof vi.fn>;
+  setCurrentCwdSink: ReturnType<typeof vi.fn>;
+  cwdSink: ((cwd: string) => void) | undefined;
   onData: ((data: string) => void) | undefined;
   onExit: ((code: number) => void) | undefined;
 }> = [];
+
+vi.mock("../pty/processCwd", () => ({
+  queryProcessCwd: vi.fn(async (_pid: number) => undefined as string | undefined),
+}));
 
 vi.mock("../pty/PtyManager", () => ({
   loadNodePty: vi.fn(() => ({
@@ -39,12 +45,19 @@ vi.mock("../pty/PtyManager", () => ({
 vi.mock("../pty/PtySession", () => {
   class MockPtySession {
     id: string;
+    pid = 99000; // stable fake pid for getLiveCwd tests
     spawn = vi.fn();
     write = vi.fn();
     resize = vi.fn();
     kill = vi.fn();
     pause = vi.fn();
     resume = vi.fn();
+    setCurrentCwdSink = vi.fn((fn: ((cwd: string) => void) | undefined) => {
+      const tracked = mockPtySessions.find((p) => p.id === this.id);
+      if (tracked) {
+        tracked.cwdSink = fn;
+      }
+    });
     private _onDataCallback: ((data: string) => void) | undefined;
     private _onExitCallback: ((code: number) => void) | undefined;
 
@@ -79,6 +92,8 @@ vi.mock("../pty/PtySession", () => {
         write: this.write,
         resize: this.resize,
         kill: this.kill,
+        setCurrentCwdSink: this.setCurrentCwdSink,
+        cwdSink: undefined,
         onData: undefined,
         onExit: undefined,
       });
@@ -266,6 +281,113 @@ describe("SessionManager: getInitialCwd", () => {
     const sm = new SessionManager();
 
     expect(sm.getInitialCwd("does-not-exist")).toBeUndefined();
+
+    sm.dispose();
+  });
+});
+
+// ─── getCurrentCwd / setCurrentCwd ──────────────────────────────────
+
+describe("SessionManager: getCurrentCwd", () => {
+  it("returns undefined when never set", () => {
+    const sm = new SessionManager();
+    const webview = createMockWebview();
+
+    const id = sm.createSession("sidebar", webview);
+
+    expect(sm.getCurrentCwd(id)).toBeUndefined();
+
+    sm.dispose();
+  });
+
+  it("returns the value after setCurrentCwd", () => {
+    const sm = new SessionManager();
+    const webview = createMockWebview();
+
+    const id = sm.createSession("sidebar", webview);
+    sm.setCurrentCwd(id, "/some/path");
+
+    expect(sm.getCurrentCwd(id)).toBe("/some/path");
+
+    sm.dispose();
+  });
+
+  it("returns the latest value after multiple sets", () => {
+    const sm = new SessionManager();
+    const webview = createMockWebview();
+
+    const id = sm.createSession("sidebar", webview);
+    sm.setCurrentCwd(id, "/first");
+    sm.setCurrentCwd(id, "/second");
+    sm.setCurrentCwd(id, "/third");
+
+    expect(sm.getCurrentCwd(id)).toBe("/third");
+
+    sm.dispose();
+  });
+
+  it("returns undefined for an unknown sessionId", () => {
+    const sm = new SessionManager();
+
+    expect(sm.getCurrentCwd("does-not-exist")).toBeUndefined();
+
+    sm.dispose();
+  });
+
+  it("setCurrentCwd silently no-ops for an unknown sessionId", () => {
+    const sm = new SessionManager();
+
+    expect(() => sm.setCurrentCwd("does-not-exist", "/x")).not.toThrow();
+    expect(sm.getCurrentCwd("does-not-exist")).toBeUndefined();
+
+    sm.dispose();
+  });
+
+  it("getLiveCwd returns undefined for an unknown session", async () => {
+    const sm = new SessionManager();
+    expect(await sm.getLiveCwd("does-not-exist")).toBeUndefined();
+    sm.dispose();
+  });
+
+  it("getLiveCwd calls queryProcessCwd with the session's pty pid and returns the result", async () => {
+    const { queryProcessCwd } = await import("../pty/processCwd.js");
+    (queryProcessCwd as ReturnType<typeof vi.fn>).mockResolvedValueOnce("/live/cwd");
+    const sm = new SessionManager();
+    const webview = createMockWebview();
+    const id = sm.createSession("sidebar", webview);
+    const result = await sm.getLiveCwd(id);
+    expect(result).toBe("/live/cwd");
+    expect(queryProcessCwd).toHaveBeenCalledWith(99000);
+    sm.dispose();
+  });
+
+  it("getLiveCwd returns undefined when queryProcessCwd resolves undefined (process gone)", async () => {
+    const { queryProcessCwd } = await import("../pty/processCwd.js");
+    (queryProcessCwd as ReturnType<typeof vi.fn>).mockResolvedValueOnce(undefined);
+    const sm = new SessionManager();
+    const webview = createMockWebview();
+    const id = sm.createSession("sidebar", webview);
+    expect(await sm.getLiveCwd(id)).toBeUndefined();
+    sm.dispose();
+  });
+
+  it("registers a sink with PtySession that routes parsed cwds back via setCurrentCwd", () => {
+    const sm = new SessionManager();
+    const webview = createMockWebview();
+
+    const id = sm.createSession("sidebar", webview);
+    const tracked = mockPtySessions.find((p) => p.id === id);
+    expect(tracked).toBeDefined();
+    expect(tracked!.setCurrentCwdSink).toHaveBeenCalledTimes(1);
+    expect(tracked!.cwdSink).toBeDefined();
+
+    // Simulate the parser firing — should land in the session's currentCwd.
+    tracked!.cwdSink!("/tmp/foo");
+    expect(sm.getCurrentCwd(id)).toBe("/tmp/foo");
+
+    // Subsequent emits replace the previous value.
+    tracked!.cwdSink!("/tmp/bar");
+    expect(sm.getCurrentCwd(id)).toBe("/tmp/bar");
 
     sm.dispose();
   });

@@ -39,6 +39,12 @@ function looksLikeFile(p: string): boolean {
   if (p.length === 0) {
     return false;
   }
+  // Trailing path separator → directory indicator (e.g. `src/providers/`).
+  // Files don't end in a slash; refusing to highlight these saves the user
+  // from clicking and getting a "File not found" toast they can't act on.
+  if (/[/\\]$/.test(p)) {
+    return false;
+  }
   if (/[/\\]/.test(p)) {
     return true;
   }

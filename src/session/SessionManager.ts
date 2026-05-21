@@ -4,6 +4,7 @@
 import * as crypto from "node:crypto";
 import * as PtyManager from "../pty/PtyManager";
 import { PtySession } from "../pty/PtySession";
+import { queryProcessCwd } from "../pty/processCwd";
 import type { MessageSender } from "./OutputBuffer";
 import { OutputBuffer } from "./OutputBuffer";
 
@@ -48,6 +49,8 @@ export interface TerminalSession {
   isSplitPane: boolean;
   /** Resolved cwd passed to the PTY at spawn time; used for resolving relative file paths in terminal links. */
   initialCwd?: string;
+  /** Latest cwd observed from PTY OSC 7 / OSC 633 reports; undefined until the first parse. */
+  currentCwd?: string;
 }
 
 /** Aggregate memory usage snapshot across all sessions. */
@@ -149,6 +152,9 @@ export class SessionManager {
     // Spawn PTY
     const pty = new PtySession(id);
     pty.spawn(nodePty, resolvedShell, resolvedArgs, { cwd, env });
+    // Wire passive OSC 7 / OSC 633 cwd parser. Sink receives sanitized absolute
+    // paths only; PtySession guarantees byte-identical forwarding to onData.
+    pty.setCurrentCwdSink((cwd) => this.setCurrentCwd(id, cwd));
 
     // Create OutputBuffer
     const outputBuffer = new OutputBuffer(id, webview, pty);
@@ -298,6 +304,47 @@ export class SessionManager {
    */
   getInitialCwd(sessionId: string): string | undefined {
     return this.sessions.get(sessionId)?.initialCwd;
+  }
+
+  /**
+   * Record the latest cwd parsed from PTY output. Silent no-op for unknown ids.
+   * No validation — the parser is responsible for sanitization.
+   */
+  setCurrentCwd(sessionId: string, cwd: string): void {
+    const session = this.sessions.get(sessionId);
+    if (!session) {
+      return;
+    }
+    session.currentCwd = cwd;
+  }
+
+  /**
+   * Return the latest cwd parsed from PTY output, or undefined when never set
+   * or the session is unknown.
+   */
+  getCurrentCwd(sessionId: string): string | undefined {
+    return this.sessions.get(sessionId)?.currentCwd;
+  }
+
+  /**
+   * Asynchronously query the PTY child process's current cwd via the OS
+   * process table (`/proc/<pid>/cwd` on Linux, `lsof` on macOS). Returns
+   * undefined when the session is unknown, the PTY has no pid, the OS query
+   * fails, or the platform is unsupported (Windows).
+   *
+   * Lazy: only invoke when a clicked file path actually needs resolution.
+   * Bounded latency: macOS lsof is capped at 500ms by queryProcessCwd.
+   */
+  async getLiveCwd(sessionId: string): Promise<string | undefined> {
+    const session = this.sessions.get(sessionId);
+    if (!session) {
+      return undefined;
+    }
+    const pid = session.pty.pid;
+    if (pid === undefined) {
+      return undefined;
+    }
+    return queryProcessCwd(pid);
   }
 
   /**

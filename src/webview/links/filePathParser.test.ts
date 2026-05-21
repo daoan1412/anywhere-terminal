@@ -133,6 +133,26 @@ describe("detectFilePathLinks: ignores prose & numbers", () => {
     const r = detectFilePathLinks("v1.2.3", "posix");
     expect(r).toEqual([]);
   });
+
+  it("does not match paths with trailing slash (directory indicator)", () => {
+    // Folder paths like `external-research/` or `src/providers/` would
+    // resolve to directories — opening them as files is misleading. The
+    // parser refuses to emit a candidate so no underline is drawn.
+    expect(detectFilePathLinks("see external-research/", "posix")).toEqual([]);
+    expect(detectFilePathLinks("cd src/providers/", "posix")).toEqual([]);
+    expect(detectFilePathLinks("nested foo/bar/baz/", "posix")).toEqual([]);
+  });
+
+  it("does not match Windows-style trailing backslash directories", () => {
+    expect(detectFilePathLinks("see src\\providers\\", "win32")).toEqual([]);
+  });
+
+  it("rejects file-shaped paths with trailing slash (e.g. `foo.ts/`)", () => {
+    // A trailing slash on a file-looking name still means "directory" by
+    // convention (e.g. a typo or rsync-style explicit dir). Refuse to highlight.
+    expect(detectFilePathLinks("see foo.ts/", "posix")).toEqual([]);
+    expect(detectFilePathLinks("at src/util.ts/", "posix")).toEqual([]);
+  });
 });
 
 describe("detectFilePathLinks: boundary punctuation", () => {

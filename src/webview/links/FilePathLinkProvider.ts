@@ -38,7 +38,12 @@ export class FilePathLinkProvider implements ILinkProvider {
   }
 
   provideLinks(bufferLineNumber: number, callback: (links: ILink[] | undefined) => void): void {
-    const line = this.terminal.buffer.active.getLine(bufferLineNumber);
+    // xterm.js convention: provideLinks receives a 1-based row number, but
+    // IBuffer.getLine() expects a 0-based index. Without the offset we read
+    // the line BELOW the one the user is hovering — the underline ends up
+    // on the wrong row AND the activated path comes from a different line
+    // (manifesting as both "highlight off by one" and "File not found").
+    const line = this.terminal.buffer.active.getLine(bufferLineNumber - 1);
     if (!line) {
       callback(undefined);
       return;

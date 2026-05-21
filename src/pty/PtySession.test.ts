@@ -424,3 +424,109 @@ describe("PtySession callbacks", () => {
     expect(session.isAlive).toBe(false);
   });
 });
+
+// ─── OSC cwd sink + pass-through ────────────────────────────────────
+
+describe("PtySession.setCurrentCwdSink", () => {
+  it("invokes the sink with decoded cwd when an OSC 7 sequence arrives", () => {
+    const session = new PtySession("osc-1");
+    const { mockModule, getControls } = createMockNodePty();
+    const cwds: string[] = [];
+    session.setCurrentCwdSink((cwd) => cwds.push(cwd));
+    session.spawn(mockModule, "/bin/zsh", [], {});
+
+    getControls().emitData("\x1b]7;file:///home/me/proj\x07");
+
+    expect(cwds).toEqual(["/home/me/proj"]);
+  });
+
+  it("invokes the sink with raw path for OSC 633 P;Cwd=", () => {
+    const session = new PtySession("osc-2");
+    const { mockModule, getControls } = createMockNodePty();
+    const cwds: string[] = [];
+    session.setCurrentCwdSink((cwd) => cwds.push(cwd));
+    session.spawn(mockModule, "/bin/zsh", [], {});
+
+    getControls().emitData("\x1b]633;P;Cwd=/srv/app\x1b\\");
+
+    expect(cwds).toEqual(["/srv/app"]);
+  });
+
+  it("forwards the original chunk to onData unchanged when an OSC is present", () => {
+    const session = new PtySession("osc-3");
+    const { mockModule, getControls } = createMockNodePty();
+    const received: string[] = [];
+    session.onData = (data) => received.push(data);
+    session.setCurrentCwdSink(() => {});
+    session.spawn(mockModule, "/bin/zsh", [], {});
+
+    const chunk = "before \x1b]7;file:///x\x07after";
+    getControls().emitData(chunk);
+
+    expect(received).toEqual([chunk]);
+  });
+
+  it("forwards arbitrary binary chunks byte-identically when no OSC is present", () => {
+    const session = new PtySession("osc-4");
+    const { mockModule, getControls } = createMockNodePty();
+    const received: string[] = [];
+    session.onData = (data) => received.push(data);
+    session.setCurrentCwdSink(() => {});
+    session.spawn(mockModule, "/bin/zsh", [], {});
+
+    const chunks = ["plain", "\x1b[31mcolor\x1b[0m", "\x00\xff\x07bel", "no osc here"];
+    for (const c of chunks) {
+      getControls().emitData(c);
+    }
+
+    expect(received).toEqual(chunks);
+  });
+
+  it("forwards even when no sink is registered (observer is optional)", () => {
+    const session = new PtySession("osc-5");
+    const { mockModule, getControls } = createMockNodePty();
+    const received: string[] = [];
+    session.onData = (data) => received.push(data);
+    // Intentionally do NOT call setCurrentCwdSink.
+    session.spawn(mockModule, "/bin/zsh", [], {});
+
+    getControls().emitData("\x1b]7;file:///not-tracked\x07hello");
+
+    expect(received).toEqual(["\x1b]7;file:///not-tracked\x07hello"]);
+  });
+
+  it("isolates a throwing sink so the user onData callback still receives the chunk byte-identically", () => {
+    const session = new PtySession("osc-throw");
+    const { mockModule, getControls } = createMockNodePty();
+    const received: string[] = [];
+    session.onData = (data) => received.push(data);
+    session.setCurrentCwdSink(() => {
+      throw new Error("sink boom");
+    });
+    // Spy on console.error to suppress noise + assert the error was logged.
+    const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    session.spawn(mockModule, "/bin/zsh", [], {});
+
+    const chunk = "before \x1b]7;file:///x\x07after";
+    getControls().emitData(chunk);
+
+    // Pass-through invariant: onData received the original chunk.
+    expect(received).toEqual([chunk]);
+    // Error was logged once with a useful prefix.
+    expect(errSpy).toHaveBeenCalledWith(expect.stringContaining("OSC parser/sink threw"), expect.any(Error));
+    errSpy.mockRestore();
+  });
+
+  it("accepts split-chunk OSC sequences via the parser's pending buffer", () => {
+    const session = new PtySession("osc-6");
+    const { mockModule, getControls } = createMockNodePty();
+    const cwds: string[] = [];
+    session.setCurrentCwdSink((cwd) => cwds.push(cwd));
+    session.spawn(mockModule, "/bin/zsh", [], {});
+
+    getControls().emitData("\x1b]7;file://");
+    getControls().emitData("/split/path\x07");
+
+    expect(cwds).toEqual(["/split/path"]);
+  });
+});

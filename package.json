@@ -72,6 +72,13 @@
           "default": 10000,
           "description": "Maximum number of lines in the scrollback buffer."
         },
+        "anywhereTerminal.fileSearch.maxResults": {
+          "type": "number",
+          "default": 50,
+          "minimum": 1,
+          "maximum": 1000,
+          "description": "Maximum number of files returned by the workspace-wide search fallback when clicking a path. The QuickPick disambiguation UI degrades past ~50 — bump higher if you regularly see truncated lists. Expert-only: values above ~200 with no workspace open and a deep cwd can stress the file search; the 2-second timeout will cancel it but you may see brief stalls."
+        },
         "anywhereTerminal.fontSize": {
           "type": "number",
           "default": 0,

@@ -4,7 +4,7 @@ import type { SessionManager } from "../session/SessionManager";
 import { readTerminalConfig, readTerminalSettings } from "../settings/SettingsReader";
 import type { WebViewToExtensionMessage } from "../types/messages";
 import { openExternalLink } from "./openExternalLink";
-import { openFileLink } from "./openFileLink";
+import { DEFAULT_FIND_FILES_MAX_RESULTS, openFileLink } from "./openFileLink";
 import { getTerminalHtml } from "./webviewHtml";
 
 /**
@@ -205,11 +205,20 @@ export class TerminalEditorProvider {
           if (typeof message.path === "string" && typeof message.sessionId === "string") {
             void openFileLink(message, {
               getInitialCwd: (id) => this.sessionManager.getInitialCwd(id),
+              getCurrentCwd: (id) => this.sessionManager.getCurrentCwd(id),
+              getLiveCwd: (id) => this.sessionManager.getLiveCwd(id),
               workspaceFolders: vscode.workspace.workspaceFolders,
               stat: (uri) => vscode.workspace.fs.stat(uri),
+              findFiles: (include, exclude, maxResults, token) =>
+                vscode.workspace.findFiles(include, exclude, maxResults, token),
               showWarning: vscode.window.showWarningMessage,
               showError: vscode.window.showErrorMessage,
               showTextDocument: vscode.window.showTextDocument,
+              showQuickPick: vscode.window.showQuickPick,
+              getFileSearchMaxResults: () =>
+                vscode.workspace
+                  .getConfiguration("anywhereTerminal.fileSearch")
+                  .get<number>("maxResults", DEFAULT_FIND_FILES_MAX_RESULTS),
             });
           }
           break;
