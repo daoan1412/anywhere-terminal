@@ -11,6 +11,8 @@
 import * as path from "node:path";
 import * as vscode from "vscode";
 import type { OpenFileMessage } from "../types/messages";
+import { expandTildeAndFileUri } from "./pathPreprocess";
+import { resolveCwdRelative } from "./resolveCwdRelative";
 
 /** Dependencies for openFileLink — injectable for unit tests. */
 export interface OpenFileLinkDeps {
@@ -138,6 +140,35 @@ function hasTraversal(p: string): boolean {
 }
 
 /**
+ * True when `absPath` ends with `clickedPath` at a separator boundary.
+ *
+ * Used by the basename fallback to filter workspace-wide `**\/<basename>`
+ * matches down to those whose trailing segments equal the clicked text.
+ * Example: clicked `a/file.md` matches `/x/y/a/file.md` (boundary anchored at
+ * the separator before `a`) but NOT `/x/y/za/file.md` (no separator before `a`).
+ *
+ * Separator differences (POSIX `/` vs Windows `\`) are normalized; comparison
+ * is case-insensitive on Windows. Exposed as a free function so tests can
+ * exercise it directly without going through `openFileLink`.
+ */
+export function endsWithPath(
+  absPath: string,
+  clickedPath: string,
+  platform: NodeJS.Platform = process.platform,
+): boolean {
+  if (platform === "win32") {
+    const norm = (p: string) => p.replace(/[\\/]+/g, "\\").toLowerCase();
+    const a = norm(absPath);
+    const c = norm(clickedPath);
+    return a === c || a.endsWith(`\\${c}`);
+  }
+  const norm = (p: string) => p.replace(/\/+/g, "/");
+  const a = norm(absPath);
+  const c = norm(clickedPath);
+  return a === c || a.endsWith(`/${c}`);
+}
+
+/**
  * Compute a workspace-relative path for a quickPick label. Returns
  * `<folder-name>/<rel>` when multi-root (to disambiguate between folders),
  * `<rel>` when single-root, and the absolute path as-is if the match
@@ -157,40 +188,81 @@ function workspaceRelative(fsPath: string, folders: readonly { uri: { fsPath: st
   return fsPath;
 }
 
-/** Build the ordered list of candidate absolute paths to try, deduplicated. */
-function buildCandidates(msg: OpenFileMessage, deps: OpenFileLinkDeps, liveCwd: string | undefined): string[] {
-  const candidates: string[] = [];
+/**
+ * Build the ordered, deduplicated list of candidate absolute paths to try.
+ *
+ * After `expandTildeAndFileUri` normalizes `~` and `file://` URIs, the
+ * function branches on absoluteness:
+ *
+ * - `passthrough-malformed` (broken `file://`) → `[]`, resolver short-circuits.
+ * - Absolute → single candidate. **This short-circuit fixes a latent bug**
+ *   in the previous implementation where `path.join(cwd, absolutePath)`
+ *   produced bogus concatenations (`/cwd/Users/...`) because Node `path.join`
+ *   strips the leading separator instead of treating the second arg as root.
+ * - Relative → each cwd source (liveCwd, currentCwd, initialCwd, every
+ *   workspaceFolder) fans out via `resolveCwdRelative` so a click on
+ *   `a/file.md` while the terminal is in `/x/y/a` tries BOTH `/x/y/a/a/file.md`
+ *   AND `/x/y/a/file.md`.
+ *
+ * Returns the per-source candidate count alongside the deduped list so the
+ * trace logger can surface fan-out behaviour for diagnostics.
+ */
+function buildCandidates(
+  msg: OpenFileMessage,
+  deps: OpenFileLinkDeps,
+  liveCwd: string | undefined,
+): {
+  candidates: string[];
+  transformedPath: string;
+  sourceCounts: Record<string, number>;
+  malformed: boolean;
+} {
+  const { path: transformed, kind } = expandTildeAndFileUri(msg.path);
+  if (kind === "passthrough-malformed") {
+    return {
+      candidates: [],
+      transformedPath: transformed,
+      sourceCounts: { malformed: 1 },
+      malformed: true,
+    };
+  }
+  if (isAbsolutePath(transformed)) {
+    return {
+      candidates: [path.resolve(transformed)],
+      transformedPath: transformed,
+      sourceCounts: { absolute: 1 },
+      malformed: false,
+    };
+  }
+  const sources: Array<[string, string | undefined]> = [
+    ["liveCwd", liveCwd],
+    ["currentCwd", deps.getCurrentCwd(msg.sessionId)],
+    ["initialCwd", deps.getInitialCwd(msg.sessionId)],
+  ];
+  for (const [i, folder] of (deps.workspaceFolders ?? []).entries()) {
+    sources.push([`ws[${i}]`, folder.uri.fsPath]);
+  }
   const seen = new Set<string>();
-  const push = (p: string) => {
-    const normalized = path.resolve(p);
-    if (!seen.has(normalized)) {
-      seen.add(normalized);
-      candidates.push(normalized);
+  const candidates: string[] = [];
+  const sourceCounts: Record<string, number> = {};
+  for (const [label, cwd] of sources) {
+    if (!cwd) {
+      continue;
     }
-  };
-
-  if (isAbsolutePath(msg.path)) {
-    push(msg.path);
+    let added = 0;
+    for (const c of resolveCwdRelative(cwd, transformed)) {
+      const normalized = path.resolve(c);
+      if (!seen.has(normalized)) {
+        seen.add(normalized);
+        candidates.push(normalized);
+        added++;
+      }
+    }
+    if (added > 0) {
+      sourceCounts[label] = added;
+    }
   }
-  // Step 2: live cwd from OS process table (authoritative for local sessions).
-  if (liveCwd) {
-    push(path.join(liveCwd, msg.path));
-  }
-  // Step 3: cwd reported via OSC 7 / 633 (covers SSH + shells that emit).
-  const current = deps.getCurrentCwd(msg.sessionId);
-  if (current) {
-    push(path.join(current, msg.path));
-  }
-  // Step 4: PTY's initial cwd (immutable, set at spawn).
-  const cwd = deps.getInitialCwd(msg.sessionId);
-  if (cwd) {
-    push(path.join(cwd, msg.path));
-  }
-  // Step 5: workspace folders.
-  for (const folder of deps.workspaceFolders ?? []) {
-    push(path.join(folder.uri.fsPath, msg.path));
-  }
-  return candidates;
+  return { candidates, transformedPath: transformed, sourceCounts, malformed: false };
 }
 
 /** Compare two normalized paths with platform-appropriate case sensitivity. */
@@ -251,16 +323,18 @@ export async function openFileLink(msg: OpenFileMessage, deps: OpenFileLinkDeps)
     liveCwd = undefined;
   }
 
-  const candidates = buildCandidates(msg, deps, liveCwd);
+  const { candidates, transformedPath, sourceCounts, malformed } = buildCandidates(msg, deps, liveCwd);
   // Per-attempt diagnostics — surfaced via console.warn on failure so a user
   // who hits "File not found" can paste the log from DevTools and we can see
   // exactly which step failed. No PII beyond the paths the user clicked on.
   const trace: string[] = [
     `msg.path=${JSON.stringify(msg.path)} sessionId=${msg.sessionId}`,
+    `transformed=${JSON.stringify(transformedPath)}`,
     `liveCwd=${liveCwd ?? "(unset)"}`,
     `currentCwd=${deps.getCurrentCwd(msg.sessionId) ?? "(unset)"}`,
     `initialCwd=${deps.getInitialCwd(msg.sessionId) ?? "(unset)"}`,
     `workspaceFolders=${JSON.stringify(deps.workspaceFolders?.map((f) => f.uri.fsPath) ?? [])}`,
+    `candidates-by-source=${JSON.stringify(sourceCounts)}`,
   ];
 
   let resolvedFsPath: string | undefined;
@@ -275,7 +349,11 @@ export async function openFileLink(msg: OpenFileMessage, deps: OpenFileLinkDeps)
     try {
       const fileStat = await deps.stat(uri);
       // Skip directories — fall through to next candidate.
-      if (fileStat.type === vscode.FileType.Directory) {
+      // Use the Directory BIT MASK rather than strict equality so a
+      // symlink-to-directory (`type === FileType.Directory | FileType.SymbolicLink`)
+      // is also treated as a directory. Strict equality previously slipped
+      // through as a file and `showTextDocument` would error on the directory.
+      if ((fileStat.type & vscode.FileType.Directory) !== 0) {
         sawDirectory = true;
         trace.push(`stat(${candidate}) → directory, skip`);
         continue;
@@ -326,7 +404,13 @@ export async function openFileLink(msg: OpenFileMessage, deps: OpenFileLinkDeps)
   let searchPattern: vscode.GlobPattern | undefined;
   const hasWorkspace = (deps.workspaceFolders?.length ?? 0) > 0;
   const escapedGlob = `**/${escapeGlob(msg.path)}`;
-  if (resolvedFsPath === undefined && !isAbsolutePath(msg.path) && !hasTraversal(msg.path)) {
+  // Skip findFiles when:
+  // - msg.path is absolute (the absolute candidate already ran in the stat loop)
+  // - msg.path contains `..` (defense in depth against escape patterns)
+  // - buildCandidates flagged `malformed` (e.g. broken `file://` URI) — without
+  //   this guard we would have sent a bogus glob like `**/file:[/][/]garbage`
+  //   to `vscode.workspace.findFiles`, which is wasted work and a noisy log.
+  if (resolvedFsPath === undefined && !isAbsolutePath(msg.path) && !hasTraversal(msg.path) && !malformed) {
     if (hasWorkspace) {
       searchPattern = escapedGlob;
     } else {
@@ -341,10 +425,10 @@ export async function openFileLink(msg: OpenFileMessage, deps: OpenFileLinkDeps)
   }
 
   if (searchPattern !== undefined) {
-    const patternForLog =
-      typeof searchPattern === "string"
-        ? searchPattern
-        : `RelativePattern(${(searchPattern as vscode.RelativePattern).baseUri.fsPath}, ${(searchPattern as vscode.RelativePattern).pattern})`;
+    const patternForLog = (sp: vscode.GlobPattern) =>
+      typeof sp === "string"
+        ? sp
+        : `RelativePattern(${(sp as vscode.RelativePattern).baseUri.fsPath}, ${(sp as vscode.RelativePattern).pattern})`;
     // Resolve max-results: deps override → fall back to default. Clamp to
     // [1, ceiling] so a misconfigured setting (negative, NaN, huge) can't
     // freeze the click handler chasing 100k results before timeout. The
@@ -366,13 +450,42 @@ export async function openFileLink(msg: OpenFileMessage, deps: OpenFileLinkDeps)
     // enumerating after we've already surfaced "File not found" to the
     // user — wasting CPU and potentially blocking the extension host.
     const cancelSource = new vscode.CancellationTokenSource();
-    try {
-      const matches = await withTimeout(
-        deps.findFiles(searchPattern, FIND_FILES_EXCLUDE, maxResults, cancelSource.token),
-        FIND_FILES_TIMEOUT_MS,
-        () => cancelSource.cancel(),
+    // Two-stage findFiles wrapped in ONE shared `withTimeout`: the basename
+    // fallback (call 2) doesn't get a fresh 2s budget — it shares whatever
+    // remains of the original. If the full-path search consumes most of
+    // 2s, the basename call is cancelled by the same cancelSource. Design
+    // D6 prohibits the split-budget interpretation.
+    const pathHasSep = msg.path.includes("/") || msg.path.includes("\\");
+    // Reuse the original RelativePattern's base for the basename glob —
+    // without this the basename pattern would default to all open workspace
+    // folders, which is wrong when we entered the branch via the no-workspace
+    // + cwd-anchored case.
+    const baseUriForBasename =
+      typeof searchPattern === "string" ? undefined : (searchPattern as vscode.RelativePattern).baseUri;
+    const buildBasenamePattern = (): vscode.GlobPattern => {
+      const basenameGlob = `**/${escapeGlob(path.basename(msg.path))}`;
+      return baseUriForBasename ? new vscode.RelativePattern(baseUriForBasename, basenameGlob) : basenameGlob;
+    };
+    const runSearch = async (): Promise<vscode.Uri[]> => {
+      const firstPattern = searchPattern as vscode.GlobPattern;
+      const first = await deps.findFiles(firstPattern, FIND_FILES_EXCLUDE, maxResults, cancelSource.token);
+      trace.push(`findFiles(${patternForLog(firstPattern)}) → ${first.length} matches`);
+      if (first.length > 0 || !pathHasSep) {
+        return first;
+      }
+      // Basename fallback. Shares the same cancellation token; if the outer
+      // timeout fires during this call, both `withTimeout` rejects and this
+      // promise is abandoned.
+      const basenamePattern = buildBasenamePattern();
+      const basenameMatches = await deps.findFiles(basenamePattern, FIND_FILES_EXCLUDE, maxResults, cancelSource.token);
+      const filtered = basenameMatches.filter((uri) => endsWithPath(uri.fsPath, msg.path));
+      trace.push(
+        `findFiles(${patternForLog(basenamePattern)}) basename-fallback → ${basenameMatches.length} raw, ${filtered.length} ending-match`,
       );
-      trace.push(`findFiles(${patternForLog}) → ${matches.length} matches`);
+      return filtered;
+    };
+    try {
+      const matches = await withTimeout(runSearch(), FIND_FILES_TIMEOUT_MS, () => cancelSource.cancel());
       if (matches.length === 1) {
         resolvedFsPath = matches[0].fsPath;
       } else if (matches.length >= 2) {
@@ -393,7 +506,7 @@ export async function openFileLink(msg: OpenFileMessage, deps: OpenFileLinkDeps)
         }
       }
     } catch (err) {
-      trace.push(`findFiles(${patternForLog}) → threw: ${(err as Error)?.message ?? err}`);
+      trace.push(`findFiles fallback → threw: ${(err as Error)?.message ?? err}`);
       console.warn("[AnyWhere Terminal] findFiles fallback failed:", err);
     } finally {
       cancelSource.dispose();

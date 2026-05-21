@@ -446,7 +446,7 @@ describe("openFileLink: findFiles fallback", () => {
     expect(deps.showTextDocument).not.toHaveBeenCalled();
   });
 
-  it("(e) findFiles called with **/-prefixed pattern, the exclude glob, and maxResults=1", async () => {
+  it("(e) findFiles called with **/-prefixed pattern, the exclude glob, and maxResults=50", async () => {
     const findFiles = vi.fn(async () => []);
     const deps = makeDeps({
       stat: makeStat(new Set()),
@@ -454,8 +454,18 @@ describe("openFileLink: findFiles fallback", () => {
       findFiles,
     });
     await openFileLink(msg({ path: "src/foo.ts" }), deps);
-    expect(findFiles).toHaveBeenCalledTimes(1);
-    expect(findFiles).toHaveBeenCalledWith("**/src/foo.ts", "{**/node_modules/**,**/.git/**}", 50, expect.anything());
+    // After the basename-fallback addition (design D6), a clicked path
+    // with a separator triggers TWO findFiles calls when the first returns
+    // 0: full-path glob, then basename glob with endsWithPath filter.
+    expect(findFiles).toHaveBeenCalledTimes(2);
+    expect(findFiles).toHaveBeenNthCalledWith(
+      1,
+      "**/src/foo.ts",
+      "{**/node_modules/**,**/.git/**}",
+      50,
+      expect.anything(),
+    );
+    expect(findFiles).toHaveBeenNthCalledWith(2, "**/foo.ts", "{**/node_modules/**,**/.git/**}", 50, expect.anything());
   });
 
   it("(f) findFiles throws → console.warn + 'File not found' toast", async () => {
@@ -957,5 +967,394 @@ describe("openFileLink: defensive", () => {
     expect(calls).toHaveLength(1);
     // path.join("/cwd/a", "../b/foo.ts") normalizes to "/cwd/b/foo.ts".
     expect(path.posix.normalize((calls[0][0] as { fsPath: string }).fsPath)).toBe("/cwd/b/foo.ts");
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────
+// 4_1 — cwd-suffix duplication (the originally reported bug #1)
+// ─────────────────────────────────────────────────────────────────────
+
+describe("openFileLink: cwd-suffix fan-out (bug #1)", () => {
+  it("liveCwd=/x/y/a + click a/file.md, file at /x/y/a/file.md → opens the stripped candidate", async () => {
+    const deps = makeDeps({
+      getLiveCwd: vi.fn(async () => "/x/y/a"),
+      stat: makeStat(new Set(["/x/y/a/file.md"])),
+      workspaceFolders: [{ uri: { fsPath: "/x/y/a" } }],
+    });
+    await openFileLink(msg({ path: "a/file.md" }), deps);
+    const calls = (deps.showTextDocument as ReturnType<typeof vi.fn>).mock.calls;
+    expect(calls).toHaveLength(1);
+    expect(calls[0][0]).toMatchObject({ fsPath: "/x/y/a/file.md" });
+    expect(deps.showError).not.toHaveBeenCalled();
+  });
+
+  it("liveCwd=/x/y/a + click a/file.md, file at /x/y/a/a/file.md → first (deeper) candidate wins", async () => {
+    const deps = makeDeps({
+      getLiveCwd: vi.fn(async () => "/x/y/a"),
+      stat: makeStat(new Set(["/x/y/a/a/file.md"])),
+      workspaceFolders: [{ uri: { fsPath: "/x/y/a" } }],
+    });
+    await openFileLink(msg({ path: "a/file.md" }), deps);
+    const calls = (deps.showTextDocument as ReturnType<typeof vi.fn>).mock.calls;
+    expect(calls).toHaveLength(1);
+    expect(calls[0][0]).toMatchObject({ fsPath: "/x/y/a/a/file.md" });
+  });
+
+  it("currentCwd (OSC 7/633) drives the fan-out same as liveCwd", async () => {
+    const deps = makeDeps({
+      getCurrentCwd: vi.fn(() => "/x/y/a"),
+      stat: makeStat(new Set(["/x/y/a/file.md"])),
+      workspaceFolders: [{ uri: { fsPath: "/x/y/a" } }],
+    });
+    await openFileLink(msg({ path: "a/file.md" }), deps);
+    expect(deps.showTextDocument).toHaveBeenCalledTimes(1);
+  });
+
+  it("multi-root workspace fans out across each folder", async () => {
+    const deps = makeDeps({
+      stat: makeStat(new Set(["/p2/a/file.md"])),
+      workspaceFolders: [{ uri: { fsPath: "/p1" } }, { uri: { fsPath: "/p2/a" } }],
+    });
+    await openFileLink(msg({ path: "a/file.md" }), deps);
+    const calls = (deps.showTextDocument as ReturnType<typeof vi.fn>).mock.calls;
+    expect(calls).toHaveLength(1);
+    expect(calls[0][0]).toMatchObject({ fsPath: "/p2/a/file.md" });
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────
+// 4_2 — tilde + file:// URI handling
+// ─────────────────────────────────────────────────────────────────────
+
+describe("openFileLink: tilde + file:// (design D4, D5)", () => {
+  it("~/foo.md resolves under os.homedir()", async () => {
+    const home = process.env.HOME || "/home/test";
+    const deps = makeDeps({
+      stat: makeStat(new Set([`${home}/foo.md`])),
+      workspaceFolders: [{ uri: { fsPath: home } }],
+    });
+    await openFileLink(msg({ path: "~/foo.md" }), deps);
+    const calls = (deps.showTextDocument as ReturnType<typeof vi.fn>).mock.calls;
+    expect(calls).toHaveLength(1);
+    expect(calls[0][0]).toMatchObject({ fsPath: `${home}/foo.md` });
+  });
+
+  it("file:///abs/foo.md → opens /abs/foo.md", async () => {
+    const deps = makeDeps({
+      stat: makeStat(new Set(["/abs/foo.md"])),
+      workspaceFolders: [{ uri: { fsPath: "/abs" } }],
+    });
+    await openFileLink(msg({ path: "file:///abs/foo.md" }), deps);
+    expect(deps.showTextDocument).toHaveBeenCalledTimes(1);
+  });
+
+  it("file:///abs/foo%20bar.md → opens /abs/foo bar.md (percent-decoded)", async () => {
+    const deps = makeDeps({
+      stat: makeStat(new Set(["/abs/foo bar.md"])),
+      workspaceFolders: [{ uri: { fsPath: "/abs" } }],
+    });
+    await openFileLink(msg({ path: "file:///abs/foo%20bar.md" }), deps);
+    const calls = (deps.showTextDocument as ReturnType<typeof vi.fn>).mock.calls;
+    expect(calls).toHaveLength(1);
+    expect(calls[0][0]).toMatchObject({ fsPath: "/abs/foo bar.md" });
+  });
+
+  it("malformed file://garbage → 'File not found' toast (no stat, no findFiles)", async () => {
+    const deps = makeDeps({
+      stat: makeStat(new Set()),
+      workspaceFolders: [{ uri: { fsPath: "/abs" } }],
+    });
+    await openFileLink(msg({ path: "file://garbage" }), deps);
+    // Pre-transform returned passthrough-malformed → buildCandidates returns []
+    // with malformed=true → no stat, no findFiles, straight to "File not found".
+    // (Round-1 review W3: previously the findFiles block would enter with a
+    // bogus glob like `**/file:[/][/]garbage` — fixed by the `malformed` gate.)
+    expect(deps.stat).not.toHaveBeenCalled();
+    expect(deps.findFiles).not.toHaveBeenCalled();
+    expect(deps.showError).toHaveBeenCalledWith("File not found: file://garbage");
+  });
+
+  it("UNC injection blocked: file://attacker.example.com/share/x.md → 'File not found' (no SMB stat)", async () => {
+    // Round-1 review W1: prevents Windows UNC SMB egress.
+    const deps = makeDeps({
+      stat: makeStat(new Set()),
+      workspaceFolders: [{ uri: { fsPath: "/abs" } }],
+    });
+    await openFileLink(msg({ path: "file://attacker.example.com/share/x.md" }), deps);
+    expect(deps.stat).not.toHaveBeenCalled();
+    expect(deps.findFiles).not.toHaveBeenCalled();
+    expect(deps.showError).toHaveBeenCalledWith("File not found: file://attacker.example.com/share/x.md");
+  });
+
+  it("file:///abs/foo.md?x=1 → 'File not found' (query rejected)", async () => {
+    const deps = makeDeps({
+      stat: makeStat(new Set(["/abs/foo.md"])),
+      workspaceFolders: [{ uri: { fsPath: "/abs" } }],
+    });
+    await openFileLink(msg({ path: "file:///abs/foo.md?x=1" }), deps);
+    expect(deps.stat).not.toHaveBeenCalled();
+    expect(deps.showError).toHaveBeenCalledWith("File not found: file:///abs/foo.md?x=1");
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────
+// 4_3 — basename fallback in findFiles (design D6)
+// ─────────────────────────────────────────────────────────────────────
+
+describe("openFileLink: findFiles basename fallback (design D6)", () => {
+  it("first call 0 matches, basename call 3 matches with 1 ending-match → opens that one (no quickPick)", async () => {
+    const calls: vscode.GlobPattern[] = [];
+    const findFiles = vi.fn(async (include: vscode.GlobPattern) => {
+      calls.push(include);
+      if (calls.length === 1) {
+        // Full-path glob `**/a/file.md` → 0 matches
+        return [];
+      }
+      // Basename glob `**/file.md` → 3 matches, only one ends with /a/file.md
+      return [
+        { fsPath: "/ws/x/file.md" },
+        { fsPath: "/ws/y/file.md" },
+        { fsPath: "/ws/sub/a/file.md" },
+      ] as vscode.Uri[];
+    });
+    const deps = makeDeps({
+      stat: makeStat(new Set(["/ws/sub/a/file.md"])),
+      workspaceFolders: [{ uri: { fsPath: "/ws" } }],
+      findFiles,
+    });
+    await openFileLink(msg({ path: "a/file.md" }), deps);
+    expect(findFiles).toHaveBeenCalledTimes(2);
+    expect(findFiles).toHaveBeenNthCalledWith(
+      1,
+      "**/a/file.md",
+      expect.any(String),
+      expect.any(Number),
+      expect.anything(),
+    );
+    expect(findFiles).toHaveBeenNthCalledWith(
+      2,
+      "**/file.md",
+      expect.any(String),
+      expect.any(Number),
+      expect.anything(),
+    );
+    expect(deps.showQuickPick).not.toHaveBeenCalled();
+    expect(deps.showTextDocument).toHaveBeenCalledTimes(1);
+  });
+
+  it("basename call returns 2 ending-matches → quickPick is shown", async () => {
+    const findFiles = vi
+      .fn()
+      .mockImplementationOnce(async () => [])
+      .mockImplementationOnce(async () => [{ fsPath: "/ws/foo/a/file.md" }, { fsPath: "/ws/bar/a/file.md" }]);
+    const deps = makeDeps({
+      workspaceFolders: [{ uri: { fsPath: "/ws" } }],
+      findFiles,
+      showQuickPick: vi.fn(async () => undefined),
+    });
+    await openFileLink(msg({ path: "a/file.md" }), deps);
+    expect(deps.showQuickPick).toHaveBeenCalledTimes(1);
+  });
+
+  it("first call returns ≥1 → does NOT issue the basename query (skips fallback)", async () => {
+    // stat misses every candidate so findFiles runs. First findFiles call
+    // returns 1 match → we open it without a second call.
+    const findFiles = vi
+      .fn()
+      .mockImplementationOnce(async () => [{ fsPath: "/ws/somewhere/a/file.md" }] as vscode.Uri[])
+      .mockImplementationOnce(async () => {
+        throw new Error("basename should NOT be called");
+      });
+    const deps = makeDeps({
+      // No stat hits — forces fallthrough to findFiles
+      stat: makeStat(new Set()),
+      workspaceFolders: [{ uri: { fsPath: "/ws" } }],
+      findFiles,
+    });
+    await openFileLink(msg({ path: "a/file.md" }), deps);
+    expect(findFiles).toHaveBeenCalledTimes(1);
+    expect(deps.showTextDocument).toHaveBeenCalledTimes(1);
+  });
+
+  it("single-segment path skips basename fallback (path === basename)", async () => {
+    const findFiles = vi.fn(async () => []);
+    const deps = makeDeps({
+      workspaceFolders: [{ uri: { fsPath: "/ws" } }],
+      findFiles,
+    });
+    await openFileLink(msg({ path: "foo.md" }), deps);
+    // Only the original full-path search runs.
+    expect(findFiles).toHaveBeenCalledTimes(1);
+    expect(findFiles).toHaveBeenCalledWith("**/foo.md", expect.any(String), expect.any(Number), expect.anything());
+  });
+
+  it("no workspace + initialCwd set → RelativePattern reused for basename fallback", async () => {
+    const calls: vscode.GlobPattern[] = [];
+    const findFiles = vi.fn(async (include: vscode.GlobPattern) => {
+      calls.push(include);
+      return [];
+    });
+    const deps = makeDeps({
+      getInitialCwd: vi.fn(() => "/cwd"),
+      workspaceFolders: undefined,
+      findFiles,
+    });
+    await openFileLink(msg({ path: "a/file.md" }), deps);
+    expect(findFiles).toHaveBeenCalledTimes(2);
+    // Both calls anchored at /cwd via RelativePattern with the same baseUri.
+    const first = calls[0] as vscode.RelativePattern;
+    const second = calls[1] as vscode.RelativePattern;
+    expect(first.baseUri.fsPath).toBe("/cwd");
+    expect(first.pattern).toBe("**/a/file.md");
+    expect(second.baseUri.fsPath).toBe("/cwd");
+    expect(second.pattern).toBe("**/file.md");
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────
+// 4_4 — symlink-to-directory falls through (design D7)
+// ─────────────────────────────────────────────────────────────────────
+
+describe("openFileLink: symlink-to-directory bit mask (design D7)", () => {
+  it("FileType.Directory | FileType.SymbolicLink is treated as a directory; falls through silently", async () => {
+    const SYMLINK_DIR_TYPE = vscode.FileType.Directory | vscode.FileType.SymbolicLink; // = 66
+    const stat = vi.fn(async (uri: vscode.Uri): Promise<vscode.FileStat> => {
+      if (uri.fsPath === "/cwd/foo") {
+        return { type: SYMLINK_DIR_TYPE, ctime: 0, mtime: 0, size: 0 };
+      }
+      const err = new Error(`FileNotFound: ${uri.fsPath}`) as Error & { code: string };
+      err.code = "FileNotFound";
+      throw err;
+    });
+    const deps = makeDeps({
+      getInitialCwd: vi.fn(() => "/cwd"),
+      stat,
+      workspaceFolders: [{ uri: { fsPath: "/cwd" } }],
+    });
+    await openFileLink(msg({ path: "foo" }), deps);
+    // Should NOT open it as a text doc, should NOT show "File not found" toast
+    // (directory click → silent abort), should NOT run findFiles.
+    expect(deps.showTextDocument).not.toHaveBeenCalled();
+    expect(deps.showError).not.toHaveBeenCalled();
+    expect(deps.findFiles).not.toHaveBeenCalled();
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────
+// 4_5 — trust-base regression: liveCwd and currentCwd are NOT trust-bases
+// ─────────────────────────────────────────────────────────────────────
+
+describe("openFileLink: out-of-scope modal trust bases (security)", () => {
+  it("path resolved via liveCwd but outside initialCwd+workspace → modal SHOWN (liveCwd not in trust bases)", async () => {
+    const deps = makeDeps({
+      getLiveCwd: vi.fn(async () => "/live"),
+      getInitialCwd: vi.fn(() => "/init"),
+      stat: makeStat(new Set(["/live/foo.md"])),
+      workspaceFolders: [{ uri: { fsPath: "/ws" } }],
+      showWarning: vi.fn(async () => "Cancel"),
+    });
+    await openFileLink(msg({ path: "foo.md" }), deps);
+    expect(deps.showWarning).toHaveBeenCalledTimes(1);
+  });
+
+  it("path resolved via currentCwd but outside initialCwd+workspace → modal SHOWN (currentCwd not in trust bases)", async () => {
+    const deps = makeDeps({
+      getCurrentCwd: vi.fn(() => "/shell-claimed"),
+      getInitialCwd: vi.fn(() => "/init"),
+      stat: makeStat(new Set(["/shell-claimed/foo.md"])),
+      workspaceFolders: [{ uri: { fsPath: "/ws" } }],
+      showWarning: vi.fn(async () => "Cancel"),
+    });
+    await openFileLink(msg({ path: "foo.md" }), deps);
+    expect(deps.showWarning).toHaveBeenCalledTimes(1);
+  });
+
+  it("path resolved inside initialCwd → no modal", async () => {
+    const deps = makeDeps({
+      getLiveCwd: vi.fn(async () => "/live"),
+      getInitialCwd: vi.fn(() => "/init"),
+      stat: makeStat(new Set(["/init/foo.md"])),
+      workspaceFolders: [{ uri: { fsPath: "/ws" } }],
+      showWarning: vi.fn(),
+    });
+    await openFileLink(msg({ path: "foo.md" }), deps);
+    expect(deps.showWarning).not.toHaveBeenCalled();
+    expect(deps.showTextDocument).toHaveBeenCalledTimes(1);
+  });
+
+  it("path resolved inside workspace folder → no modal", async () => {
+    const deps = makeDeps({
+      getLiveCwd: vi.fn(async () => "/live"),
+      getInitialCwd: vi.fn(() => "/init"),
+      stat: makeStat(new Set(["/ws/foo.md"])),
+      workspaceFolders: [{ uri: { fsPath: "/ws" } }],
+      showWarning: vi.fn(),
+    });
+    await openFileLink(msg({ path: "foo.md" }), deps);
+    expect(deps.showWarning).not.toHaveBeenCalled();
+    expect(deps.showTextDocument).toHaveBeenCalledTimes(1);
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────
+// 4_6 — dedup across cwd sources (design D2)
+// ─────────────────────────────────────────────────────────────────────
+
+// ─────────────────────────────────────────────────────────────────────
+// Latent absolute-path concatenation bug (design D8) — was previously
+// producing `cwd + absoluteMsgPath` as a second candidate because Node
+// `path.join` strips the leading separator of the second arg. The D2
+// short-circuit makes absolute paths produce exactly ONE candidate.
+// ─────────────────────────────────────────────────────────────────────
+
+describe("openFileLink: absolute path short-circuit (design D8)", () => {
+  it("with liveCwd set + absolute msg.path, stat called exactly once on the absolute path", async () => {
+    const calledPaths: string[] = [];
+    const stat = vi.fn(async (uri: vscode.Uri): Promise<vscode.FileStat> => {
+      calledPaths.push(uri.fsPath);
+      const err = new Error(`FileNotFound: ${uri.fsPath}`) as Error & { code: string };
+      err.code = "FileNotFound";
+      throw err;
+    });
+    const deps = makeDeps({
+      getLiveCwd: vi.fn(async () => "/Users/huybuidac/Projects/gmi/arco-contract"),
+      getInitialCwd: vi.fn(() => "/Users/huybuidac/Projects/gmi/arco-contract"),
+      stat,
+      workspaceFolders: [{ uri: { fsPath: "/Users/huybuidac/Projects/gmi/arco-contract" } }],
+      findFiles: vi.fn(async () => []),
+    });
+    await openFileLink(msg({ path: "/Users/huybuidac/Projects/gmi/arco-contract/arco-audit.md" }), deps);
+    // Before the D2 short-circuit, candidates included the bogus
+    // concatenation `<cwd>/<full-absolute-without-leading-slash>`.
+    // After the fix, the absolute branch returns exactly one candidate.
+    expect(calledPaths).toEqual(["/Users/huybuidac/Projects/gmi/arco-contract/arco-audit.md"]);
+    // findFiles was skipped because msg.path is absolute (per spec).
+    expect(deps.findFiles).not.toHaveBeenCalled();
+    expect(deps.showError).toHaveBeenCalledWith(
+      "File not found: /Users/huybuidac/Projects/gmi/arco-contract/arco-audit.md",
+    );
+  });
+});
+
+describe("openFileLink: dedup across cwd sources (design D2)", () => {
+  it("identical cwd sources collapse to a single stat call", async () => {
+    const stat = vi.fn(async (uri: vscode.Uri): Promise<vscode.FileStat> => {
+      if (uri.fsPath === "/same/foo.md") {
+        return { type: vscode.FileType.File, ctime: 0, mtime: 0, size: 1 };
+      }
+      const err = new Error(`FileNotFound: ${uri.fsPath}`) as Error & { code: string };
+      err.code = "FileNotFound";
+      throw err;
+    });
+    const deps = makeDeps({
+      getLiveCwd: vi.fn(async () => "/same"),
+      getCurrentCwd: vi.fn(() => "/same"),
+      getInitialCwd: vi.fn(() => "/same"),
+      stat,
+      workspaceFolders: [{ uri: { fsPath: "/same" } }, { uri: { fsPath: "/same" } }],
+    });
+    await openFileLink(msg({ path: "foo.md" }), deps);
+    expect(stat).toHaveBeenCalledTimes(1);
+    expect(deps.showTextDocument).toHaveBeenCalledTimes(1);
   });
 });

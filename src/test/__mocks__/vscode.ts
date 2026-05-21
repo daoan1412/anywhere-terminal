@@ -4,11 +4,66 @@
 
 // ─── Uri ────────────────────────────────────────────────────────────
 
+// Minimal RFC 3986-ish URI parser stub. Only the fields our code reads
+// (scheme, authority, path, query, fragment, fsPath) are populated.
+// `strict=true` throws if the input has no scheme — mirroring the contract
+// of `vscode.Uri.parse(raw, true)` in the real extension host.
+function parseUri(raw: string, strict?: boolean) {
+  const schemeMatch = raw.match(/^([a-zA-Z][a-zA-Z0-9+.-]*):/);
+  if (!schemeMatch) {
+    if (strict) {
+      throw new Error(`URI: no scheme in "${raw}"`);
+    }
+    return { scheme: "", authority: "", path: raw, query: "", fragment: "", fsPath: raw };
+  }
+  const scheme = schemeMatch[1].toLowerCase();
+  let rest = raw.slice(schemeMatch[0].length);
+  let authority = "";
+  if (rest.startsWith("//")) {
+    rest = rest.slice(2);
+    const slashIdx = rest.indexOf("/");
+    if (slashIdx >= 0) {
+      authority = rest.slice(0, slashIdx);
+      rest = rest.slice(slashIdx);
+    } else {
+      authority = rest;
+      rest = "";
+    }
+  }
+  let fragment = "";
+  const hashIdx = rest.indexOf("#");
+  if (hashIdx >= 0) {
+    fragment = rest.slice(hashIdx + 1);
+    rest = rest.slice(0, hashIdx);
+  }
+  let query = "";
+  const qIdx = rest.indexOf("?");
+  if (qIdx >= 0) {
+    query = rest.slice(qIdx + 1);
+    rest = rest.slice(0, qIdx);
+  }
+  const pathPart = rest;
+  let fsPath = pathPart;
+  if (scheme === "file") {
+    try {
+      fsPath = decodeURIComponent(pathPart);
+    } catch {
+      fsPath = pathPart;
+    }
+    // Strip the leading `/` from `/c:/foo` on Windows-style file URIs.
+    if (/^\/[a-zA-Z]:/.test(fsPath)) {
+      fsPath = fsPath.slice(1).replace(/\//g, "\\");
+    }
+  }
+  return { scheme, authority, path: pathPart, query, fragment, fsPath };
+}
+
 export const Uri = {
   joinPath: (base: { fsPath: string }, ...pathSegments: string[]) => ({
     fsPath: [base.fsPath, ...pathSegments].join("/"),
   }),
   file: (path: string) => ({ fsPath: path }),
+  parse: parseUri,
 };
 
 // ─── CancellationToken / Source ─────────────────────────────────────

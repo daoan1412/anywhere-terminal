@@ -85,29 +85,117 @@ describe("detectFilePathLinks: suffix forms", () => {
   });
 });
 
-describe("detectFilePathLinks: ignores URLs", () => {
+describe("detectFilePathLinks: ignores web URLs (but claims file://)", () => {
+  // `file:` was previously in this list; per the updated spec the detector
+  // now claims `file://` URIs and hands them to the resolver (which decodes
+  // via `vscode.Uri.parse`). Web URLs remain handled by xterm's WebLinksAddon.
   it.each([
     "https://example.com/file.ts",
     "http://example.com:8080/page",
-    "file:///home/user/x.py",
     "ftp://server/path",
     "mailto:test@example.com",
     "ssh://host:22/repo",
     "git://github.com/foo/bar.git",
   ])("does not detect %s", (url) => {
     const r = detectFilePathLinks(`see ${url} for details`, "posix");
-    // The URL itself must not appear as a detected path.
     expect(
       r.some(
         (x) =>
           x.path.startsWith("http") ||
           x.path.startsWith("ftp") ||
-          x.path.startsWith("file:") ||
           x.path.startsWith("ssh:") ||
           x.path.startsWith("git:") ||
           x.path.startsWith("mailto:"),
       ),
     ).toBe(false);
+  });
+});
+
+describe("detectFilePathLinks: broadened charset (design D3)", () => {
+  it("# in path segment", () => {
+    const r = detectFilePathLinks("touch /Users/me/repo#main/file.ts now", "posix");
+    expect(r).toHaveLength(1);
+    expect(r[0].path).toBe("/Users/me/repo#main/file.ts");
+  });
+
+  it("& in path segment", () => {
+    const r = detectFilePathLinks("ls /Users/me/repo&main/file.ts", "posix");
+    expect(r).toHaveLength(1);
+    expect(r[0].path).toBe("/Users/me/repo&main/file.ts");
+  });
+
+  it("percent-encoded segment in path", () => {
+    const r = detectFilePathLinks("see /Users/me/foo%20bar/file.md", "posix");
+    expect(r).toHaveLength(1);
+    expect(r[0].path).toBe("/Users/me/foo%20bar/file.md");
+  });
+
+  it("non-ASCII letters (accents)", () => {
+    const r = detectFilePathLinks("open /Users/huy/projects/à/file.md", "posix");
+    expect(r).toHaveLength(1);
+    expect(r[0].path).toBe("/Users/huy/projects/à/file.md");
+  });
+
+  it("non-ASCII letters (CJK)", () => {
+    const r = detectFilePathLinks("open /Users/huy/projects/项目/file.md", "posix");
+    expect(r).toHaveLength(1);
+    expect(r[0].path).toBe("/Users/huy/projects/项目/file.md");
+  });
+
+  it("tilde-prefixed path retained as-is (resolver expands)", () => {
+    const r = detectFilePathLinks("open ~/foo.md please", "posix");
+    expect(r).toHaveLength(1);
+    expect(r[0].path).toBe("~/foo.md");
+  });
+
+  it("file:// URI claimed by detector", () => {
+    const r = detectFilePathLinks("see file:///abs/file.md here", "posix");
+    expect(r).toHaveLength(1);
+    expect(r[0].path).toBe("file:///abs/file.md");
+  });
+});
+
+describe("detectFilePathLinks: negative — broadened charset noise filters", () => {
+  it("Version=1.2.3.4 rejected (identifier=value heuristic)", () => {
+    expect(detectFilePathLinks("Version=1.2.3.4 released", "posix")).toEqual([]);
+  });
+
+  it("LOG_LEVEL=info rejected (identifier=value heuristic, no extension)", () => {
+    expect(detectFilePathLinks("env LOG_LEVEL=info more", "posix")).toEqual([]);
+  });
+
+  it("package@1.2.3 rejected (identifier@version heuristic)", () => {
+    expect(detectFilePathLinks("npm install react@18.2.0", "posix")).toEqual([]);
+  });
+
+  it("patch-file names with @version survive the heuristic", () => {
+    // `react@18.2.0.patch` is a legitimate filename (e.g. from patch-package).
+    // The end-of-string anchor on the @version heuristic preserves these.
+    const r = detectFilePathLinks("applying react@18.2.0.patch...", "posix");
+    expect(r).toHaveLength(1);
+    expect(r[0].path).toBe("react@18.2.0.patch");
+  });
+
+  it("https:// still rejected by URL_SCHEME_REGEX", () => {
+    expect(detectFilePathLinks("visit https://example.com/x", "posix")).toEqual([]);
+  });
+
+  it("paren-bracketed bare path matches inner path only", () => {
+    const r = detectFilePathLinks("note (/Users/me/file.ts) here", "posix");
+    expect(r).toHaveLength(1);
+    expect(r[0].path).toBe("/Users/me/file.ts");
+    expect(r[0].text).not.toContain("(");
+    expect(r[0].text).not.toContain(")");
+  });
+
+  it("path with internal space (unquoted) splits at the space", () => {
+    // `[^\s'"<>(){}\[\]|]+` excludes whitespace, so the body breaks at the space.
+    // Either side may still match if it independently looks like a file.
+    const r = detectFilePathLinks("see /Users/Bob Smith/file.ts here", "posix");
+    // `/Users/Bob` has `/` → looksLikeFile true; `Smith/file.ts` lacks a leading
+    // boundary char (preceded by space), so it's also matched independently.
+    expect(r.length).toBeGreaterThan(0);
+    expect(r.some((x) => x.path === "/Users/Bob Smith/file.ts")).toBe(false);
   });
 });
 
@@ -215,12 +303,14 @@ describe("detectFilePathLinks: platform branch", () => {
     expect(r[0].path).toBe(String.raw`src\foo.ts`);
   });
 
-  it("POSIX does not match a Windows-style backslash path mid-line", () => {
+  it("POSIX detects a Windows-style backslash path mid-line", () => {
+    // After the body broadening (design D3), the path body accepts any
+    // non-whitespace non-delimiter char including `\` on both platforms.
+    // POSIX terminals occasionally surface Windows-style paths (pasted,
+    // cat'd from a log) and clicking them is what the user expects.
     const r = detectFilePathLinks(String.raw`hit src\foo.ts here`, "posix");
-    // POSIX regex path body excludes `\` — body breaks at backslash, and the
-    // char after `\` is not a boundary char, so the regex can't restart at `f`.
-    // Result: no detection. Users should run POSIX terminals with POSIX paths.
-    expect(r).toEqual([]);
+    expect(r).toHaveLength(1);
+    expect(r[0].path).toBe(String.raw`src\foo.ts`);
   });
 });
 

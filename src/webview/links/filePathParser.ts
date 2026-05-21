@@ -24,7 +24,10 @@ export interface ParsedFilePathLink {
 const MAX_LINE_LENGTH = 2000;
 const MAX_RESULTS = 10;
 
-const URL_SCHEME_REGEX = /^(?:https?|file|ftp|ssh|git|mailto):/i;
+// `file:` removed: `file:///...` URIs are now claimed by this detector and
+// handed to the resolver (which decodes via `vscode.Uri.parse`). Web URLs
+// remain handled by xterm's built-in `WebLinksAddon`.
+const URL_SCHEME_REGEX = /^(?:https?|ftp|ssh|git|mailto):/i;
 const TRAIL_PUNCT_REGEX = /[.,;:!?]+$/;
 
 function parseIntOpt(s: string | undefined): number | undefined {
@@ -45,6 +48,21 @@ function looksLikeFile(p: string): boolean {
   if (/[/\\]$/.test(p)) {
     return false;
   }
+  // Reject `<identifier>=<value>` shapes such as `Version=1.2.3.4` or
+  // `LOG_LEVEL=info`. The broadened body charset (design D3) now accepts `=`,
+  // and without this guard a key/value would slip past the version-string
+  // filter once it picks up an `.<ext>` looking tail.
+  if (/^[A-Za-z_][A-Za-z0-9_]*=/.test(p)) {
+    return false;
+  }
+  // Reject npm-style `<package>@<version>` shapes (e.g. `react@18.2.0`).
+  // Anchored at end-of-string so patch-file names with a real extension
+  // survive (`react@18.2.0.patch`, `lodash@4.17.21.diff`). The `@\d` anchor
+  // avoids matching `user@host.com` (email noise, harmless) or `foo@bar.baz`
+  // (could be a real path).
+  if (/^[A-Za-z_][A-Za-z0-9_-]*@\d+(?:\.\d+)*$/.test(p)) {
+    return false;
+  }
   if (/[/\\]/.test(p)) {
     return true;
   }
@@ -59,20 +77,35 @@ function looksLikeFile(p: string): boolean {
   return /[A-Za-z]/.test(m[1]);
 }
 
+// Path body broadened to VS Code parity (see `design.md` D3 +
+// terminalLinkParsing.ts:212 upstream). Includes any non-whitespace,
+// non-delimiter character — accepts `#`, `&`, `=`, `%`, `:`, non-ASCII
+// letters. Parens deliberately excluded from the bare body to avoid clashing
+// with the `(LINE,COL)` suffix grammar; users with paren-containing paths
+// (e.g. `/Users/Bob (work)/...`) must use the quoted form. Backslash is
+// naturally included on both platforms — POSIX terminals occasionally surface
+// Windows-style paths (pasted, cat'd from log files) and clicking them is
+// what the user expects.
+const PATH_BODY = String.raw`[^\s'"<>(){}\[\]|]+`;
+
 function buildSuffixedRegex(platform: "posix" | "win32"): RegExp {
-  const pathBody = platform === "win32" ? String.raw`[\w./\\@~+\-]+` : String.raw`[\w./@~+\-]+`;
   const drive = platform === "win32" ? "(?:[A-Za-z]:)?" : "";
   const suffix = String.raw`(?::(?<row1>\d+)(?:[:.](?<col1>\d+))?|[(\[](?<row2>\d+)(?:[,:]\s*(?<col2>\d+))?[)\]])`;
   const boundary = String.raw`(?<=^|[\s'"<({\[])`;
-  return new RegExp(`${boundary}(?<path>${drive}${pathBody})${suffix}`, "g");
+  // SUFFIXED regex uses a LAZY body — the broadened charset now includes `:`,
+  // and a greedy body would eat `:LINE` and leave only `:COL`. Lazy lets the
+  // explicit suffix grammar bite at the first viable position. Windows drive
+  // (`C:`) still matches because the non-capturing `(?:[A-Za-z]:)?` is
+  // anchored at the start of the path group, before the lazy body.
+  const lazyBody = `${PATH_BODY.slice(0, -1)}+?`;
+  return new RegExp(`${boundary}(?<path>${drive}${lazyBody})${suffix}`, "g");
 }
 
 function buildBareRegex(platform: "posix" | "win32"): RegExp {
-  const pathBody = platform === "win32" ? String.raw`[\w./\\@~+\-]+` : String.raw`[\w./@~+\-]+`;
   const drive = platform === "win32" ? "(?:[A-Za-z]:)?" : "";
   const boundary = String.raw`(?<=^|[\s'"<({\[])`;
   const after = String.raw`(?=$|[\s'"<>)}\],;])`;
-  return new RegExp(`${boundary}(?<path>${drive}${pathBody})${after}`, "g");
+  return new RegExp(`${boundary}(?<path>${drive}${PATH_BODY})${after}`, "g");
 }
 
 // Python: File "x.py", line 42, column 7 — or — "x.py", line 42

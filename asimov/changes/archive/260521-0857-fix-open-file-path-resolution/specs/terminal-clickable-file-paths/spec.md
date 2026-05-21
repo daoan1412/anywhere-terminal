@@ -1,5 +1,4 @@
-# terminal-clickable-file-paths Specification
-## Requirements
+## MODIFIED Requirements
 
 ### Requirement: File path detection in terminal output
 
@@ -22,10 +21,6 @@ URL-shaped strings other than `file://` MUST NOT be detected as file paths. A ca
 When overlapping candidates are produced by different parser passes (e.g. the bare regex and the quoted-traceback regex both span the same characters), the system SHALL keep the candidate with the longer matched text and discard the other.
 
 `LINE` and `COL` MUST be parsed as 1-based positive integers.
-
-### Requirement: openFile IPC message
-
-The system SHALL define and dispatch a webview→extension message of shape `{ type: "openFile"; path: string; sessionId: string; line?: number; col?: number }` when the user activates an underlined file-path link. `path` MUST be the raw matched path text without the line/column suffix. `sessionId` MUST be the terminal session that produced the line.
 
 ### Requirement: Path resolution chain
 
@@ -101,21 +96,7 @@ Match-count UX:
 
 Rationale for `currentCwd` exclusion from trust-bases (for the out-of-scope modal) is UNCHANGED: shell-emitted OSC 7/633 is untrusted input and MUST NOT be permitted to disable the modal. This is enforced in the "Out-of-scope confirm dialog" requirement. **`liveCwd` is ALSO excluded from trust-bases for this change** — adding it would broaden the trust boundary; a separate security-reviewed change is required to include it.
 
-### Requirement: Out-of-scope confirm dialog
-
-When the resolved file path is NOT under the PTY's initial cwd AND NOT under any workspace folder, the system SHALL show a modal `vscode.window.showWarningMessage` with body `Open file outside workspace?\n\n<absolute path>` and buttons `Open` (returns the URI) and `Cancel` (aborts open). The dialog MUST be modal. No dialog is shown when the path is inside cwd or any workspace folder.
-
-### Requirement: File-not-found error toast
-
-When no candidate path resolves to an existing file, the system SHALL show `vscode.window.showErrorMessage("File not found: <original path>")` and MUST NOT open any editor.
-
-### Requirement: Open at parsed position
-
-When opening succeeds, the system SHALL call `vscode.window.showTextDocument(uri, { selection })` where `selection = new vscode.Range(line-1, col-1, line-1, col-1)` if both `line` and `col` are provided, `selection = new vscode.Range(line-1, 0, line-1, 0)` if only `line` is provided, and `selection` is omitted if neither is provided.
-
-### Requirement: Performance caps for detection
-
-The system MUST skip detection on any buffer line longer than 2000 characters and MUST return at most 10 links per buffer line. These caps protect terminal rendering on large scrollback.
+## ADDED Requirements
 
 ### Requirement: Tilde expansion in resolver
 
@@ -139,4 +120,3 @@ The system SHALL accept `file://` URIs as `OpenFileMessage.path`. On receipt:
 6. Percent-encoded path bytes MUST be decoded by `vscode.Uri.parse` automatically.
 
 `file://` paths MUST skip the cwd-fan-out (they are already absolute).
-
