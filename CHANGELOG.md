@@ -4,6 +4,29 @@ All notable changes to **AnyWhere Terminal** are documented in this file.
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.10.0] — 2026-05-22
+
+### Added
+
+- **Hover preview for file paths in the terminal.** Hover over any clickable path and a 300 ms debounced popup shows the file's content with syntax highlighting (Shiki) and markdown rendering (markdown-it). Code is rendered with line numbers; the active line scrolls into view and gets a highlight bar when the path carries a line suffix.
+- **Line-target suffixes recognised in the popup and on click**: `path:42`, `path:42:7`, `path(42,7)`, `path#L42`, `path:42-58` (line range), and Claude CLI's `Read(/abs/path · lines 180-299)` pattern. The popup scrolls the first line of the range to the centre.
+- **Soft-wrap reassembly** — when a path wraps across terminal rows (e.g. `Read(...)` with a long absolute path), the link provider now joins the continuation rows so the hover and click resolve to the full path instead of just the visible fragment. Capped at 8 rows / 3000 characters and gated to tool-call prefixes or absolute-path tokens so unrelated full-width rows are never glued together.
+- **"Open" button in the popup header.** Click to open the file in an editor tab — same flow as clicking the underlined path in the terminal.
+- **Selectable popup content.** Text cursor inside the body; you can drag-select and copy out of the preview. Line numbers stay non-selectable so copy is clean.
+- **Trust-policy gate with `Press Cmd / Ctrl to preview` override.** Dotfiles (`.env`, `.bashrc`), known-sensitive folders (`.git`, `.ssh`, `.aws`, `.gnupg`, `.kube`, `.docker`, `.config`, `node_modules`, `.terraform`, `.terraform.d`, `.npm`, `.gem`, `.azure`, `.bluemix`, `.helm`), and files outside the workspace are blocked from auto-preview. Pressing Cmd (macOS) or Ctrl (Win/Linux) during the hover overrides the block for that one file.
+- New settings:
+  - `anywhereTerminal.hoverPreview.delay` (default `300` ms, range 100–2000) — debounce before the popup fetches the file.
+  - `anywhereTerminal.hoverPreview.blockSensitive` (default `true`, `scope: "application"`) — turn the trust policy on/off. Application-scoped so a hostile workspace cannot flip it via `.vscode/settings.json`.
+
+### Security
+
+- Trust bases are `initialCwd + workspaceFolders` only. Shell-emitted OSC 7 / OSC 633 cwd is NEVER used as a trust base — a hostile process emitting `cwd=/` cannot silently disable the override gate.
+- Memory-bounded reads via `node:fs/promises.open()` + a pre-allocated 1 MB buffer. Even if a file is swapped under us between `stat` and read (TOCTOU), the buffer caps total bytes — large files surface as `too-large` rather than blowing up the extension host.
+- Symlinks pointing into the workspace are treated as out-of-workspace (`requires-confirmation`) because the lexical path doesn't tell us where the target lives.
+- The webview-side override gesture requires both an active `requires-confirmation` state AND a fresh `Meta` / `Control` key press — incidental modifier-held keystrokes (Cmd+C, Cmd+Tab) no longer trigger a re-fetch with `override: true`.
+- Markdown rendering runs with `html: false, linkify: false, validateLink: () => false` (no inline HTML, no auto-linkification, no link clicks from inside the preview).
+- IPC payloads are validated: paths > 4096 chars, NUL bytes, non-string fields, and oversized `sessionId` / `requestId` are rejected before the resolver runs.
+
 ## [0.9.1] — 2026-05-21
 
 ### Fixed
