@@ -37,6 +37,7 @@ asimov/memory.db*
 .agents/skills/asimov-*
 .claude/skills/asimov-*
 .claude/agents/asimov
+.claude/settings.local.json
 .opencode/agents/asimov
 .code-review-graph/
 
