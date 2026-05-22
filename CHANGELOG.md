@@ -4,6 +4,17 @@ All notable changes to **AnyWhere Terminal** are documented in this file.
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.10.1] — 2026-05-22
+
+### Added
+
+- **Tab rename.** Give any terminal tab a meaningful name via double-click on the tab label (inline input), right-click → `Rename Tab…`, command palette `AnyWhere Terminal: Rename Tab`, or `F2` when a terminal webview is focused. The custom name persists across window reloads (workspace-scoped). Clear the name (empty input) to revert to the live process title. OSC title updates continue to track the shell process but are subordinated to the custom name when one is set. Rename applies to root tabs only; split-pane process names are suppressed while a custom root name is active.
+
+### Fixed
+
+- **Hover preview markdown spacing** — the popup now matches VSCode's `.monaco-hover` compact margins. Previously, `white-space: pre` and browser-default heading/paragraph margins produced very airy popups (e.g. for `.reviews/round-1.md`). Switched to `white-space: normal; word-wrap: break-word` and applied VSCode's style budget: uniform `margin: 8px 0` for block elements, scaled-down heading sizes (h1 1.4em → h6 1em), tight `padding-left: 20px` on lists, and first/last-child margin resets. Fenced code blocks keep `white-space: pre` so long lines still scroll horizontally.
+- **Hover preview "File not found" for paths wrapped by Claude Code / Codex CLI** — AI CLI tools emit their own `\n` + indent for continuation (not terminal soft-wrap), so `isWrapped` stays false and xterm pads the trailing cells with spaces. The prior heuristic required row 1 to fill the full column width, which never held for these CLIs. The path-join logic now uses last-token analysis (trailing non-whitespace must look like a tool-call prefix or contain an absolute-path root) and handles three continuation shapes: `"none"` (no join), `"marker"` (preserves whitespace seam for `· lines` regex), and `"in-path"` (strips row-1 trailing padding and row-2 leading indent).
+
 ## [0.10.0] — 2026-05-22
 
 ### Added
