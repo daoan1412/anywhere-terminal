@@ -315,14 +315,49 @@ export function getTerminalHtml(
       font-family: inherit;
       font-size: inherit;
     }
-    /* Markdown body: force no-wrap on prose so long lines scroll horizontally
-     * the same way code does. The popup root has overflow:auto, so users can
-     * scroll sideways. Code fences inside markdown already have their own
-     * white-space:pre via pre.shiki — this rule only flattens the surrounding
-     * p / h* / li / table / blockquote text. */
+    /* Markdown body — compact spacing modeled on VSCode's .monaco-hover
+     * (src/vs/base/browser/ui/hover/hoverWidget.css). Prose wraps softly;
+     * only fenced code keeps white-space:pre so long lines scroll. */
     .anywhere-hover-preview-md {
-      white-space: pre;
+      white-space: normal;
+      word-wrap: break-word;
+      line-height: 1.5;
     }
+    .anywhere-hover-preview-md p,
+    .anywhere-hover-preview-md ul,
+    .anywhere-hover-preview-md ol,
+    .anywhere-hover-preview-md blockquote,
+    .anywhere-hover-preview-md table,
+    .anywhere-hover-preview-md pre,
+    .anywhere-hover-preview-md h1,
+    .anywhere-hover-preview-md h2,
+    .anywhere-hover-preview-md h3,
+    .anywhere-hover-preview-md h4,
+    .anywhere-hover-preview-md h5,
+    .anywhere-hover-preview-md h6 {
+      margin: 8px 0;
+    }
+    .anywhere-hover-preview-md h1,
+    .anywhere-hover-preview-md h2,
+    .anywhere-hover-preview-md h3,
+    .anywhere-hover-preview-md h4,
+    .anywhere-hover-preview-md h5,
+    .anywhere-hover-preview-md h6 {
+      line-height: 1.1;
+    }
+    .anywhere-hover-preview-md h1 { font-size: 1.4em; }
+    .anywhere-hover-preview-md h2 { font-size: 1.2em; }
+    .anywhere-hover-preview-md h3 { font-size: 1.05em; }
+    .anywhere-hover-preview-md h4,
+    .anywhere-hover-preview-md h5,
+    .anywhere-hover-preview-md h6 { font-size: 1em; }
+    .anywhere-hover-preview-md > :first-child { margin-top: 0; }
+    .anywhere-hover-preview-md > :last-child  { margin-bottom: 0; }
+    .anywhere-hover-preview-md ul,
+    .anywhere-hover-preview-md ol { padding-left: 20px; }
+    .anywhere-hover-preview-md li > p  { margin-bottom: 0; }
+    .anywhere-hover-preview-md li > ul,
+    .anywhere-hover-preview-md li > ol { margin-top: 0; }
     .anywhere-hover-preview-md pre.shiki {
       white-space: pre;
     }
