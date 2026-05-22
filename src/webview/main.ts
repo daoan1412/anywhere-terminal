@@ -27,6 +27,7 @@ import { ResizeCoordinator } from "./resize/ResizeCoordinator";
 import { SplitTreeRenderer } from "./split/SplitTreeRenderer";
 import { WebviewStateStore } from "./state/WebviewStateStore";
 import { buildTabBarData, handleTabKeyboardShortcut, renderTabBar } from "./TabBarUtils";
+import { hideRenameOverlay, repositionRenameOverlay, showRenameOverlay } from "./tabRenameOverlay";
 import { TerminalFactory } from "./terminal/TerminalFactory";
 import { type TerminalLocation, ThemeManager } from "./theme/ThemeManager";
 import { showBanner } from "./ui/BannerService";
@@ -129,7 +130,43 @@ function updateTabBar(): void {
     onTabClick: (tabId) => switchTab(tabId),
     onTabClose: (tabId) => vscode.postMessage({ type: "closeTab", tabId }),
     onAddClick: () => vscode.postMessage({ type: "createTab" }),
+    onTabRename: (tabId, tabEl) => startInlineRename(tabId, tabEl, tabBarEl),
+    onAfterRender: () => {
+      // If an inline rename is in progress, re-anchor the overlay to the
+      // (possibly re-created) tab DOM. See add-tab-rename design.md D4.
+      if (store.renameSession) {
+        repositionRenameOverlay();
+      }
+    },
   });
+}
+
+function startInlineRename(tabId: string, tabEl: HTMLElement, tabBarEl: HTMLElement): void {
+  const tabInfo = buildTabBarData(store).get(tabId);
+  if (!tabInfo) {
+    return;
+  }
+  const displayed = tabInfo.customName ?? tabInfo.name;
+  // IMPORTANT: showRenameOverlay first, THEN beginRename. If a prior overlay is
+  // open, showRenameOverlay commits it — that commit's onCommit closure calls
+  // store.endRename() and would clear the new tabId's marker we'd just set.
+  // Doing showRenameOverlay first means the prior endRename runs, THEN we set
+  // the new beginRename. See `.reviews/round-1.md` W1.
+  showRenameOverlay({
+    tabBarEl,
+    targetTabEl: tabEl,
+    initialValue: displayed,
+    callbacks: {
+      onCommit: (value) => {
+        store.endRename();
+        vscode.postMessage({ type: "renameTab", tabId, customName: value });
+      },
+      onCancel: () => {
+        store.endRename();
+      },
+    },
+  });
+  store.beginRename(tabId, displayed);
 }
 
 function switchTab(newTabId: string): void {
@@ -219,11 +256,26 @@ const routeMessage = createMessageRouter({
     }
   },
   onTabCreated(msg) {
-    factory.createTerminal(msg.tabId, msg.name, store.currentConfig, false);
+    factory.createTerminal(msg.tabId, msg.name, store.currentConfig, false, msg.customName);
     switchTab(msg.tabId);
   },
   onTabRemoved(msg) {
     removeTerminal(msg.tabId);
+  },
+  onTabRenamed(msg) {
+    // Mirror the normalized customName into the local instance. If an inline
+    // overlay is still mounted for THIS tab (e.g. a parallel rename completed
+    // via context menu / F2 while the overlay was open), dismount the overlay
+    // so the rendered label updates cleanly.
+    const instance = store.terminals.get(msg.tabId);
+    if (instance) {
+      instance.customName = msg.customName;
+    }
+    if (store.renameSession?.tabId === msg.tabId) {
+      hideRenameOverlay();
+      store.endRename();
+    }
+    updateTabBar();
   },
   onRestore(msg) {
     const instance = store.terminals.get(msg.tabId);
@@ -330,7 +382,7 @@ function handleInit(msg: InitMessage): void {
     }
   }
   for (const tab of msg.tabs) {
-    factory.createTerminal(tab.id, tab.name, msg.config, tab.isActive);
+    factory.createTerminal(tab.id, tab.name, msg.config, tab.isActive, tab.customName);
   }
   const containerEl = document.getElementById("terminal-container");
   if (containerEl) {

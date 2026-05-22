@@ -13,6 +13,7 @@ function createMockHandlers(): MessageHandlers {
     onExit: vi.fn(),
     onTabCreated: vi.fn(),
     onTabRemoved: vi.fn(),
+    onTabRenamed: vi.fn(),
     onRestore: vi.fn(),
     onConfigUpdate: vi.fn(),
     onViewShow: vi.fn(),
@@ -44,8 +45,9 @@ describe("createMessageRouter", () => {
     const messages: ExtensionToWebViewMessage[] = [
       { type: "output", tabId: "t1", data: "hello" },
       { type: "exit", tabId: "t1", code: 0 },
-      { type: "tabCreated", tabId: "t2", name: "Terminal 2" },
+      { type: "tabCreated", tabId: "t2", name: "Terminal 2", customName: null },
       { type: "tabRemoved", tabId: "t1" },
+      { type: "tabRenamed", tabId: "t2", customName: "build" },
       { type: "restore", tabId: "t1", data: "cached" },
       { type: "configUpdate", config: { fontSize: 16 } },
       { type: "viewShow" },
@@ -69,6 +71,7 @@ describe("createMessageRouter", () => {
       exit: "onExit",
       tabCreated: "onTabCreated",
       tabRemoved: "onTabRemoved",
+      tabRenamed: "onTabRenamed",
       restore: "onRestore",
       configUpdate: "onConfigUpdate",
       viewShow: "onViewShow",
@@ -94,7 +97,7 @@ describe("createMessageRouter", () => {
 
     dispatch({
       type: "init",
-      tabs: [{ id: "t1", name: "Terminal 1", isActive: true }],
+      tabs: [{ id: "t1", name: "Terminal 1", customName: null, isActive: true }],
       config: { fontSize: 14, cursorBlink: true, scrollback: 10000, fontFamily: "" },
     });
 

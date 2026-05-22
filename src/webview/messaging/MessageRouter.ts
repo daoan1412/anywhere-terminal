@@ -22,6 +22,7 @@ import type {
   SplitPaneMessage,
   TabCreatedMessage,
   TabRemovedMessage,
+  TabRenamedMessage,
   ThemeChangedMessage,
 } from "../../types/messages";
 
@@ -39,6 +40,7 @@ export interface MessageHandlers {
   onExit(msg: ExitMessage): void;
   onTabCreated(msg: TabCreatedMessage): void;
   onTabRemoved(msg: TabRemovedMessage): void;
+  onTabRenamed(msg: TabRenamedMessage): void;
   onRestore(msg: RestoreMessage): void;
   onConfigUpdate(msg: ConfigUpdateMessage): void;
   onViewShow(): void;
@@ -81,6 +83,9 @@ export function createMessageRouter(handlers: MessageHandlers): (msg: ExtensionT
         break;
       case "tabRemoved":
         handlers.onTabRemoved(msg);
+        break;
+      case "tabRenamed":
+        handlers.onTabRenamed(msg);
         break;
       case "restore":
         handlers.onRestore(msg);

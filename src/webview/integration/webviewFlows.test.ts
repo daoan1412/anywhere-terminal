@@ -32,6 +32,7 @@ describe("Integration: ack routing through FlowControl + MessageRouter", () => {
       onExit: vi.fn(),
       onTabCreated: vi.fn(),
       onTabRemoved: vi.fn(),
+      onTabRenamed: vi.fn(),
       onRestore: vi.fn(),
       onConfigUpdate: vi.fn(),
       onViewShow: vi.fn(),
@@ -78,6 +79,7 @@ describe("Integration: tab lifecycle with WebviewStateStore", () => {
     store.terminals.set("tab-1", {
       id: "tab-1",
       name: "Terminal 1",
+      customName: null,
       terminal: t1 as unknown as Terminal,
       container: document.createElement("div"),
       exited: false,
@@ -86,6 +88,7 @@ describe("Integration: tab lifecycle with WebviewStateStore", () => {
     store.terminals.set("tab-2", {
       id: "tab-2",
       name: "Terminal 2",
+      customName: null,
       terminal: t2 as unknown as Terminal,
       container: document.createElement("div"),
       exited: false,
@@ -163,6 +166,7 @@ describe("Integration: config update applied to terminals via store", () => {
     store.terminals.set("tab-1", {
       id: "tab-1",
       name: "Terminal 1",
+      customName: null,
       terminal: t1 as unknown as Terminal,
       container: document.createElement("div"),
       exited: false,
@@ -170,6 +174,7 @@ describe("Integration: config update applied to terminals via store", () => {
     store.terminals.set("tab-2", {
       id: "tab-2",
       name: "Terminal 2",
+      customName: null,
       terminal: t2 as unknown as Terminal,
       container: document.createElement("div"),
       exited: false,

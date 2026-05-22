@@ -15,7 +15,14 @@ import { getAllSessionIds } from "../SplitModel";
 /** A single terminal instance with its addons and DOM container. */
 export interface TerminalInstance {
   id: string;
+  /** Auto-derived name (default "Terminal N"; mutated by xterm.js onTitleChange). */
   name: string;
+  /**
+   * User-supplied display name. When non-null, the tab label renders this verbatim
+   * instead of `name`. Null = use auto-name. Mirrored from the host's `customName`
+   * via `tabRenamed` / `init` / `tabCreated` messages. See add-tab-rename design.md D1.
+   */
+  customName: string | null;
   terminal: Terminal;
   container: HTMLDivElement;
   /** Whether the PTY process has exited (terminal becomes read-only). */
@@ -59,6 +66,24 @@ export class WebviewStateStore {
 
   /** Currently active (visible) terminal tab ID. */
   activeTabId: string | null = null;
+
+  /**
+   * Tracks an in-flight inline rename. Non-null while the overlay `<input>` is
+   * mounted; `renderTabBar` checks this to reposition the overlay at the end
+   * of every render. Set via `beginRename` / cleared via `endRename`.
+   * See add-tab-rename design.md D4.
+   */
+  renameSession: { tabId: string; originalDisplayedValue: string } | null = null;
+
+  /** Mark the start of an inline rename for `tabId`. Idempotent (last write wins). */
+  beginRename(tabId: string, originalDisplayedValue: string): void {
+    this.renameSession = { tabId, originalDisplayedValue };
+  }
+
+  /** Clear the inline-rename marker. Idempotent. */
+  endRename(): void {
+    this.renameSession = null;
+  }
 
   /** Current terminal config — set from init, updated by configUpdate. */
   currentConfig: TerminalConfig = {

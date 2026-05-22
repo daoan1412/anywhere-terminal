@@ -5,7 +5,13 @@
 // @vitest-environment jsdom
 
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { handleTabKeyboardShortcut, type RenderTabBarDeps, renderTabBar, type TabKeyboardDeps } from "./TabBarUtils";
+import {
+  _resetTabClickTracker,
+  handleTabKeyboardShortcut,
+  type RenderTabBarDeps,
+  renderTabBar,
+  type TabKeyboardDeps,
+} from "./TabBarUtils";
 
 // ─── Helpers ────────────────────────────────────────────────────────
 
@@ -34,11 +40,13 @@ function createMockDeps(overrides: Partial<RenderTabBarDeps> = {}): RenderTabBar
 
 beforeEach(() => {
   document.body.innerHTML = "";
+  _resetTabClickTracker();
 });
 
 afterEach(() => {
   vi.restoreAllMocks();
   document.body.innerHTML = "";
+  _resetTabClickTracker();
 });
 
 // ─── renderTabBar ───────────────────────────────────────────────────
@@ -353,5 +361,154 @@ describe("handleTabKeyboardShortcut", () => {
     const result = handleTabKeyboardShortcut(makeKeyEvent(), deps);
     expect(result).toBe(true);
     expect(deps.switchTab).not.toHaveBeenCalled();
+  });
+});
+
+// ─── customName render priority (add-tab-rename) ─────────────────────
+
+describe("renderTabBar: customName render priority", () => {
+  it("renders customName instead of name when customName is non-null", () => {
+    const terminals = new Map<string, { name: string; customName: string | null }>([
+      ["tab-1", { name: "Terminal 1", customName: "build" }],
+      ["tab-2", { name: "node index.js", customName: null }],
+    ]);
+    const deps = createMockDeps({ terminals: terminals as never, activeTabId: "tab-1" });
+    renderTabBar(deps);
+    const tabs = deps.tabBarEl.querySelectorAll(".tab-item");
+    expect(tabs[0].querySelector(".tab-name")?.textContent).toBe("build");
+    expect(tabs[1].querySelector(".tab-name")?.textContent).toBe("node index.js");
+  });
+
+  it("falls back to name when customName is null or undefined", () => {
+    const terminals = new Map<string, { name: string; customName?: string | null }>([
+      ["tab-1", { name: "Terminal 1", customName: null }],
+      ["tab-2", { name: "Terminal 2" }], // customName field absent
+    ]);
+    const deps = createMockDeps({ terminals: terminals as never, activeTabId: "tab-1" });
+    renderTabBar(deps);
+    const tabs = deps.tabBarEl.querySelectorAll(".tab-item");
+    expect(tabs[0].querySelector(".tab-name")?.textContent).toBe("Terminal 1");
+    expect(tabs[1].querySelector(".tab-name")?.textContent).toBe("Terminal 2");
+  });
+
+  it("appends (exited) suffix to customName when the session has exited", () => {
+    const terminals = new Map<string, { name: string; customName: string | null; exited: boolean }>([
+      ["tab-1", { name: "Terminal 1", customName: "build", exited: true }],
+    ]);
+    const deps = createMockDeps({ terminals: terminals as never, activeTabId: "tab-1" });
+    renderTabBar(deps);
+    expect(deps.tabBarEl.querySelector(".tab-name")?.textContent).toBe("build (exited)");
+  });
+});
+
+describe("renderTabBar: tab DOM carries data-vscode-context for rename menu", () => {
+  it("each tab has data-vscode-context with webviewSection=terminalTab + tabId", () => {
+    const terminals = new Map<string, { name: string }>([
+      ["tab-abc", { name: "Terminal 1" }],
+      ["tab-def", { name: "Terminal 2" }],
+    ]);
+    const deps = createMockDeps({ terminals: terminals as never, activeTabId: "tab-abc" });
+    renderTabBar(deps);
+    const tabs = deps.tabBarEl.querySelectorAll<HTMLElement>(".tab-item");
+    expect(JSON.parse(tabs[0].dataset.vscodeContext!)).toEqual({
+      webviewSection: "terminalTab",
+      tabId: "tab-abc",
+    });
+    expect(JSON.parse(tabs[1].dataset.vscodeContext!)).toEqual({
+      webviewSection: "terminalTab",
+      tabId: "tab-def",
+    });
+  });
+});
+
+describe("renderTabBar: onTabRename + onAfterRender hooks", () => {
+  it("fires onTabRename on a second click within DBLCLICK_MS on the same tab", () => {
+    const onTabClick = vi.fn();
+    const onTabRename = vi.fn();
+    const terminals = new Map<string, { name: string }>([
+      ["tab-1", { name: "Terminal 1" }],
+      ["tab-2", { name: "Terminal 2" }],
+    ]);
+    const deps = createMockDeps({
+      terminals: terminals as never,
+      activeTabId: "tab-1",
+      onTabClick,
+      onTabRename,
+    });
+    renderTabBar(deps);
+    const tabs = deps.tabBarEl.querySelectorAll<HTMLElement>(".tab-item");
+    // First click — single-tab switch fires.
+    tabs[1].dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    expect(onTabClick).toHaveBeenCalledTimes(1);
+    expect(onTabClick).toHaveBeenCalledWith("tab-2");
+    expect(onTabRename).not.toHaveBeenCalled();
+    // Second click (within DBLCLICK_MS, same tab) → rename, no extra onTabClick.
+    tabs[1].dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    expect(onTabClick).toHaveBeenCalledTimes(1);
+    expect(onTabRename).toHaveBeenCalledTimes(1);
+    expect(onTabRename).toHaveBeenCalledWith("tab-2", tabs[1]);
+  });
+
+  it("a slow second click (> DBLCLICK_MS) just switches again, does NOT rename", () => {
+    const onTabClick = vi.fn();
+    const onTabRename = vi.fn();
+    const terminals = new Map<string, { name: string }>([
+      ["tab-1", { name: "Terminal 1" }],
+      ["tab-2", { name: "Terminal 2" }],
+    ]);
+    const deps = createMockDeps({
+      terminals: terminals as never,
+      activeTabId: "tab-1",
+      onTabClick,
+      onTabRename,
+    });
+    // Drive Date.now() so we can simulate the time gap.
+    const realNow = Date.now;
+    let nowMs = 1_000_000;
+    Date.now = () => nowMs;
+    try {
+      renderTabBar(deps);
+      const tabs = deps.tabBarEl.querySelectorAll<HTMLElement>(".tab-item");
+      tabs[1].dispatchEvent(new MouseEvent("click", { bubbles: true }));
+      nowMs += 400; // > 350ms threshold
+      tabs[1].dispatchEvent(new MouseEvent("click", { bubbles: true }));
+      expect(onTabClick).toHaveBeenCalledTimes(2);
+      expect(onTabRename).not.toHaveBeenCalled();
+    } finally {
+      Date.now = realNow;
+    }
+  });
+
+  it("first click on tab A then fast click on tab B does NOT rename either", () => {
+    const onTabClick = vi.fn();
+    const onTabRename = vi.fn();
+    const terminals = new Map<string, { name: string }>([
+      ["tab-1", { name: "Terminal 1" }],
+      ["tab-2", { name: "Terminal 2" }],
+    ]);
+    const deps = createMockDeps({
+      terminals: terminals as never,
+      activeTabId: "tab-1",
+      onTabClick,
+      onTabRename,
+    });
+    renderTabBar(deps);
+    const tabs = deps.tabBarEl.querySelectorAll<HTMLElement>(".tab-item");
+    tabs[0].dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    tabs[1].dispatchEvent(new MouseEvent("click", { bubbles: true })); // different tab
+    expect(onTabClick).toHaveBeenCalledTimes(2);
+    expect(onTabRename).not.toHaveBeenCalled();
+  });
+
+  it("calls onAfterRender at the end of each render (if provided)", () => {
+    const onAfterRender = vi.fn();
+    const terminals = new Map<string, { name: string }>([["tab-1", { name: "Terminal 1" }]]);
+    const deps = createMockDeps({
+      terminals: terminals as never,
+      activeTabId: "tab-1",
+      onAfterRender,
+    });
+    renderTabBar(deps);
+    expect(onAfterRender).toHaveBeenCalledTimes(1);
   });
 });

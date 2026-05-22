@@ -13,6 +13,28 @@ import { OutputBuffer } from "./OutputBuffer";
 /** Maximum total size of scrollback cache per session (in characters). Default 512KB. */
 const SCROLLBACK_MAX_SIZE = 512 * 1024;
 
+/** workspaceState key for the per-terminal-number custom-name record. See design.md D3. */
+const CUSTOM_NAMES_STORAGE_KEY = "anywhereTerminal.tabCustomNames";
+
+/** Hard cap for a custom name; longer input is silently truncated. See design.md D7. */
+const CUSTOM_NAME_MAX_LENGTH = 80;
+
+/**
+ * Minimal subset of `vscode.Memento` (read/write key-value) that the
+ * `SessionManager` actually uses. Declared locally so tests can pass a tiny
+ * in-memory fake without importing vscode.
+ */
+export interface CustomNameStorage {
+  get(key: string): unknown;
+  update(key: string, value: unknown): Thenable<void>;
+}
+
+/** No-op storage used when no Memento is provided — sessions still work, just without persistence. */
+const noopStorage: CustomNameStorage = {
+  get: () => undefined,
+  update: () => Promise.resolve(),
+};
+
 // ─── Data Model ─────────────────────────────────────────────────────
 
 /** A single terminal session with its PTY, buffer, and metadata. */
@@ -25,6 +47,12 @@ export interface TerminalSession {
   pty: PtySession;
   /** Display name: "Terminal 1", "Terminal 2", etc. */
   name: string;
+  /**
+   * User-supplied display name. When non-null, takes priority over `name` in
+   * the tab label. Reset to null by submitting an empty rename. Hydrated from
+   * workspaceState on create for non-split-pane sessions (see design.md D3).
+   */
+  customName: string | null;
   /** Whether this is the active tab in its view */
   isActive: boolean;
   /** Assigned terminal number (for name and recycling) */
@@ -102,6 +130,25 @@ export class SessionManager {
   /** Whether this manager has been disposed */
   private _disposed = false;
 
+  /** Persistent storage for per-number custom tab names (see design.md D3). */
+  private readonly customNameStorage: CustomNameStorage;
+
+  /**
+   * In-memory authoritative copy of the `{ number → customName }` record.
+   * Hydrated once from `customNameStorage` at construction; every mutation
+   * goes through this Map first (synchronous, race-free), then a snapshot is
+   * fired-and-forgotten to `customNameStorage.update()`. This avoids the
+   * load-modify-save race where two concurrent renames each load empty,
+   * each write back only their own entry, and one entry is lost. See
+   * `.reviews/round-1.md` B1.
+   */
+  private readonly persistedCustomNames: Map<string, string>;
+
+  constructor(customNameStorage: CustomNameStorage = noopStorage) {
+    this.customNameStorage = customNameStorage;
+    this.persistedCustomNames = this.loadPersistedNamesFromStorage();
+  }
+
   // ─── Public API: Core CRUD ──────────────────────────────────────
 
   /**
@@ -160,11 +207,15 @@ export class SessionManager {
     const outputBuffer = new OutputBuffer(id, webview, pty);
 
     // Create session object
+    // Hydrate custom name from persisted record (root tabs only; see design.md D3)
+    const hydratedCustomName = isSplitPane ? null : (this.persistedCustomNames.get(String(number)) ?? null);
+
     const session: TerminalSession = {
       id,
       viewId,
       pty,
       name,
+      customName: hydratedCustomName,
       isActive: !isSplitPane,
       number,
       outputBuffer,
@@ -273,21 +324,22 @@ export class SessionManager {
    * Get tab info for a view (for init/restore messages).
    * Returns an empty array for unknown viewIds.
    */
-  getTabsForView(viewId: string): Array<{ id: string; name: string; isActive: boolean }> {
+  getTabsForView(viewId: string): Array<{ id: string; name: string; customName: string | null; isActive: boolean }> {
     const viewSessionIds = this.viewSessions.get(viewId);
     if (!viewSessionIds) {
       return [];
     }
 
+    type TabInfo = { id: string; name: string; customName: string | null; isActive: boolean };
     return viewSessionIds
-      .map((sid) => {
+      .map((sid): TabInfo | undefined => {
         const s = this.sessions.get(sid);
         if (!s || s.isSplitPane) {
           return undefined;
         }
-        return { id: s.id, name: s.name, isActive: s.isActive };
+        return { id: s.id, name: s.name, customName: s.customName, isActive: s.isActive };
       })
-      .filter((tab): tab is { id: string; name: string; isActive: boolean } => tab !== undefined);
+      .filter((tab): tab is TabInfo => tab !== undefined);
   }
 
   /**
@@ -345,6 +397,45 @@ export class SessionManager {
       return undefined;
     }
     return queryProcessCwd(pid);
+  }
+
+  /**
+   * Rename a tab session by setting its `customName`. Single public entry point
+   * for the rename feature; all UX triggers converge here (see design.md D2).
+   *
+   * - Silent no-op on unknown sessionId.
+   * - Silent no-op when the target is a split pane (`isSplitPane === true`):
+   *   split panes consume terminal numbers but aren't tab identities, so the
+   *   persisted record stays scoped to root tabs only (see design.md D3).
+   * - `input` is normalized: `null`/whitespace-only → `null` (reset to auto-name);
+   *   strings longer than `CUSTOM_NAME_MAX_LENGTH` are silently truncated.
+   * - On success: updates `session.customName`, broadcasts `tabRenamed` to the
+   *   owning webview, and persists fire-and-forget (see design.md D9).
+   */
+  renameSession(sessionId: string, input: string | null): void {
+    const session = this.sessions.get(sessionId);
+    if (!session || session.isSplitPane) {
+      return;
+    }
+
+    const normalized = this.normalizeCustomName(input);
+    session.customName = normalized;
+
+    this.safePostMessage(session.webview, {
+      type: "tabRenamed",
+      tabId: sessionId,
+      customName: normalized,
+    });
+
+    // Mutate the in-memory authoritative record synchronously (race-free), then
+    // enqueue a fire-and-forget snapshot write. See `.reviews/round-1.md` B1.
+    const key = String(session.number);
+    if (normalized === null) {
+      this.persistedCustomNames.delete(key);
+    } else {
+      this.persistedCustomNames.set(key, normalized);
+    }
+    this.savePersistedNamesSnapshot();
   }
 
   /**
@@ -650,6 +741,63 @@ export class SessionManager {
       const evicted = session.scrollbackCache.shift()!;
       session.scrollbackSize -= evicted.length;
     }
+  }
+
+  // ─── Private: Custom-Name Persistence ───────────────────────────
+
+  /**
+   * Read the persisted `{ number → customName }` record from workspaceState
+   * into a Map (called once from the constructor). Defensive: returns an empty
+   * Map for any non-object value (corrupted state, first run, no-op storage).
+   */
+  private loadPersistedNamesFromStorage(): Map<string, string> {
+    const raw = this.customNameStorage.get(CUSTOM_NAMES_STORAGE_KEY);
+    const result = new Map<string, string>();
+    if (raw === null || typeof raw !== "object" || Array.isArray(raw)) {
+      return result;
+    }
+    for (const [k, v] of Object.entries(raw as Record<string, unknown>)) {
+      if (typeof v === "string") {
+        result.set(k, v);
+      }
+    }
+    return result;
+  }
+
+  /**
+   * Write a snapshot of the in-memory record to `workspaceState`. Fire-and-forget
+   * (errors logged only; see design.md D9). Snapshot is taken at call time so
+   * the persisted state reflects whatever the in-memory map looks like NOW —
+   * subsequent mutations are picked up by the NEXT call, not this one.
+   */
+  private savePersistedNamesSnapshot(): void {
+    const snapshot: Record<string, string> = {};
+    for (const [k, v] of this.persistedCustomNames) {
+      snapshot[k] = v;
+    }
+    void this.customNameStorage.update(CUSTOM_NAMES_STORAGE_KEY, snapshot).then(undefined, (err) => {
+      console.error("[AnyWhere Terminal] Failed to persist custom tab names:", err);
+    });
+  }
+
+  /**
+   * Normalize a rename input to the canonical `customName` value.
+   * - null / undefined / empty-after-trim → null (reset to auto-name)
+   * - longer than CUSTOM_NAME_MAX_LENGTH → silently truncated
+   * - otherwise → trimmed string
+   */
+  private normalizeCustomName(input: string | null): string | null {
+    if (input === null) {
+      return null;
+    }
+    const trimmed = input.trim();
+    if (trimmed.length === 0) {
+      return null;
+    }
+    if (trimmed.length > CUSTOM_NAME_MAX_LENGTH) {
+      return trimmed.slice(0, CUSTOM_NAME_MAX_LENGTH);
+    }
+    return trimmed;
   }
 
   // ─── Private: Safe Message Posting ──────────────────────────────

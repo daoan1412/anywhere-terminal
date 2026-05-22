@@ -63,6 +63,7 @@ switch (msg.type) {
 | `createTab` | User requested a new tab | *(none)* | On "+" button click or command |
 | `switchTab` | User switched to a different tab | `{ tabId }` | On tab click |
 | `closeTab` | User requested tab close | `{ tabId }` | On tab "x" button click |
+| `renameTab` | User committed an inline tab rename | `{ tabId, customName }` | On dblclick-overlay Enter / blur. Host normalizes (trim / empty→null / truncate-80). Host-side triggers (context menu, command palette, F2) invoke `SessionManager.renameSession` directly — they do NOT emit this message. |
 | `requestSplitSession` | User requested a split pane | `{ direction, sourcePaneId }` | On split command or context menu |
 | `requestCloseSplitPane` | User requested closing a split pane | `{ sessionId }` | On close split pane action |
 | `clear` | Clear terminal scrollback | `{ tabId }` | On clear command |
@@ -121,6 +122,23 @@ interface CloseTabMessage {
   tabId: string;
 }
 
+/**
+ * Inline-edit dblclick path for tab rename. Host normalizes (trim / empty→null
+ * / truncate to 80) and persists via `SessionManager.renameSession`. Host-side
+ * triggers (right-click, command palette, F2) invoke `renameSession` directly
+ * — they do NOT send this message.
+ */
+interface RenameTabMessage {
+  type: 'renameTab';
+  /** Target root-tab session id */
+  tabId: string;
+  /**
+   * Raw input from the overlay `<input>`. Null/empty/whitespace-only resets the
+   * tab to its auto-derived name.
+   */
+  customName: string | null;
+}
+
 // === Actions ===
 
 /** User requested terminal clear (scrollback + viewport). */
@@ -171,7 +189,8 @@ interface AckMessage {
 | `init` | Initial state after handshake | `{ tabs, config }` | Once, in response to `ready` |
 | `output` | PTY output (buffered) | `{ tabId, data }` | On buffer flush (adaptive 4-16ms or 64KB) |
 | `exit` | PTY process exited | `{ tabId, code }` | When shell process exits |
-| `tabCreated` | New tab created | `{ tabId, name }` | In response to `createTab` |
+| `tabCreated` | New tab created | `{ tabId, name, customName }` | In response to `createTab`. `customName` is null unless hydrated from `workspaceState`. |
+| `tabRenamed` | Tab's `customName` updated | `{ tabId, customName }` | After any rename trigger (inline-edit IPC, command palette, F2, right-click menu) — host pushes the normalized value back to the webview. |
 | `tabRemoved` | Tab destroyed | `{ tabId }` | In response to `closeTab` or process exit cleanup |
 | `restore` | Scrollback restore data | `{ tabId, data }` | On view re-creation (when `retainContextWhenHidden` fails) |
 | `configUpdate` | Settings changed | `{ config }` | When user changes `anywhereTerminal.*` settings |
@@ -198,6 +217,8 @@ interface InitMessage {
     id: string;
     /** Display name (e.g., "Terminal 1") */
     name: string;
+    /** Persisted custom name (null when none); hydrated from workspaceState on create. */
+    customName: string | null;
     /** Whether this tab is currently active */
     isActive: boolean;
   }>;
@@ -238,6 +259,20 @@ interface TabCreatedMessage {
   tabId: string;
   /** Display name (e.g., "Terminal 2") */
   name: string;
+  /** Persisted custom name (null when none); hydrated from workspaceState. */
+  customName: string | null;
+}
+
+/**
+ * Host → webview: pushes the normalized custom name after any rename trigger.
+ * The webview mirrors it into `TerminalInstance.customName` and re-renders.
+ */
+interface TabRenamedMessage {
+  type: 'tabRenamed';
+  /** Target root-tab session id */
+  tabId: string;
+  /** Final normalized name. `null` = revert to auto-derived `name`. */
+  customName: string | null;
 }
 
 /** A terminal tab has been removed and its PTY destroyed. */
@@ -723,7 +758,7 @@ These are **not** part of the current protocol but may be added in future phases
 
 | Type | Direction | Purpose |
 |------|-----------|---------|
-| `rename` | WV → Ext | User renames a tab |
+| ~~`rename`~~ | ~~WV → Ext~~ | ~~User renames a tab~~ — landed as `renameTab` / `tabRenamed` in change `add-tab-rename`; see §3 and §4. |
 | `search` | WV → Ext | Terminal search (find in buffer) |
 | `link` | WV → Ext | User clicked a detected link |
 | `ping` / `pong` | Both | Health check / keepalive |

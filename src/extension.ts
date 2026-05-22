@@ -1,4 +1,5 @@
 import * as vscode from "vscode";
+import { resolveRenameTargetTabId } from "./providers/resolveRenameTarget";
 import { TerminalEditorProvider } from "./providers/TerminalEditorProvider";
 import { TerminalViewProvider } from "./providers/TerminalViewProvider";
 import { loadNodePty } from "./pty/PtyManager";
@@ -21,8 +22,9 @@ export function activate(context: vscode.ExtensionContext) {
     }
     // Continue activation — individual createSession calls will fail gracefully
   }
-  // Create shared SessionManager (singleton)
-  const sessionManager = new SessionManager();
+  // Create shared SessionManager (singleton). workspaceState backs the per-workspace
+  // custom-tab-name persistence (anywhereTerminal.tabCustomNames); see design.md D3 of add-tab-rename.
+  const sessionManager = new SessionManager(context.workspaceState);
 
   // Sidebar view
   const sidebarProvider = new TerminalViewProvider(context.extensionUri, sessionManager, "sidebar");
@@ -100,6 +102,7 @@ export function activate(context: vscode.ExtensionContext) {
           type: "tabCreated",
           tabId: newSessionId,
           name: newSession.name,
+          customName: newSession.customName,
         });
       }
     } catch (err) {
@@ -269,6 +272,42 @@ export function activate(context: vscode.ExtensionContext) {
       if (view) {
         safePostMessage(view.webview, { type: "tabRemoved", tabId: sessionId });
       }
+    }),
+  );
+
+  // ─── Rename Tab Command ───────────────────────────────────────────
+  // See add-tab-rename: specs/tab-rename/spec.md#Rename-Command-and-Entry-Points,
+  // design.md D5 (resolution chain — extracted to resolveRenameTarget.ts),
+  // D7 (validation), D8 (single command id).
+  //
+  // Once a tabId is resolved, open an InputBox seeded with the current displayed
+  // name. Dismissal (`undefined`) is no-op; any other value (incl. empty string)
+  // is passed to `SessionManager.renameSession`, which normalizes per D7.
+
+  context.subscriptions.push(
+    vscode.commands.registerCommand("anywhereTerminal.renameTab", async (arg?: { tabId?: string }) => {
+      const tabId = resolveRenameTargetTabId(
+        arg,
+        () => TerminalEditorProvider.getActiveProvider(),
+        () => TerminalViewProvider.getLastFocusedProvider(),
+      );
+      if (!tabId) {
+        return;
+      }
+      const session = sessionManager.getSession(tabId);
+      if (!session) {
+        return;
+      }
+      const currentDisplayed = session.customName ?? session.name;
+      const input = await vscode.window.showInputBox({
+        prompt: "Rename Tab (leave empty to reset to auto-name)",
+        value: currentDisplayed,
+        placeHolder: session.name,
+      });
+      if (input === undefined) {
+        return; // User dismissed; do nothing
+      }
+      sessionManager.renameSession(tabId, input);
     }),
   );
 

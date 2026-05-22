@@ -169,6 +169,9 @@ export class TerminalViewProvider implements vscode.WebviewViewProvider {
       this.sessionManager.pauseOutputForView(this.getViewId());
       this._view = undefined;
       this._ready = false;
+      // Remove from the focus-recency stack so getLastFocusedProvider doesn't
+      // pin a disposed provider. See `.reviews/round-1.md` W2.
+      this.unmarkFocused();
     });
   }
 
@@ -329,6 +332,7 @@ export class TerminalViewProvider implements vscode.WebviewViewProvider {
                 type: "tabCreated",
                 tabId: newSessionId,
                 name: newSession.name,
+                customName: newSession.customName,
               });
             }
           } catch (err) {
@@ -357,6 +361,12 @@ export class TerminalViewProvider implements vscode.WebviewViewProvider {
               type: "tabRemoved",
               tabId: message.tabId,
             });
+          }
+          break;
+
+        case "renameTab":
+          if (typeof message.tabId === "string") {
+            this.sessionManager.renameSession(message.tabId, message.customName ?? null);
           }
           break;
 
@@ -417,6 +427,10 @@ export class TerminalViewProvider implements vscode.WebviewViewProvider {
           if (typeof message.activeSessionId === "string") {
             this._lastActivePaneSessionId = message.activeSessionId;
           }
+          // Mark this provider as most-recently focused so the rename command
+          // can resolve "current tab" without per-view context keys.
+          // See add-tab-rename design.md D5.
+          this.markFocused();
           break;
 
         case "openLink":
@@ -633,5 +647,73 @@ export class TerminalViewProvider implements vscode.WebviewViewProvider {
     const tabs = this.sessionManager.getTabsForView(this.getViewId());
     const activeTab = tabs.find((t) => t.isActive);
     return activeTab?.id;
+  }
+
+  /**
+   * Get the **root tab** id for the active tab in this view — distinct from
+   * `getActiveSessionId()` which prefers a split-pane session id when active.
+   * Rename always targets the root tab, never a split pane (see
+   * add-tab-rename design.md D5).
+   *
+   * Returns undefined when this view has no sessions or no active tab.
+   */
+  getActiveTabId(): string | undefined {
+    return this.sessionManager.getTabsForView(this.getViewId()).find((t) => t.isActive)?.id;
+  }
+
+  /**
+   * Returns the most recently focused TerminalViewProvider whose webview is
+   * still visible. Walks providers in focus-recency order so when the most
+   * recently focused provider is hidden (e.g. user collapsed the panel after
+   * focusing it), we fall back to the next-most-recent visible provider —
+   * typically the sidebar that's still on screen. See `.reviews/round-1.md` W2.
+   *
+   * "Focused" is tracked via the webview's `focus` IPC message — see
+   * `_focusOrder` update site inside `markFocused`.
+   */
+  static getLastFocusedProvider(): TerminalViewProvider | undefined {
+    for (const p of TerminalViewProvider._focusOrder) {
+      if (p._view?.visible) {
+        return p;
+      }
+    }
+    return undefined;
+  }
+
+  /**
+   * Most-recently-focused providers, in descending recency order (index 0 is
+   * most recent). Cleared per-instance on dispose so the array doesn't pin
+   * stale providers in memory.
+   */
+  private static _focusOrder: TerminalViewProvider[] = [];
+
+  /** Test-only hook: clear the recency stack (e.g. between tests). */
+  static _resetLastFocused(): void {
+    TerminalViewProvider._focusOrder = [];
+  }
+
+  /**
+   * Internal: hoist this provider to the front of the recency stack. Called on
+   * every `focus` IPC message from this provider's webview.
+   */
+  private markFocused(): void {
+    const order = TerminalViewProvider._focusOrder;
+    const i = order.indexOf(this);
+    if (i === 0) {
+      return; // already most recent
+    }
+    if (i > 0) {
+      order.splice(i, 1);
+    }
+    order.unshift(this);
+  }
+
+  /** Internal: remove this provider from the recency stack (called on dispose). */
+  private unmarkFocused(): void {
+    const order = TerminalViewProvider._focusOrder;
+    const i = order.indexOf(this);
+    if (i !== -1) {
+      order.splice(i, 1);
+    }
   }
 }

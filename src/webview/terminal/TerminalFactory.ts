@@ -153,7 +153,13 @@ export class TerminalFactory {
    * Create a new terminal instance with addons.
    * See: docs/design/xterm-integration.md#§3-§6
    */
-  createTerminal(id: string, name: string, config: TerminalConfig, isActive: boolean): TerminalInstance {
+  createTerminal(
+    id: string,
+    name: string,
+    config: TerminalConfig,
+    isActive: boolean,
+    customName: string | null = null,
+  ): TerminalInstance {
     const containerEl = document.getElementById("terminal-container");
     if (!containerEl) {
       throw new Error("[AnyWhere Terminal] #terminal-container not found");
@@ -347,6 +353,7 @@ export class TerminalFactory {
     const instance: TerminalInstance = {
       id,
       name,
+      customName,
       terminal,
       container,
       exited: false,

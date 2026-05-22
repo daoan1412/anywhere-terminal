@@ -62,6 +62,23 @@ export interface CloseTabMessage {
   tabId: string;
 }
 
+/**
+ * Inline-edit dblclick path for tab rename. Host normalizes (trim / empty→null /
+ * truncate to 80 chars) and persists via `SessionManager.renameSession`. The host-
+ * side triggers (right-click, command palette, F2) invoke `renameSession` directly
+ * — they do NOT send this message.
+ */
+export interface RenameTabMessage {
+  type: "renameTab";
+  /** Target tab (root tab) session id */
+  tabId: string;
+  /**
+   * Raw input from the inline `<input>`. Null/empty/whitespace-only resets the
+   * tab to its auto-derived name. Host normalizes before storing.
+   */
+  customName: string | null;
+}
+
 /** User requested a new PTY session for a split pane. */
 export interface RequestSplitSessionMessage {
   type: "requestSplitSession";
@@ -154,6 +171,7 @@ export type WebViewToExtensionMessage =
   | CreateTabMessage
   | SwitchTabMessage
   | CloseTabMessage
+  | RenameTabMessage
   | ClearMessage
   | AckMessage
   | RequestSplitSessionMessage
@@ -175,6 +193,8 @@ export interface InitMessage {
     id: string;
     /** Display name (e.g., "Terminal 1") */
     name: string;
+    /** Persisted custom name for this tab (null when none). See add-tab-rename design.md D2. */
+    customName: string | null;
     /** Whether this tab is currently active */
     isActive: boolean;
   }>;
@@ -210,6 +230,27 @@ export interface TabCreatedMessage {
   tabId: string;
   /** Display name (e.g., "Terminal 2") */
   name: string;
+  /**
+   * Persisted custom name for this tab (root tabs only; null when none). Sent
+   * on creation so a hydrated name surfaces on first render without flicker.
+   */
+  customName: string | null;
+}
+
+/**
+ * Host pushes the normalized custom name after any rename trigger (inline-edit,
+ * context menu, command palette, F2). The webview mirrors it into
+ * `TerminalInstance.customName` and re-renders the tab bar.
+ */
+export interface TabRenamedMessage {
+  type: "tabRenamed";
+  /** Target tab (root tab) session id */
+  tabId: string;
+  /**
+   * Final normalized name. `null` means the tab reverts to its auto-derived
+   * name. Always the host-normalized value (trimmed, possibly truncated).
+   */
+  customName: string | null;
 }
 
 /** A terminal tab has been removed and its PTY destroyed. */
@@ -422,6 +463,7 @@ export type ExtensionToWebViewMessage =
   | OutputMessage
   | ExitMessage
   | TabCreatedMessage
+  | TabRenamedMessage
   | TabRemovedMessage
   | RestoreMessage
   | ConfigUpdateMessage

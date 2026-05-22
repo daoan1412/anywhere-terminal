@@ -28,9 +28,42 @@ export class TerminalEditorProvider {
   /** Track all active editor panels for config updates. */
   private static readonly _activePanels = new Set<vscode.WebviewPanel>();
 
+  /**
+   * Instance registry keyed by the owning WebviewPanel. Populated in
+   * `createPanel`, cleared on `panel.onDidDispose`. Lets host-side commands
+   * (e.g. rename) resolve "the currently active editor terminal" to a concrete
+   * provider whose `getActiveTabId()` can be queried.
+   *
+   * See add-tab-rename design.md D5.
+   */
+  private static readonly _instances = new Map<vscode.WebviewPanel, TerminalEditorProvider>();
+
   /** Get all active editor panels (for pushing config updates). */
   static getActivePanels(): ReadonlySet<vscode.WebviewPanel> {
     return TerminalEditorProvider._activePanels;
+  }
+
+  /**
+   * Return the editor-area provider whose panel currently holds focus
+   * (`panel.active === true`), or undefined. Used by the rename-command
+   * resolver (see add-tab-rename design.md D5).
+   */
+  static getActiveProvider(): TerminalEditorProvider | undefined {
+    for (const [panel, provider] of TerminalEditorProvider._instances) {
+      if (panel.active) {
+        return provider;
+      }
+    }
+    return undefined;
+  }
+
+  /**
+   * Get the **root tab** id for the active tab in this editor panel — symmetric
+   * with `TerminalViewProvider.getActiveTabId()`. Rename always targets the
+   * root tab, never a split pane (see add-tab-rename design.md D5).
+   */
+  getActiveTabId(): string | undefined {
+    return this.sessionManager.getTabsForView(this._viewId).find((t) => t.isActive)?.id;
   }
 
   /** The unique view ID for this editor panel's sessions. */
@@ -71,10 +104,12 @@ export class TerminalEditorProvider {
       },
     );
 
-    const _provider = new TerminalEditorProvider(context.extensionUri, sessionManager, panel);
+    const provider = new TerminalEditorProvider(context.extensionUri, sessionManager, panel);
 
-    // Track this panel for config updates
+    // Track this panel for config updates + the provider instance for host-side
+    // commands (rename). Disposal happens in `setupPanel`'s onDidDispose.
     TerminalEditorProvider._activePanels.add(panel);
+    TerminalEditorProvider._instances.set(panel, provider);
 
     // Return a disposable that cleans up via panel dispose (which triggers onDidDispose → destroyAllForView)
     return {
@@ -144,6 +179,7 @@ export class TerminalEditorProvider {
       // Cancel + dispose any in-flight preview tokens (D10).
       this.cancelAllPreviewTokens();
       TerminalEditorProvider._activePanels.delete(this._panel);
+      TerminalEditorProvider._instances.delete(this._panel);
       this.sessionManager.destroyAllForView(this._viewId);
     });
   }
@@ -284,6 +320,7 @@ export class TerminalEditorProvider {
               type: "tabCreated",
               tabId: newSessionId,
               name: newSession.name,
+              customName: newSession.customName,
             });
           }
           break;
@@ -303,6 +340,12 @@ export class TerminalEditorProvider {
               type: "tabRemoved",
               tabId: message.tabId,
             });
+          }
+          break;
+
+        case "renameTab":
+          if (typeof message.tabId === "string") {
+            this.sessionManager.renameSession(message.tabId, message.customName ?? null);
           }
           break;
 

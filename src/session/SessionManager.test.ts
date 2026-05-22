@@ -1175,3 +1175,263 @@ describe("SessionManager: getMemoryMetrics", () => {
     sm.dispose();
   });
 });
+
+// ─── Tab rename + custom-name persistence ────────────────────────────
+// See: asimov/changes/add-tab-rename/specs/tab-rename/spec.md
+//      asimov/changes/add-tab-rename/specs/session-manager-core/spec.md
+//      design.md D3 (persistence) + D7 (validation) + D9 (async)
+
+/** In-memory Memento fake mirroring `vscode.Memento`. */
+function createFakeMemento(initial: Record<string, unknown> = {}) {
+  const store = new Map<string, unknown>(Object.entries(initial));
+  let updateImpl: (key: string, value: unknown) => Thenable<void> = (k, v) => {
+    if (v === undefined) {
+      store.delete(k);
+    } else {
+      store.set(k, v);
+    }
+    return Promise.resolve();
+  };
+  return {
+    get: (key: string) => store.get(key),
+    update: (key: string, value: unknown) => updateImpl(key, value),
+    /** Test-only: snapshot of the underlying store. */
+    _snapshot: () => Object.fromEntries(store),
+    /** Test-only: swap the update implementation (e.g. to throw). */
+    _setUpdate: (impl: (key: string, value: unknown) => Thenable<void>) => {
+      updateImpl = impl;
+    },
+  };
+}
+
+const STORAGE_KEY = "anywhereTerminal.tabCustomNames";
+
+describe("SessionManager: customName field default", () => {
+  it("defaults to null on createSession for a fresh root tab", () => {
+    const sm = new SessionManager();
+    const webview = createMockWebview();
+    const id = sm.createSession("sidebar", webview);
+    expect(sm.getSession(id)!.customName).toBeNull();
+    sm.dispose();
+  });
+});
+
+describe("SessionManager.renameSession: normalization", () => {
+  it("treats null input as a reset (customName becomes null)", () => {
+    const sm = new SessionManager();
+    const webview = createMockWebview();
+    const id = sm.createSession("sidebar", webview);
+    sm.renameSession(id, "build");
+    expect(sm.getSession(id)!.customName).toBe("build");
+    sm.renameSession(id, null);
+    expect(sm.getSession(id)!.customName).toBeNull();
+    sm.dispose();
+  });
+
+  it("treats whitespace-only input as a reset", () => {
+    const sm = new SessionManager();
+    const webview = createMockWebview();
+    const id = sm.createSession("sidebar", webview);
+    sm.renameSession(id, "build");
+    sm.renameSession(id, "   \t  ");
+    expect(sm.getSession(id)!.customName).toBeNull();
+    sm.dispose();
+  });
+
+  it("trims leading/trailing whitespace", () => {
+    const sm = new SessionManager();
+    const webview = createMockWebview();
+    const id = sm.createSession("sidebar", webview);
+    sm.renameSession(id, "   deploy  ");
+    expect(sm.getSession(id)!.customName).toBe("deploy");
+    sm.dispose();
+  });
+
+  it("silently truncates input longer than 80 characters", () => {
+    const sm = new SessionManager();
+    const webview = createMockWebview();
+    const id = sm.createSession("sidebar", webview);
+    const long = "x".repeat(120);
+    sm.renameSession(id, long);
+    const value = sm.getSession(id)!.customName!;
+    expect(value.length).toBe(80);
+    expect(value).toBe("x".repeat(80));
+    sm.dispose();
+  });
+});
+
+describe("SessionManager.renameSession: side effects", () => {
+  it("broadcasts tabRenamed with the normalized customName", () => {
+    const sm = new SessionManager();
+    const webview = createMockWebview();
+    const id = sm.createSession("sidebar", webview);
+    webview.messages.length = 0; // clear messages from session creation
+    sm.renameSession(id, "  build  ");
+    const renamed = webview.messages.find(
+      (m): m is { type: "tabRenamed"; tabId: string; customName: string | null } =>
+        typeof m === "object" && m !== null && (m as { type?: string }).type === "tabRenamed",
+    );
+    expect(renamed).toBeDefined();
+    expect(renamed!.tabId).toBe(id);
+    expect(renamed!.customName).toBe("build");
+    sm.dispose();
+  });
+
+  it("is a silent no-op on an unknown sessionId (no throw, no broadcast)", () => {
+    const sm = new SessionManager();
+    const webview = createMockWebview();
+    sm.createSession("sidebar", webview);
+    webview.messages.length = 0;
+    expect(() => sm.renameSession("never-existed", "x")).not.toThrow();
+    expect(webview.messages.find((m) => (m as { type?: string }).type === "tabRenamed")).toBeUndefined();
+    sm.dispose();
+  });
+
+  it("is a silent no-op when target is a split-pane session", () => {
+    const sm = new SessionManager();
+    const webview = createMockWebview();
+    sm.createSession("sidebar", webview); // root tab
+    const paneId = sm.createSession("sidebar", webview, { isSplitPane: true });
+    webview.messages.length = 0;
+    sm.renameSession(paneId, "should-not-apply");
+    expect(sm.getSession(paneId)!.customName).toBeNull();
+    expect(webview.messages.find((m) => (m as { type?: string }).type === "tabRenamed")).toBeUndefined();
+    sm.dispose();
+  });
+});
+
+describe("SessionManager.renameSession: persistence", () => {
+  it("upserts the normalized value into workspaceState keyed by terminal number", () => {
+    const memento = createFakeMemento();
+    const sm = new SessionManager(memento);
+    const webview = createMockWebview();
+    const id = sm.createSession("sidebar", webview); // number = 1
+    sm.renameSession(id, "build");
+    expect(memento._snapshot()[STORAGE_KEY]).toEqual({ "1": "build" });
+    sm.dispose();
+  });
+
+  it("deletes the entry when normalized value is null (reset)", () => {
+    const memento = createFakeMemento({ [STORAGE_KEY]: { "1": "build" } });
+    const sm = new SessionManager(memento);
+    const webview = createMockWebview();
+    const id = sm.createSession("sidebar", webview); // number = 1
+    // Hydrated on create:
+    expect(sm.getSession(id)!.customName).toBe("build");
+    sm.renameSession(id, null);
+    expect(memento._snapshot()[STORAGE_KEY]).toEqual({});
+    sm.dispose();
+  });
+
+  it("does NOT persist for a split-pane session", () => {
+    const memento = createFakeMemento();
+    const sm = new SessionManager(memento);
+    const webview = createMockWebview();
+    sm.createSession("sidebar", webview);
+    const paneId = sm.createSession("sidebar", webview, { isSplitPane: true });
+    sm.renameSession(paneId, "ignored");
+    expect(memento._snapshot()[STORAGE_KEY]).toBeUndefined();
+    sm.dispose();
+  });
+
+  it("two quick renames of different tabs both persist (regression: B1 race)", async () => {
+    // Mock storage with manually-resolved updates so we can replay the race.
+    const store = new Map<string, unknown>();
+    const pendingUpdates: Array<() => void> = [];
+    const memento = {
+      get: (key: string) => store.get(key),
+      update: (key: string, value: unknown) => {
+        // Defer the actual apply until we manually drain — mimics two updates
+        // queued before the first applies (the failure mode from B1).
+        return new Promise<void>((resolve) => {
+          pendingUpdates.push(() => {
+            store.set(key, value);
+            resolve();
+          });
+        });
+      },
+    };
+    const sm = new SessionManager(memento);
+    const webview = createMockWebview();
+    const idA = sm.createSession("sidebar", webview); // number 1
+    const idB = sm.createSession("sidebar", webview); // number 2
+
+    // Two renames in quick succession; both update()s queue before either applies.
+    sm.renameSession(idA, "A");
+    sm.renameSession(idB, "B");
+
+    // Drain queued updates in order.
+    for (const apply of pendingUpdates) {
+      apply();
+    }
+    await vi.runAllTimersAsync();
+
+    // The persisted state must contain BOTH entries (in the pre-fix code, only B survived).
+    expect(store.get(STORAGE_KEY)).toEqual({ "1": "A", "2": "B" });
+    sm.dispose();
+  });
+
+  it("is fire-and-forget: a rejected update() does not throw out of renameSession", () => {
+    const memento = createFakeMemento();
+    memento._setUpdate(() => Promise.reject(new Error("disk full")));
+    const sm = new SessionManager(memento);
+    const webview = createMockWebview();
+    const id = sm.createSession("sidebar", webview);
+    expect(() => sm.renameSession(id, "build")).not.toThrow();
+    // In-memory state still updates regardless of persistence failure
+    expect(sm.getSession(id)!.customName).toBe("build");
+    sm.dispose();
+  });
+});
+
+describe("SessionManager.createSession: hydration", () => {
+  it("hydrates customName from workspaceState for a recycled root-tab number", () => {
+    const memento = createFakeMemento({ [STORAGE_KEY]: { "1": "deploy" } });
+    const sm = new SessionManager(memento);
+    const webview = createMockWebview();
+    const id = sm.createSession("sidebar", webview); // number = 1
+    expect(sm.getSession(id)!.customName).toBe("deploy");
+    sm.dispose();
+  });
+
+  it("does NOT hydrate for a split-pane session, even if its number has a persisted entry", () => {
+    const memento = createFakeMemento({ [STORAGE_KEY]: { "1": "deploy" } });
+    const sm = new SessionManager(memento);
+    const webview = createMockWebview();
+    // Force the split pane to receive number = 1 by ensuring no root tab exists first.
+    // findAvailableNumber returns 1 since usedNumbers is empty.
+    const paneId = sm.createSession("sidebar", webview, { isSplitPane: true });
+    expect(sm.getSession(paneId)!.customName).toBeNull();
+    sm.dispose();
+  });
+
+  it("number recycling reclaims the prior custom name (root tab)", async () => {
+    const memento = createFakeMemento();
+    const sm = new SessionManager(memento);
+    const webview = createMockWebview();
+    const id1 = sm.createSession("sidebar", webview); // number = 1
+    sm.renameSession(id1, "build");
+    sm.destroySession(id1);
+    // Drain the async destroy operation queue (performDestroy awaits setTimeout(0)).
+    await vi.runAllTimersAsync();
+    const id2 = sm.createSession("sidebar", webview); // number = 1 (recycled)
+    expect(sm.getSession(id2)!.number).toBe(1);
+    expect(sm.getSession(id2)!.customName).toBe("build");
+    sm.dispose();
+  });
+});
+
+describe("SessionManager.getTabsForView: customName field", () => {
+  it("includes customName per tab", () => {
+    const sm = new SessionManager();
+    const webview = createMockWebview();
+    const id1 = sm.createSession("sidebar", webview);
+    const id2 = sm.createSession("sidebar", webview);
+    sm.renameSession(id1, "build");
+    const tabs = sm.getTabsForView("sidebar");
+    expect(tabs).toHaveLength(2);
+    expect(tabs.find((t) => t.id === id1)!.customName).toBe("build");
+    expect(tabs.find((t) => t.id === id2)!.customName).toBeNull();
+    sm.dispose();
+  });
+});

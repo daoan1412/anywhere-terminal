@@ -135,6 +135,29 @@ export function getTerminalHtml(
       opacity: 0.5;
       font-style: italic;
     }
+    /* Inline-rename overlay input (add-tab-rename design.md D4). Positioned
+       absolutely so it survives renderTabBar()'s destructive re-renders. */
+    .tab-rename-overlay {
+      position: absolute;
+      box-sizing: border-box;
+      font-family: var(--vscode-font-family, sans-serif);
+      font-size: var(--vscode-font-size, 12px);
+      padding: 1px 4px;
+      margin: 0;
+      border: 1px solid var(--vscode-focusBorder, #007acc);
+      background: var(--vscode-input-background, #3c3c3c);
+      color: var(--vscode-input-foreground, #ccc);
+      z-index: 100;
+    }
+    /* Strip the browser default outline only when not keyboard-focused (a11y:
+       WCAG 2.4.11). Keyboard users still see a focus ring via :focus-visible. */
+    .tab-rename-overlay:not(:focus-visible) {
+      outline: none;
+    }
+    .tab-rename-overlay:focus-visible {
+      outline: 2px solid var(--vscode-focusBorder, #007acc);
+      outline-offset: -1px;
+    }
     .error-banner {
       display: flex;
       align-items: center;
