@@ -81,20 +81,34 @@ export class FilePathLinkProvider implements ILinkProvider {
     // collect every continuation row.
     //
     // FALLBACK heuristic: some applications emit their OWN line break + indent
-    // (claude-code agent output, ripgrep, eslint, etc.) which is NOT a true
-    // xterm wrap — `isWrapped` stays false. We additionally treat a row as a
-    // continuation when its trimmed text concatenated with the previous row's
-    // trimmed text would form a single token without separating whitespace
-    // (i.e. the previous row does NOT end with whitespace AND the current row
-    // starts with non-separator chars). Concatenation strips the indent.
-    const isPathContinuation = (prevRaw: string, curRaw: string): boolean => {
+    // (claude-code agent output, codex CLI tree-prefix, ripgrep, eslint, etc.)
+    // which is NOT a true xterm wrap — `isWrapped` stays false. Two distinct
+    // continuation shapes exist and require DIFFERENT join semantics:
+    //
+    //   "in-path": the path token itself was split mid-character (Claude's
+    //     `Update(/.../wo` + indent + `rkflow.md)`). To rebuild the path we
+    //     STRIP trailing padding from row 1 AND leading indent from row 2.
+    //
+    //   "marker": a structural separator falls between rows — e.g. Claude's
+    //     `Read(<path> · lines N-M)` wrapping at the space before `·`. The
+    //     parser's regex (`\s+·\s+lines?`) REQUIRES whitespace at the seam,
+    //     so we must PRESERVE the trailing space on row 1 (and any leading
+    //     whitespace on row 2 that aligns the continuation visually).
+    //
+    // Padding state of row 1 is NOT consulted: xterm always pads cells past
+    // an app-emitted `\n` with default spaces, so `prevRaw.length ===
+    // prevTrim.length` only holds when row 1 happens to fill terminal width
+    // exactly — rare for Claude/Codex/Ink-style TUIs that wrap on their own
+    // grid (not on terminal width).
+    type ContinuationKind = "none" | "marker" | "in-path";
+    const continuationKind = (prevRaw: string, curRaw: string): ContinuationKind => {
       const prevTrim = prevRaw.trimEnd();
       const curTrim = curRaw.trimStart();
       if (prevTrim.length === 0 || curTrim.length === 0) {
-        return false;
+        return "none";
       }
 
-      // ── Claude CLI tool-call narration continuations ──────────────────
+      // ── Claude CLI tool-call narration MARKER continuations ──────────
       // The Read(<path> · lines N-M) format can wrap at any token boundary.
       // Each variant below identifies an unmistakable continuation marker
       // on row 2 — these win regardless of how row 1 ended (whitespace
@@ -105,43 +119,68 @@ export class FilePathLinkProvider implements ILinkProvider {
       //   wrap between `lines` and N    →  row 2 starts with digit AND row 1
       //                                    ends with the word `line(s)`
       if (/^·\s+lines?\b/.test(curTrim)) {
-        return true;
+        return "marker";
       }
       if (/^lines?\s+\d/.test(curTrim)) {
-        return true;
+        return "marker";
       }
       if (/^\d/.test(curTrim) && /\blines?$/i.test(prevTrim)) {
-        return true;
+        return "marker";
       }
 
-      // ── In-path wrap (Update(/long/path...) split mid-token) ──────────
-      // Round-2 W6: restrict this STRUCTURAL heuristic to rows that look
-      // like a path-bearing context. Without the gate, any two adjacent
-      // rows where row 1 exactly fills cols and both ends are path chars
-      // get joined — including unrelated `ls -la` output where row 1
-      // happens to be 80 chars wide. The gate accepts EITHER:
-      //   (a) Row 1 begins with a recognized tool-call prefix
-      //       (Claude CLI, ripgrep -uu, fd, etc.), OR
-      //   (b) The joined text contains an absolute-path-rooted token
-      //       (`/`-leading or `~/`-leading or `C:\`-style drive letter).
-      // (b) is checked by testing whether row 1 (anywhere after a
-      // boundary char) already contains such a token.
+      // ── Boundary checks for IN-PATH wrap: both ends must be path-safe ─
       const lastChar = prevTrim.charAt(prevTrim.length - 1);
       if (!/[A-Za-z0-9._\-/\\]/.test(lastChar)) {
-        return false;
-      }
-      if (prevRaw.length !== prevTrim.length) {
-        return false;
+        return "none";
       }
       const firstChar = curTrim.charAt(0);
       if (!/[A-Za-z0-9._\-/\\]/.test(firstChar)) {
-        return false;
+        return "none";
       }
-      const looksToolCall = /(?:^|\s)(?:Read|Edit|Write|Update|Search|Grep|Glob|MultiEdit|NotebookEdit|Bash)\s*\(/.test(
-        prevTrim,
+
+      // ── Indent gate: real in-path continuations ARE indented ─────────
+      // Real-world AI CLI wraps (Claude Code's Ink layout, Codex's
+      // `subsequent_indent="    "`, aider's rich.Columns) always indent the
+      // continuation row to align with the wrap point. A row that starts
+      // flush at column 0 with a path-safe char is almost always a NEW
+      // logical line: `find /`, `cat /etc/hosts.d/*`, compiler errors
+      // listing files, etc. Without this gate, two adjacent absolute paths
+      //   /tmp/foo.ts
+      //   /tmp/bar.ts
+      // would join into Frankenstein `/tmp/foo.ts/tmp/bar.ts`. xterm
+      // soft-wraps land here too but they short-circuit earlier via
+      // `isWrapped`, so this gate only affects the heuristic branch.
+      if (curRaw === curTrim) {
+        return "none";
+      }
+
+      // ── Last-token analysis: focus on the trailing non-whitespace run ─
+      // Scanning the WHOLE row for `looksAbsolute` triggered false-positives
+      // on shell prompts (`user@host:/cwd$` filling 80 cols followed by an
+      // unrelated `-rw-r--r--` row — the `/cwd` token matched). Restricting
+      // the analysis to the LAST contiguous token forces the decision to
+      // hinge on what's actually about to wrap, not on anything earlier in
+      // the row.
+      const lastTokenMatch = prevTrim.match(/\S+$/);
+      const lastToken = lastTokenMatch ? lastTokenMatch[0] : "";
+      if (lastToken.length === 0) {
+        return "none";
+      }
+      // (a) Last token begins with a recognized tool-call prefix:
+      //     `Update(/path…`, `Read(/path…`, `Edit(/path…`, etc.
+      const lastTokenIsToolCall = /^(?:Read|Edit|Write|Update|Search|Grep|Glob|MultiEdit|NotebookEdit|Bash)\s*\(/.test(
+        lastToken,
       );
-      const looksAbsolute = /(?:^|[\s'"<({[])(?:[A-Za-z]:[\\/]|\/|~\/)/.test(prevTrim);
-      return looksToolCall || looksAbsolute;
+      // (b) Last token contains an absolute-path root after a boundary char
+      //     (start-of-token, or one of `(`/`[`/`{` so that `Update(/path`,
+      //     `[/path`, `{/path` are all accepted). The Codex `  └ /path`
+      //     tree-prefix lands here because the prev-row trim leaves `└` as
+      //     a separator and the lastToken is just `/path…`.
+      const lastTokenLooksAbsolute = /(?:^|[\s'"<({[])(?:[A-Za-z]:[\\/]|\/|~\/)/.test(lastToken);
+      if (lastTokenIsToolCall || lastTokenLooksAbsolute) {
+        return "in-path";
+      }
+      return "none";
     };
 
     // Round-2 W6: cap how far the wrap walk can travel before we concatenate
@@ -167,9 +206,9 @@ export class FilePathLinkProvider implements ILinkProvider {
       const isXtermWrap = Boolean(ln.isWrapped);
       const prevText = prev.translateToString(false);
       const curText = ln.translateToString(false);
-      const isHeuristicWrap = isPathContinuation(prevText, curText);
-      wlog("back", { startIdx, prevLen: prevText.length, isXtermWrap, isHeuristicWrap });
-      if (!isXtermWrap && !isHeuristicWrap) {
+      const heuristicKind = continuationKind(prevText, curText);
+      wlog("back", { startIdx, prevLen: prevText.length, isXtermWrap, heuristicKind });
+      if (!isXtermWrap && heuristicKind === "none") {
         break;
       }
       startIdx--;
@@ -177,52 +216,88 @@ export class FilePathLinkProvider implements ILinkProvider {
     }
 
     // rows[k]: { text, offset } where offset is the start index of this row's
-    // text inside the concatenated logical line. For TRUE xterm soft-wrap rows
-    // we use the raw text (padding preserved) so column math is correct. For
-    // HEURISTIC continuations (application-emitted newline + indent) we strip
-    // the leading whitespace so the joined text reads as one path token.
-    const rows: { text: string; offset: number; bufferLineNumber: number; isXtermWrap: boolean }[] = [];
-    let offset = 0;
-    let i = startIdx;
-    let prevRowRaw = "";
-    while (rows.length < MAX_WRAP_ROWS && offset < MAX_WRAP_CHARS) {
-      const ln = buf.getLine(i);
-      if (!ln) {
-        break;
-      }
-      const rawText = ln.translateToString(false);
-      const isXtermWrap = Boolean(ln.isWrapped);
-      if (i > startIdx) {
-        const isHeuristicWrap = isPathContinuation(prevRowRaw, rawText);
-        wlog("fwd", { i, isXtermWrap, isHeuristicWrap, rawText: rawText.slice(0, 80) });
-        if (!isXtermWrap && !isHeuristicWrap) {
+    // text inside the concatenated logical line. Trim choices depend on the
+    // CONNECTION between consecutive rows:
+    //
+    //   "xterm-wrap": cells are filled by xterm (no padding to strip).
+    //     Preserve everything; column math depends on full-width cells.
+    //
+    //   "in-path": path token split mid-character. Strip TRAILING padding
+    //     from prev row AND LEADING indent from cur row, so the joined text
+    //     reads as one contiguous path token. `indentDropped` is stashed for
+    //     the per-row link range shift.
+    //
+    //   "marker": structural separator at the seam (`· lines`, `lines N`,
+    //     digit after `lines`). Parser regex REQUIRES whitespace at the seam
+    //     (`\s+·\s+lines?`), so DO NOT trim — preserve trailing space on
+    //     prev row and any leading whitespace on cur row.
+    //
+    // First pass: collect rows with the connection type that brought them in.
+    type Connection = "first" | "xterm-wrap" | "marker" | "in-path";
+    type CollectedRow = {
+      rawText: string;
+      conn: Connection;
+      bufferLineNumber: number;
+    };
+    const collected: CollectedRow[] = [];
+    {
+      let i = startIdx;
+      let prevRowRaw = "";
+      let totalChars = 0;
+      while (collected.length < MAX_WRAP_ROWS && totalChars < MAX_WRAP_CHARS) {
+        const ln = buf.getLine(i);
+        if (!ln) {
           break;
         }
+        const rawText = ln.translateToString(false);
+        const isXtermWrap = Boolean(ln.isWrapped);
+        let conn: Connection;
+        if (i === startIdx) {
+          conn = "first";
+        } else if (isXtermWrap) {
+          conn = "xterm-wrap";
+        } else {
+          const kind = continuationKind(prevRowRaw, rawText);
+          wlog("fwd", { i, kind, rawText: rawText.slice(0, 80) });
+          if (kind === "none") {
+            break;
+          }
+          conn = kind;
+        }
+        collected.push({ rawText, conn, bufferLineNumber: i + 1 });
+        totalChars += rawText.length;
+        prevRowRaw = rawText;
+        i++;
       }
-      // For heuristic continuations, drop the leading indent so the joined
-      // path is contiguous. The lost columns are accounted for below — links
-      // emitted for THIS row must offset segStartIdx back by the trimmed amount.
-      const useText = i > startIdx && !isXtermWrap ? rawText.trimStart() : rawText;
-      const indentDropped = i > startIdx && !isXtermWrap ? rawText.length - useText.length : 0;
-      rows.push({
-        text: useText,
-        offset,
-        bufferLineNumber: i + 1,
-        isXtermWrap,
-      });
-      // Stash indent-drop count on the row for the later col mapping.
-      (rows[rows.length - 1] as { indentDropped?: number }).indentDropped = indentDropped;
-      offset += useText.length;
-      prevRowRaw = rawText;
-      i++;
+    }
+
+    // Second pass: derive `text` per row with conn-aware trims.
+    const rows: { text: string; offset: number; bufferLineNumber: number; indentDropped: number }[] = [];
+    let offset = 0;
+    for (let k = 0; k < collected.length; k++) {
+      const cur = collected[k];
+      const next = collected[k + 1];
+      // Leading trim ONLY for in-path continuations (strip indent so the path
+      // token is contiguous). Marker continuations need the leading whitespace
+      // preserved so `\s+·\s+lines?` matches at the seam.
+      const leadingTrim = cur.conn === "in-path";
+      const afterLeading = leadingTrim ? cur.rawText.trimStart() : cur.rawText;
+      const indentDropped = leadingTrim ? cur.rawText.length - afterLeading.length : 0;
+      // Trailing trim ONLY when next row is an in-path continuation (strip
+      // padding so the path token concatenates without a gap). For xterm-wrap
+      // the cells are filled, and for marker continuations the trailing space
+      // is part of the regex anchor.
+      const text = next?.conn === "in-path" ? afterLeading.trimEnd() : afterLeading;
+      rows.push({ text, offset, bufferLineNumber: cur.bufferLineNumber, indentDropped });
+      offset += text.length;
     }
 
     wlog(
       "collected rows",
-      rows.map((r) => ({
+      rows.map((r, k) => ({
         ln: r.bufferLineNumber,
-        isXtermWrap: r.isXtermWrap,
-        indentDropped: (r as { indentDropped?: number }).indentDropped,
+        conn: collected[k]?.conn,
+        indentDropped: r.indentDropped,
         preview: r.text.slice(0, 80),
       })),
     );
@@ -272,7 +347,7 @@ export class FilePathLinkProvider implements ILinkProvider {
         // Heuristic-wrap rows had their leading indent stripped before joining;
         // shift the segment back by that many columns so the underline lines
         // up with the actual characters on screen.
-        const indentDropped = (row as { indentDropped?: number }).indentDropped ?? 0;
+        const indentDropped = row.indentDropped;
         // xterm.js buffer ranges are 1-based; end.x is INCLUSIVE of the last char (design.md D11).
         const range = {
           start: { x: segStartIdx + indentDropped + 1, y: bufferLineNumber },

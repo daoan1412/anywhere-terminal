@@ -35,8 +35,14 @@ function makeTerminalStub(line: string): Terminal {
  * For application-emitted line-break tests (claude/agent output style), pass
  * `wrappedFlags: [false, false]` so the provider must rely on the indent /
  * full-width heuristic to detect the continuation.
+ *
+ * `cols` simulates real xterm buffer behavior: `translateToString(false)`
+ * returns the cell array padded to terminal width with default spaces, and
+ * `translateToString(true)` trims the trailing padding. Omit `cols` (the
+ * default) to keep the old verbatim-string behavior for tests that already
+ * pre-pad their input rows to the desired width.
  */
-function makeWrappedTerminalStub(rowTexts: string[], wrappedFlags?: boolean[]): Terminal {
+function makeWrappedTerminalStub(rowTexts: string[], wrappedFlags?: boolean[], cols?: number): Terminal {
   return {
     buffer: {
       active: {
@@ -47,7 +53,16 @@ function makeWrappedTerminalStub(rowTexts: string[], wrappedFlags?: boolean[]): 
           const isWrapped = wrappedFlags ? (wrappedFlags[n] ?? false) : n > 0;
           return {
             isWrapped,
-            translateToString: (_trimRight?: boolean) => rowTexts[n],
+            translateToString: (trimRight?: boolean) => {
+              const content = rowTexts[n];
+              if (trimRight) {
+                return content.trimEnd();
+              }
+              if (cols !== undefined && content.length < cols) {
+                return content.padEnd(cols, " ");
+              }
+              return content;
+            },
           };
         },
       },
@@ -330,26 +345,23 @@ describe("FilePathLinkProvider.provideLinks", () => {
     // Reproduces the claude-code / agent style output where the application
     // prints its own newline and indents the continuation. xterm sees TWO
     // separate logical lines (`isWrapped` stays false on both), but visually
-    // it looks like a wrapped path. Heuristic: row 1 ends with non-whitespace
-    // path char AND fills the row width AND row 2 starts with whitespace+
-    // path chars → treat as continuation, strip the indent before joining.
+    // it looks like a wrapped path. Heuristic: row 1's last token looks like
+    // an unterminated path (tool-call prefix or absolute-path root) AND row 2
+    // starts with a path-safe char → treat as in-path continuation, strip
+    // both row 1's trailing padding and row 2's leading indent before joining.
     const cols = 80;
-    // Row 1: padded to full row width to indicate "no trailing space" → wrap.
-    const part1 = "Update(/Users/huybuidac/Projects/ai-oss/anywhere-terminal/src/webview/links/Hove";
-    const _row1Padded = part1.padEnd(cols, " ").slice(0, cols);
-    // Heuristic requires row1 to have NO trailing whitespace. So row 1 must be
-    // exactly cols chars of content. Adjust:
     const fullPath = "/Users/huybuidac/Projects/ai-oss/anywhere-terminal/src/webview/links/HoverPreviewPopup.ts";
+    // This case happens to fill row 1 exactly to terminal width (the wrap
+    // point coincides with the right edge), but the heuristic no longer
+    // requires that — see the "Claude wrap where row 1 does NOT fill terminal
+    // width" test below for the more common case.
     const row1 = `Update(${fullPath.slice(0, cols - 7)}`; // 7 = len("Update(")
     const row2Content = `${fullPath.slice(cols - 7)})`;
     const row2 = `    ${row2Content}`; // indented (application style)
     const rowTexts = [row1, row2];
 
-    // Each rowTexts[k] is treated as the line's translateToString output. The
-    // heuristic kicks in only when row1's length === row1.trimEnd().length
-    // (i.e. no trailing spaces). row1 above ends in a path char, so passes.
     // Application-emitted: BOTH rows have isWrapped=false — provider must
-    // detect the continuation via the indent/full-width heuristic.
+    // detect the in-path continuation via last-token analysis.
     const terminal = makeWrappedTerminalStub(rowTexts, [false, false]);
     const provider = new FilePathLinkProvider({
       terminal,
@@ -414,6 +426,116 @@ describe("FilePathLinkProvider.provideLinks", () => {
     // The match must be the BARE basename from row 2, NOT a Frankenstein
     // concatenation of `here-now$...-rw-r--r--...README.md`.
     expect(linksRow2![0].text).toBe("README.md");
+  });
+
+  it("Claude wrap where row 1 does NOT fill terminal width (cell padding from buffer)", () => {
+    // The real-world bug: Claude Code wraps `Update(/.../wo` then `       rkflow.md)`
+    // BUT row 1 only fills ~70/100 cols — xterm pads remaining cells with
+    // default spaces. The previous heuristic required `prevRaw.length ===
+    // prevTrim.length`, which fails because translateToString(false) returns
+    // the full 100-char cell array. New behaviour: focus on row 1's LAST
+    // contiguous token (tool-call prefix or absolute-path root) and ignore
+    // padding state. The stub uses `cols` so translateToString(false) pads
+    // to width, exactly mirroring the real xterm buffer.
+    const cols = 100;
+    const fullPath = "/Users/huybuidac/Projects/ai-oss/anywhere-terminal/asimov/changes/add-tab-rename/workflow.md";
+    // Pick a wrap point that does NOT fill cols — Claude's Ink-style layout
+    // wraps on its own grid, not on the terminal edge.
+    const splitAt = fullPath.length - "rkflow.md".length; // wrap after `…wo`
+    const row1Content = `Update(${fullPath.slice(0, splitAt)}`; // ~ 72 chars, less than 100
+    const row2Content = `       ${fullPath.slice(splitAt)})`; // indent + "rkflow.md)"
+    const terminal = makeWrappedTerminalStub([row1Content, row2Content], [false, false], cols);
+    const postMessage = vi.fn<(msg: WebViewToExtensionMessage) => void>();
+    const provider = new FilePathLinkProvider({
+      terminal,
+      sessionId: "sess-CLD",
+      postMessage,
+      platform: "posix",
+    });
+    // Hover the wrapped tail row. The provider must walk back, trim row 1's
+    // trailing padding, join cleanly, and emit a link with the FULL path.
+    const linksRow2 = collect(provider, 2);
+    expect(linksRow2).toHaveLength(1);
+    expect(linksRow2![0].text).toBe(fullPath);
+    // Range covers the path tail on row 2, offset by the 7-char indent.
+    expect(linksRow2![0].range.start).toEqual({ x: 7 + 1, y: 2 });
+    // Activate must post the full path.
+    linksRow2![0].activate({ preventDefault: () => {} } as unknown as MouseEvent, linksRow2![0].text);
+    expect(postMessage).toHaveBeenCalledWith({
+      type: "openFile",
+      path: fullPath,
+      sessionId: "sess-CLD",
+    });
+  });
+
+  it("Codex CLI tree-prefix wrap (`  └ /path` + `    <tail>` continuation)", () => {
+    // Codex TUI uses prefix `"  └ "` on the first line and `"    "` (4 spaces)
+    // on continuation lines. When a long path wraps, row 1 ends mid-path and
+    // row 2 starts with 4 spaces + path tail. xterm sees no soft-wrap because
+    // Codex emits its own \n; the heuristic must detect the continuation via
+    // row 1's last token being an absolute path.
+    const cols = 60;
+    const fullPath = "/repo/packages/very-long-directory-name/sub/MySuperLongFileName.tsx";
+    const splitAt = 40;
+    const row1Content = `  └ ${fullPath.slice(0, splitAt)}`; // "  └ /repo/packages/very-long-directory-n"
+    const row2Content = `    ${fullPath.slice(splitAt)}`; // "    ame/sub/MySuperLongFileName.tsx"
+    const terminal = makeWrappedTerminalStub([row1Content, row2Content], [false, false], cols);
+    const provider = new FilePathLinkProvider({
+      terminal,
+      sessionId: "sess-CDX",
+      postMessage: vi.fn(),
+      platform: "posix",
+    });
+    const linksRow2 = collect(provider, 2);
+    expect(linksRow2).toHaveLength(1);
+    expect(linksRow2![0].text).toBe(fullPath);
+    // Indent is 4 spaces → start.x = 4 + 1 = 5.
+    expect(linksRow2![0].range.start).toEqual({ x: 4 + 1, y: 2 });
+  });
+
+  it("does NOT join two adjacent absolute-path lines without indent (find / output, multi-file errors)", () => {
+    // False-positive guard flagged by oracle review: with last-token absolute
+    // detection alone, two flush-left absolute paths on consecutive lines
+    //   /tmp/foo.ts
+    //   /tmp/bar.ts
+    // would satisfy "row 1 ends with path char" + "row 2 starts with path
+    // char" + "row 1 last token looks absolute" — and join into a Frankenstein
+    // `/tmp/foo.ts/tmp/bar.ts`. Real in-path continuations from AI CLIs are
+    // ALWAYS indented; the indent gate (curRaw === curTrim → "none") rejects
+    // this case.
+    const cols = 80;
+    const row1 = "/tmp/foo.ts";
+    const row2 = "/tmp/bar.ts";
+    const terminal = makeWrappedTerminalStub([row1, row2], [false, false], cols);
+    const provider = new FilePathLinkProvider({
+      terminal,
+      sessionId: "sess-FP",
+      postMessage: vi.fn(),
+      platform: "posix",
+    });
+    const linksRow2 = collect(provider, 2);
+    expect(linksRow2).toHaveLength(1);
+    // Row 2 must resolve to its OWN path, not a concatenation.
+    expect(linksRow2![0].text).toBe("/tmp/bar.ts");
+  });
+
+  it("does NOT join compiler-error style multi-line absolute paths", () => {
+    // Similar shape, common from `tsc`, `eslint`, `cargo`, etc. — each error
+    // line is its own logical record with a leading absolute path. None are
+    // continuations of the previous.
+    const cols = 100;
+    const row1 = "/repo/src/foo.ts:42:7  error  Unexpected token";
+    const row2 = "/repo/src/bar.ts:10:3  error  Missing semicolon";
+    const terminal = makeWrappedTerminalStub([row1, row2], [false, false], cols);
+    const provider = new FilePathLinkProvider({
+      terminal,
+      sessionId: "sess-CE",
+      postMessage: vi.fn(),
+      platform: "posix",
+    });
+    const linksRow2 = collect(provider, 2);
+    expect(linksRow2).toHaveLength(1);
+    expect(linksRow2![0].text).toBe("/repo/src/bar.ts:10:3");
   });
 
   it("Claude CLI wrap at the `·` separator joins rows so the path + line are detected", () => {
