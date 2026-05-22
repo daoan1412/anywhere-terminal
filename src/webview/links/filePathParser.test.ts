@@ -83,6 +83,65 @@ describe("detectFilePathLinks: suffix forms", () => {
     expect(py).toBeDefined();
     expect(py).toMatchObject({ line: 42, col: 7 });
   });
+
+  it("GitHub-style permalink: path#L42", () => {
+    const r = detectFilePathLinks("see src/foo.ts#L42 for context", "posix");
+    expect(r).toHaveLength(1);
+    expect(r[0]).toMatchObject({ path: "src/foo.ts", line: 42, text: "src/foo.ts#L42" });
+    expect(r[0].col).toBeUndefined();
+  });
+
+  it("GitHub-style permalink without L: path#42", () => {
+    const r = detectFilePathLinks("see src/foo.ts#42", "posix");
+    expect(r).toHaveLength(1);
+    expect(r[0]).toMatchObject({ path: "src/foo.ts", line: 42, text: "src/foo.ts#42" });
+  });
+
+  it("line range path:N-M takes the FIRST line and underlines the full suffix", () => {
+    // Ripgrep multi-line output / agent narration ("HoverPreviewPopup.ts:257-258").
+    // The popup's focusLine scrolls to the start of the range; the range end
+    // is informational only. The matched text MUST include `-M` so the link
+    // underline doesn't leave the tail unlinked on screen.
+    const r = detectFilePathLinks("see HoverPreviewPopup.ts:257-258 here", "posix");
+    expect(r).toHaveLength(1);
+    expect(r[0]).toMatchObject({ path: "HoverPreviewPopup.ts", line: 257, text: "HoverPreviewPopup.ts:257-258" });
+    expect(r[0].col).toBeUndefined();
+  });
+
+  it("GitHub line range path#L42-L43 takes the first line", () => {
+    const r = detectFilePathLinks("see src/foo.ts#L42-L43 for context", "posix");
+    expect(r).toHaveLength(1);
+    expect(r[0]).toMatchObject({ path: "src/foo.ts", line: 42, text: "src/foo.ts#L42-L43" });
+  });
+
+  it("GitHub line range without trailing L: path#L42-43", () => {
+    const r = detectFilePathLinks("see src/foo.ts#L42-43", "posix");
+    expect(r).toHaveLength(1);
+    expect(r[0]).toMatchObject({ path: "src/foo.ts", line: 42, text: "src/foo.ts#L42-43" });
+  });
+
+  it("Claude CLI tool-call narration: Read(<path> · lines N-M)", () => {
+    // Format emitted by claude-code agent transcripts when summarizing tool
+    // calls. The middle-dot (U+00B7) + literal "lines" + range is novel — no
+    // other compiler / formatter produces it.
+    const input =
+      "Read(/Users/huybuidac/Projects/ai-oss/anywhere-terminal/src/webview/links/HoverPreviewPopup.test.ts · lines 180-299)";
+    const r = detectFilePathLinks(input, "posix");
+    const target = findByPath(
+      r,
+      "/Users/huybuidac/Projects/ai-oss/anywhere-terminal/src/webview/links/HoverPreviewPopup.test.ts",
+    );
+    expect(target).toBeDefined();
+    expect(target).toMatchObject({ line: 180 });
+    expect(target!.col).toBeUndefined();
+  });
+
+  it("Claude CLI singular: Edit(<path> · line N)", () => {
+    const r = detectFilePathLinks("Edit(/abs/foo.ts · line 42)", "posix");
+    const target = findByPath(r, "/abs/foo.ts");
+    expect(target).toBeDefined();
+    expect(target).toMatchObject({ line: 42 });
+  });
 });
 
 describe("detectFilePathLinks: ignores web URLs (but claims file://)", () => {

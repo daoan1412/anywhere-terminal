@@ -11,9 +11,17 @@ declare function acquireVsCodeApi(): {
   setState(state: unknown): void;
 };
 
-import type { ExtensionToWebViewMessage, InitMessage } from "../types/messages";
+import type {
+  ExtensionToWebViewMessage,
+  HoverPreviewSettings,
+  HoverPreviewSettingsMessage,
+  InitMessage,
+  ThemeChangedMessage,
+} from "../types/messages";
 import { DragDropHandler } from "./DragDropHandler";
 import { FlowControl } from "./flow/FlowControl";
+import type { HoverPreviewThemeKind } from "./links/HoverPreviewController";
+import { preloadSyntaxHighlighter } from "./links/syntaxRenderer";
 import { createMessageRouter } from "./messaging/MessageRouter";
 import { ResizeCoordinator } from "./resize/ResizeCoordinator";
 import { SplitTreeRenderer } from "./split/SplitTreeRenderer";
@@ -22,6 +30,31 @@ import { buildTabBarData, handleTabKeyboardShortcut, renderTabBar } from "./TabB
 import { TerminalFactory } from "./terminal/TerminalFactory";
 import { type TerminalLocation, ThemeManager } from "./theme/ThemeManager";
 import { showBanner } from "./ui/BannerService";
+
+// Kick off Shiki highlighter init in the background; first hover will then
+// render synchronously. Failures fall back to plain text in the popup.
+void preloadSyntaxHighlighter().catch((err) => {
+  console.warn("[AnyWhere Terminal] preloadSyntaxHighlighter failed:", err);
+});
+
+// Debug helper for diagnosing wrap-aware link detection. Set true from the
+// webview devtools console: `window.__AT_DEBUG_WRAP = true`, then hover the
+// problematic path to see the rows, isWrapped flags, and parsed matches.
+console.log("[AnyWhere Terminal] To debug hover/link wrapping, run in this console: window.__AT_DEBUG_WRAP = true");
+
+// Webview-local store for the latest theme kind from the host. `TerminalFactory`
+// reads this via the getter for each render. Default to `dark` (matches the
+// host's mock + most VSCode users) until the first `themeChanged` arrives.
+const themeStore: { kind: HoverPreviewThemeKind } = { kind: "dark" };
+
+/**
+ * Webview-local snapshot of hover-preview settings. The host posts
+ * `hoverPreviewSettings` on init + every config change; controllers / popup
+ * read via the closures below. Default mirrors `contributes.configuration`.
+ */
+const hoverPreviewSettingsStore: { settings: HoverPreviewSettings } = {
+  settings: { delay: 300, blockSensitive: true },
+};
 
 // ─── State & Services ───────────────────────────────────────────────
 
@@ -37,6 +70,8 @@ const factory = new TerminalFactory({
   postMessage: (msg) => vscode.postMessage(msg),
   onTabBarUpdate: () => updateTabBar(),
   getIsComposing: () => isComposing,
+  getHoverPreviewTheme: () => themeStore.kind,
+  getHoverPreviewSettings: () => hoverPreviewSettingsStore.settings,
 });
 
 const dragDropHandler = new DragDropHandler({
@@ -135,6 +170,10 @@ function removeTerminal(id: string): void {
   if (!instance) {
     return;
   }
+
+  // Dispose hover-preview controller BEFORE the terminal goes away so its
+  // DOM listeners detach while the terminal's element still exists.
+  factory.disposeHoverController(id);
 
   // Dispose root terminal
   instance.terminal.dispose();
@@ -250,6 +289,26 @@ const routeMessage = createMessageRouter({
     void containerEl.offsetWidth;
     containerEl.classList.add("path-inserted");
     containerEl.addEventListener("animationend", () => containerEl.classList.remove("path-inserted"), { once: true });
+  },
+  onFilePreviewResult(msg) {
+    // Route by `requestId` is the controller's job — but we look up by session
+    // here so a stale message for a since-disposed terminal is silently dropped.
+    // The host sends one result per sessionId at most (token-map enforces 1
+    // in-flight), so we don't need to fan out across all controllers.
+    for (const controller of factory.hoverControllers.values()) {
+      controller.onMessage(msg);
+    }
+  },
+  onThemeChanged(msg: ThemeChangedMessage) {
+    themeStore.kind = msg.kind;
+  },
+  onHoverPreviewSettings(msg: HoverPreviewSettingsMessage) {
+    hoverPreviewSettingsStore.settings = msg.settings;
+    // Push the new debounce into every active controller so the next hover
+    // uses it. Existing in-flight timers run to completion under the old delay.
+    for (const controller of factory.hoverControllers.values()) {
+      controller.setDebounceMs(msg.settings.delay);
+    }
   },
 });
 

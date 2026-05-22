@@ -98,6 +98,19 @@
           "type": "string",
           "default": "",
           "description": "Default working directory for new terminals. Leave empty to use workspace root or home directory."
+        },
+        "anywhereTerminal.hoverPreview.delay": {
+          "type": "number",
+          "default": 300,
+          "minimum": 100,
+          "maximum": 2000,
+          "description": "Debounce in milliseconds before the hover preview popup fetches the file. Lower = snappier, higher = less I/O on incidental mouse-over."
+        },
+        "anywhereTerminal.hoverPreview.blockSensitive": {
+          "type": "boolean",
+          "default": true,
+          "scope": "application",
+          "description": "Block auto-preview for dotfiles (.env, .bashrc), known-sensitive folders (.git, .ssh, .aws, node_modules), and files outside the workspace. The user can press Cmd (macOS) / Ctrl (Win/Linux) during the hover to override. Application-scoped: a hostile workspace cannot disable this trust policy via .vscode/settings.json."
         }
       }
     },
@@ -408,7 +421,8 @@
     "watch": "npm-run-all -p watch:*",
     "watch:esbuild": "node esbuild.js --watch",
     "watch:tsc": "tsc --noEmit --watch --project tsconfig.json",
-    "package": "pnpm run check-types && pnpm run lint && node esbuild.js --production",
+    "package": "pnpm run check-types && pnpm run lint && node esbuild.js --production && pnpm run build:check-size",
+    "build:check-size": "node scripts/check-bundle-size.mjs",
     "compile-tests": "tsc -p . --outDir out",
     "watch-tests": "tsc -p . -w --outDir out",
     "pretest": "pnpm run compile-tests && pnpm run compile && pnpm run lint",
@@ -427,6 +441,9 @@
     "@biomejs/biome": "^2.4.5",
     "@huggingface/transformers": "latest",
     "@opencode-ai/plugin": "latest",
+    "@shikijs/langs": "^4.1.0",
+    "@shikijs/themes": "^4.1.0",
+    "@types/markdown-it": "^14.1.2",
     "@types/mocha": "^10.0.10",
     "@types/node": "22.x",
     "@types/vscode": "1.105.0",
@@ -439,7 +456,9 @@
     "@xterm/xterm": "^6.0.0",
     "esbuild": "^0.27.3",
     "jsdom": "^28.1.0",
+    "markdown-it": "^14.1.1",
     "npm-run-all": "^4.1.5",
+    "shiki": "^4.1.0",
     "typescript": "^5.9.3",
     "vitest": "^4.0.18"
   }

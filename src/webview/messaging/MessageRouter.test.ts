@@ -24,6 +24,9 @@ function createMockHandlers(): MessageHandlers {
     onCtxClear: vi.fn(),
     onError: vi.fn(),
     onInsertPathEffect: vi.fn(),
+    onFilePreviewResult: vi.fn(),
+    onThemeChanged: vi.fn(),
+    onHoverPreviewSettings: vi.fn(),
   };
 }
 

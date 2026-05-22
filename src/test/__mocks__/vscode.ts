@@ -71,7 +71,7 @@ export const Uri = {
 export class CancellationTokenSource {
   // Internal state — held outside the token object so dispose() doesn't
   // wipe the cancelled flag from any reference the caller still holds.
-  private _state = { cancelled: false };
+  private _state = { cancelled: false, listeners: [] as Array<() => void> };
   token: {
     isCancellationRequested: boolean;
     onCancellationRequested: (listener: () => void) => { dispose: () => void };
@@ -82,15 +82,47 @@ export class CancellationTokenSource {
       get isCancellationRequested() {
         return state.cancelled;
       },
-      onCancellationRequested: (_listener: () => void) => ({ dispose: () => {} }),
+      onCancellationRequested: (listener: () => void) => {
+        if (state.cancelled) {
+          // Real VSCode fires immediately if already cancelled.
+          try {
+            listener();
+          } catch {
+            // Best-effort.
+          }
+          return { dispose: () => {} };
+        }
+        state.listeners.push(listener);
+        return {
+          dispose: () => {
+            const idx = state.listeners.indexOf(listener);
+            if (idx >= 0) {
+              state.listeners.splice(idx, 1);
+            }
+          },
+        };
+      },
     };
   }
   cancel(): void {
+    if (this._state.cancelled) {
+      return;
+    }
     this._state.cancelled = true;
+    const listeners = [...this._state.listeners];
+    this._state.listeners.length = 0;
+    for (const l of listeners) {
+      try {
+        l();
+      } catch {
+        // Best-effort.
+      }
+    }
   }
   dispose(): void {
     // Real VS Code keeps the cancellation flag readable after dispose;
     // the source just stops accepting new listeners. Mirror that here.
+    this._state.listeners.length = 0;
   }
 }
 
@@ -265,6 +297,18 @@ function createMockWebviewPanel(
 
 let _showQuickPickImpl: (items: readonly unknown[], options?: unknown) => Promise<unknown> = async () => undefined;
 
+// ─── ColorThemeKind / theme bridge ──────────────────────────────────
+
+export const ColorThemeKind = {
+  Light: 1,
+  Dark: 2,
+  HighContrast: 3,
+  HighContrastLight: 4,
+} as const;
+
+const _themeChangeHandlers: Array<(theme: { kind: number }) => void> = [];
+let _activeColorTheme: { kind: number } = { kind: ColorThemeKind.Dark };
+
 export const window = {
   showInformationMessage: () => {},
   showErrorMessage: (_msg?: string) => Promise.resolve(undefined),
@@ -275,7 +319,34 @@ export const window = {
   registerWebviewViewProvider: (_viewType: string, _provider: unknown, _options?: unknown) => ({
     dispose: () => {},
   }),
+  get activeColorTheme(): { kind: number } {
+    return _activeColorTheme;
+  },
+  onDidChangeActiveColorTheme(handler: (theme: { kind: number }) => void) {
+    _themeChangeHandlers.push(handler);
+    return {
+      dispose: () => {
+        const idx = _themeChangeHandlers.indexOf(handler);
+        if (idx >= 0) {
+          _themeChangeHandlers.splice(idx, 1);
+        }
+      },
+    };
+  },
 };
+
+/** Test helper: change the active color theme and fire all subscribers. */
+export function __setActiveColorTheme(kind: number): void {
+  _activeColorTheme = { kind };
+  for (const handler of [..._themeChangeHandlers]) {
+    handler(_activeColorTheme);
+  }
+}
+
+/** Test helper: how many onDidChangeActiveColorTheme listeners are currently attached. */
+export function __getThemeListenerCount(): number {
+  return _themeChangeHandlers.length;
+}
 
 // ─── ViewColumn ─────────────────────────────────────────────────────
 
@@ -354,4 +425,6 @@ export function __resetAll(): void {
   _configChangeHandlers.length = 0;
   _findFilesImpl = async () => [];
   _showQuickPickImpl = async () => undefined;
+  _themeChangeHandlers.length = 0;
+  _activeColorTheme = { kind: ColorThemeKind.Dark };
 }

@@ -90,7 +90,18 @@ const PATH_BODY = String.raw`[^\s'"<>(){}\[\]|]+`;
 
 function buildSuffixedRegex(platform: "posix" | "win32"): RegExp {
   const drive = platform === "win32" ? "(?:[A-Za-z]:)?" : "";
-  const suffix = String.raw`(?::(?<row1>\d+)(?:[:.](?<col1>\d+))?|[(\[](?<row2>\d+)(?:[,:]\s*(?<col2>\d+))?[)\]])`;
+  // Suffix variants accepted:
+  //   :LINE, :LINE:COL, :LINE.COL  — most common compiler output
+  //   :LINE-LINE                   — line range (ripgrep multi-line, agent output)
+  //   (LINE), (LINE,COL), [LINE], [LINE:COL]
+  //   #LINE, #LLINE                — GitHub-style permalink fragment (#L42 or #42)
+  //   #L?LINE-L?LINE               — GitHub line range (#L42-L43)
+  // When a range is present, only the FIRST line is captured (popup.focusLine
+  // scrolls to the start of the range; selecting the whole range is a
+  // separate feature). The optional `-LINE` is consumed by the regex so the
+  // matched text underlines the entire suffix instead of leaving the tail
+  // unlinked.
+  const suffix = String.raw`(?::(?<row1>\d+)(?:[:.](?<col1>\d+))?(?:-\d+)?|[(\[](?<row2>\d+)(?:[,:]\s*(?<col2>\d+))?[)\]]|#L?(?<row3>\d+)(?:-L?\d+)?)`;
   const boundary = String.raw`(?<=^|[\s'"<({\[])`;
   // SUFFIXED regex uses a LAZY body — the broadened charset now includes `:`,
   // and a greedy body would eat `:LINE` and leave only `:COL`. Lazy lets the
@@ -114,6 +125,18 @@ const PYTHON_VERBOSE_RE =
 
 // Python compact: "x.py":42 or "x.py":42:7
 const PYTHON_COLON_RE = /"(?<path>[^"\n]+)":(?<row>\d+)(?::(?<col>\d+))?/g;
+
+/**
+ * Claude CLI / agent-narration pattern used in tool-call summaries:
+ *   `Read(/path/to/file.ts · lines 180-299)`
+ *   `Edit(/path/foo.ts · line 42)`
+ * The path runs until whitespace, then a middle-dot (U+00B7) separator, then
+ * the literal word "line" or "lines", then a number (or N-M range).
+ *
+ * The path body excludes `)` so the trailing close-paren in `Read(...)` doesn't
+ * get pulled into the match.
+ */
+const CLAUDE_LINES_RE = /(?<path>[^\s'"<>(){}[\]|]+)\s+·\s+lines?\s+(?<row>\d+)(?:-\d+)?/g;
 
 const SUFFIXED_POSIX = buildSuffixedRegex("posix");
 const SUFFIXED_WIN32 = buildSuffixedRegex("win32");
@@ -139,6 +162,7 @@ export function detectFilePathLinks(lineText: string, platform: "posix" | "win32
   collectBare(platform === "win32" ? BARE_WIN32 : BARE_POSIX, lineText, raw);
   collectPython(PYTHON_VERBOSE_RE, lineText, raw);
   collectPython(PYTHON_COLON_RE, lineText, raw);
+  collectPython(CLAUDE_LINES_RE, lineText, raw);
 
   const deduped = dedupOnOverlap(raw);
   deduped.sort((a, b) => a.index - b.index);
@@ -178,7 +202,15 @@ function collectSuffixed(re: RegExp, line: string, out: ParsedFilePathLink[]): v
   let m: RegExpExecArray | null;
   while ((m = re.exec(line)) !== null) {
     const g = m.groups!;
-    pushCandidate(out, m[0], m.index, g.path, parseIntOpt(g.row1 ?? g.row2), parseIntOpt(g.col1 ?? g.col2), false);
+    pushCandidate(
+      out,
+      m[0],
+      m.index,
+      g.path,
+      parseIntOpt(g.row1 ?? g.row2 ?? g.row3),
+      parseIntOpt(g.col1 ?? g.col2),
+      false,
+    );
   }
 }
 

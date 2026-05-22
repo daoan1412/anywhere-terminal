@@ -99,9 +99,19 @@ vi.mock("./openFileLink", () => ({
   openFileLink: vi.fn(async () => {}),
 }));
 
+vi.mock("./previewFileLink", () => ({
+  previewFileLink: vi.fn(async () => ({
+    type: "filePreviewResult",
+    path: "test/path",
+    requestId: "echo-req",
+    status: "ok",
+  })),
+}));
+
 import type * as vscode from "vscode";
 import { SessionManager } from "../session/SessionManager";
 import { openFileLink } from "./openFileLink";
+import { previewFileLink } from "./previewFileLink";
 import { TerminalViewProvider } from "./TerminalViewProvider";
 
 // ─── Test Setup ─────────────────────────────────────────────────────
@@ -293,6 +303,369 @@ describe("TerminalViewProvider: openFile dispatch", () => {
     }
 
     expect(openFileLink).not.toHaveBeenCalled();
+
+    sm.dispose();
+  });
+});
+
+// ─── requestFilePreview dispatch (task 2_3) ─────────────────────────
+
+describe("TerminalViewProvider: requestFilePreview dispatch", () => {
+  // Round-2 W3: handler rejects unknown sessionIds. These tests use the literal
+  // "s1" placeholder; stub `sm.getSession` to accept any id so the supersession /
+  // dispatch behaviors remain testable without spawning a real PTY session.
+  function stubSession(sm: SessionManager): void {
+    vi.spyOn(sm, "getSession").mockImplementation(() => ({}) as never);
+  }
+
+  it("cancels a prior in-flight token when a new request for the same session arrives", async () => {
+    const sm = new SessionManager();
+    stubSession(sm);
+    const provider = new TerminalViewProvider({ fsPath: "/mock/extension" } as vscode.Uri, sm, "sidebar");
+    const { webviewView, messageHandlers } = createMockWebviewView();
+    provider.resolveWebviewView(webviewView, {} as vscode.WebviewViewResolveContext, {} as vscode.CancellationToken);
+    for (const handler of messageHandlers) {
+      handler({ type: "ready" });
+    }
+
+    // Make previewFileLink hang indefinitely so we can observe cancellation.
+    let cancellations = 0;
+    (previewFileLink as unknown as ReturnType<typeof vi.fn>).mockImplementation(async (_msg, _deps, token) => {
+      const t = token as { onCancellationRequested?: (cb: () => void) => { dispose(): void } };
+      await new Promise<void>((resolve) => {
+        t.onCancellationRequested?.(() => {
+          cancellations++;
+          resolve();
+        });
+      });
+      return null; // cancelled — no result posted.
+    });
+
+    for (const handler of messageHandlers) {
+      handler({ type: "requestFilePreview", requestId: "r1", sessionId: "s1", path: "foo.ts" });
+    }
+    await Promise.resolve();
+    for (const handler of messageHandlers) {
+      handler({ type: "requestFilePreview", requestId: "r2", sessionId: "s1", path: "bar.ts" });
+    }
+    await new Promise((r) => setTimeout(r, 5));
+
+    expect(cancellations).toBeGreaterThanOrEqual(1);
+
+    sm.dispose();
+  });
+
+  it("posts the result back when previewFileLink resolves", async () => {
+    const sm = new SessionManager();
+    stubSession(sm);
+    const provider = new TerminalViewProvider({ fsPath: "/mock/extension" } as vscode.Uri, sm, "sidebar");
+    const { webviewView, messageHandlers, postMessageSpy } = createMockWebviewView();
+    provider.resolveWebviewView(webviewView, {} as vscode.WebviewViewResolveContext, {} as vscode.CancellationToken);
+    for (const handler of messageHandlers) {
+      handler({ type: "ready" });
+    }
+    postMessageSpy.mockClear();
+
+    (previewFileLink as unknown as ReturnType<typeof vi.fn>).mockResolvedValueOnce({
+      type: "filePreviewResult",
+      path: "test/path",
+      requestId: "r1",
+      status: "ok",
+      absPath: "/x/foo.ts",
+    });
+
+    for (const handler of messageHandlers) {
+      handler({ type: "requestFilePreview", requestId: "r1", sessionId: "s1", path: "foo.ts" });
+    }
+    await new Promise((r) => setTimeout(r, 10));
+
+    const previewPosts = postMessageSpy.mock.calls.filter(
+      (args) => (args[0] as { type?: string }).type === "filePreviewResult",
+    );
+    expect(previewPosts).toHaveLength(1);
+    expect(previewPosts[0][0]).toMatchObject({ requestId: "r1", status: "ok" });
+
+    sm.dispose();
+  });
+
+  it("does NOT post a result when previewFileLink returns null (cancelled mid-flight)", async () => {
+    const sm = new SessionManager();
+    stubSession(sm);
+    const provider = new TerminalViewProvider({ fsPath: "/mock/extension" } as vscode.Uri, sm, "sidebar");
+    const { webviewView, messageHandlers, postMessageSpy } = createMockWebviewView();
+    provider.resolveWebviewView(webviewView, {} as vscode.WebviewViewResolveContext, {} as vscode.CancellationToken);
+    for (const handler of messageHandlers) {
+      handler({ type: "ready" });
+    }
+    postMessageSpy.mockClear();
+
+    (previewFileLink as unknown as ReturnType<typeof vi.fn>).mockResolvedValueOnce(null);
+
+    for (const handler of messageHandlers) {
+      handler({ type: "requestFilePreview", requestId: "r-cancel", sessionId: "s1", path: "foo.ts" });
+    }
+    await new Promise((r) => setTimeout(r, 10));
+
+    const previewPosts = postMessageSpy.mock.calls.filter(
+      (args) => (args[0] as { type?: string }).type === "filePreviewResult",
+    );
+    expect(previewPosts).toHaveLength(0);
+
+    sm.dispose();
+  });
+
+  it("supersession: a cancelled prior request that later resolves with non-null does NOT post a result", async () => {
+    const sm = new SessionManager();
+    stubSession(sm);
+    const provider = new TerminalViewProvider({ fsPath: "/mock/extension" } as vscode.Uri, sm, "sidebar");
+    const { webviewView, messageHandlers, postMessageSpy } = createMockWebviewView();
+    provider.resolveWebviewView(webviewView, {} as vscode.WebviewViewResolveContext, {} as vscode.CancellationToken);
+    for (const handler of messageHandlers) {
+      handler({ type: "ready" });
+    }
+    postMessageSpy.mockClear();
+
+    // Pause the first request so we can supersede it before it resolves.
+    let resolveFirst: (() => void) | undefined;
+    const firstReady = new Promise<void>((r) => {
+      resolveFirst = r;
+    });
+    (previewFileLink as unknown as ReturnType<typeof vi.fn>).mockImplementationOnce(async () => {
+      await firstReady;
+      return {
+        type: "filePreviewResult",
+        path: "test/path",
+        requestId: "r1",
+        status: "ok",
+        absPath: "/x/foo.ts",
+      };
+    });
+    (previewFileLink as unknown as ReturnType<typeof vi.fn>).mockResolvedValueOnce({
+      type: "filePreviewResult",
+      path: "test/path",
+      requestId: "r2",
+      status: "ok",
+      absPath: "/x/bar.ts",
+    });
+
+    for (const handler of messageHandlers) {
+      handler({ type: "requestFilePreview", requestId: "r1", sessionId: "s1", path: "foo.ts" });
+    }
+    await Promise.resolve();
+    // Supersede before the first resolves.
+    for (const handler of messageHandlers) {
+      handler({ type: "requestFilePreview", requestId: "r2", sessionId: "s1", path: "bar.ts" });
+    }
+    await new Promise((r) => setTimeout(r, 5));
+    // Now let the first one resolve (it's been cancelled by the supersession).
+    resolveFirst?.();
+    await new Promise((r) => setTimeout(r, 10));
+
+    const previewPosts = postMessageSpy.mock.calls.filter(
+      (args) => (args[0] as { type?: string }).type === "filePreviewResult",
+    );
+    // Only the second request's result should have been posted.
+    expect(previewPosts).toHaveLength(1);
+    expect(previewPosts[0][0]).toMatchObject({ requestId: "r2" });
+
+    sm.dispose();
+  });
+
+  it("ignores requestFilePreview messages with non-string requestId / sessionId / path", () => {
+    const sm = new SessionManager();
+    const provider = new TerminalViewProvider({ fsPath: "/mock/extension" } as vscode.Uri, sm, "sidebar");
+    const { webviewView, messageHandlers } = createMockWebviewView();
+    provider.resolveWebviewView(webviewView, {} as vscode.WebviewViewResolveContext, {} as vscode.CancellationToken);
+    for (const handler of messageHandlers) {
+      handler({ type: "ready" });
+    }
+
+    (previewFileLink as unknown as ReturnType<typeof vi.fn>).mockClear();
+
+    for (const handler of messageHandlers) {
+      handler({ type: "requestFilePreview", requestId: 1 as unknown, sessionId: "s1", path: "foo.ts" });
+      handler({ type: "requestFilePreview", requestId: "r1", sessionId: 0 as unknown, path: "foo.ts" });
+      handler({ type: "requestFilePreview", requestId: "r1", sessionId: "s1", path: null as unknown });
+    }
+    expect(previewFileLink).not.toHaveBeenCalled();
+
+    sm.dispose();
+  });
+
+  it("cancels the in-flight preview token when closeTab arrives for the same session", async () => {
+    const sm = new SessionManager();
+    stubSession(sm);
+    const provider = new TerminalViewProvider({ fsPath: "/mock/extension" } as vscode.Uri, sm, "sidebar");
+    const { webviewView, messageHandlers } = createMockWebviewView();
+    provider.resolveWebviewView(webviewView, {} as vscode.WebviewViewResolveContext, {} as vscode.CancellationToken);
+    for (const handler of messageHandlers) {
+      handler({ type: "ready" });
+    }
+
+    let cancelled = false;
+    (previewFileLink as unknown as ReturnType<typeof vi.fn>).mockImplementation(async (_msg, _deps, token) => {
+      const t = token as { onCancellationRequested?: (cb: () => void) => { dispose(): void } };
+      await new Promise<void>((resolve) => {
+        t.onCancellationRequested?.(() => {
+          cancelled = true;
+          resolve();
+        });
+      });
+      return null;
+    });
+
+    for (const handler of messageHandlers) {
+      handler({ type: "requestFilePreview", requestId: "r1", sessionId: "target", path: "foo.ts" });
+    }
+    await Promise.resolve();
+    for (const handler of messageHandlers) {
+      handler({ type: "closeTab", tabId: "target" });
+    }
+    await new Promise((r) => setTimeout(r, 5));
+
+    expect(cancelled).toBe(true);
+
+    sm.dispose();
+  });
+
+  it("cancels all in-flight preview tokens on webview dispose", async () => {
+    const sm = new SessionManager();
+    stubSession(sm);
+    const provider = new TerminalViewProvider({ fsPath: "/mock/extension" } as vscode.Uri, sm, "sidebar");
+    const { webviewView, messageHandlers, disposeHandlers } = createMockWebviewView();
+    provider.resolveWebviewView(webviewView, {} as vscode.WebviewViewResolveContext, {} as vscode.CancellationToken);
+    for (const handler of messageHandlers) {
+      handler({ type: "ready" });
+    }
+
+    let cancellations = 0;
+    (previewFileLink as unknown as ReturnType<typeof vi.fn>).mockImplementation(async (_msg, _deps, token) => {
+      const t = token as { onCancellationRequested?: (cb: () => void) => { dispose(): void } };
+      await new Promise<void>((resolve) => {
+        t.onCancellationRequested?.(() => {
+          cancellations++;
+          resolve();
+        });
+      });
+      return null;
+    });
+
+    for (const handler of messageHandlers) {
+      handler({ type: "requestFilePreview", requestId: "r1", sessionId: "s1", path: "a" });
+      handler({ type: "requestFilePreview", requestId: "r2", sessionId: "s2", path: "b" });
+    }
+    await Promise.resolve();
+    for (const handler of disposeHandlers) {
+      handler();
+    }
+    await new Promise((r) => setTimeout(r, 5));
+
+    expect(cancellations).toBe(2);
+
+    sm.dispose();
+  });
+});
+
+// ─── theme bridge (task 1_3) ────────────────────────────────────────
+
+describe("TerminalViewProvider: theme bridge", () => {
+  it("posts the initial theme on ready for each ColorThemeKind", async () => {
+    const cases: Array<{ kind: number; expected: string }> = [
+      { kind: 1 /* Light */, expected: "light" },
+      { kind: 2 /* Dark */, expected: "dark" },
+      { kind: 3 /* HighContrast */, expected: "hc-dark" },
+      { kind: 4 /* HighContrastLight */, expected: "hc-light" },
+    ];
+
+    const { __setActiveColorTheme } = await import("../test/__mocks__/vscode");
+
+    for (const { kind, expected } of cases) {
+      __setActiveColorTheme(kind);
+      const sm = new SessionManager();
+      const provider = new TerminalViewProvider({ fsPath: "/mock/extension" } as vscode.Uri, sm, "sidebar");
+      const { webviewView, messageHandlers, postMessageSpy } = createMockWebviewView();
+      provider.resolveWebviewView(webviewView, {} as vscode.WebviewViewResolveContext, {} as vscode.CancellationToken);
+
+      for (const handler of messageHandlers) {
+        handler({ type: "ready" });
+      }
+
+      const themeMessages = postMessageSpy.mock.calls
+        .map((args) => args[0] as { type?: string; kind?: string })
+        .filter((m) => m && m.type === "themeChanged");
+      expect(themeMessages.length).toBeGreaterThan(0);
+      expect(themeMessages[0]).toEqual({ type: "themeChanged", kind: expected });
+
+      sm.dispose();
+    }
+  });
+
+  it("posts themeChanged when onDidChangeActiveColorTheme fires after ready", async () => {
+    const sm = new SessionManager();
+    const provider = new TerminalViewProvider({ fsPath: "/mock/extension" } as vscode.Uri, sm, "sidebar");
+    const { webviewView, messageHandlers, postMessageSpy } = createMockWebviewView();
+    provider.resolveWebviewView(webviewView, {} as vscode.WebviewViewResolveContext, {} as vscode.CancellationToken);
+
+    for (const handler of messageHandlers) {
+      handler({ type: "ready" });
+    }
+    postMessageSpy.mockClear();
+
+    const { __setActiveColorTheme } = await import("../test/__mocks__/vscode");
+    __setActiveColorTheme(1 /* Light */);
+
+    const themeCalls = postMessageSpy.mock.calls.filter(
+      (args) => (args[0] as { type?: string }).type === "themeChanged",
+    );
+    expect(themeCalls).toHaveLength(1);
+    expect(themeCalls[0][0]).toEqual({ type: "themeChanged", kind: "light" });
+
+    sm.dispose();
+  });
+
+  it("does NOT post themeChanged before ready", async () => {
+    const sm = new SessionManager();
+    const provider = new TerminalViewProvider({ fsPath: "/mock/extension" } as vscode.Uri, sm, "sidebar");
+    const { webviewView, postMessageSpy } = createMockWebviewView();
+    provider.resolveWebviewView(webviewView, {} as vscode.WebviewViewResolveContext, {} as vscode.CancellationToken);
+    // No 'ready' message yet.
+
+    postMessageSpy.mockClear();
+    const { __setActiveColorTheme } = await import("../test/__mocks__/vscode");
+    __setActiveColorTheme(1 /* Light */);
+
+    const themeCalls = postMessageSpy.mock.calls.filter(
+      (args) => (args[0] as { type?: string }).type === "themeChanged",
+    );
+    expect(themeCalls).toHaveLength(0);
+
+    sm.dispose();
+  });
+
+  it("disposes the theme subscription on webview dispose", async () => {
+    const sm = new SessionManager();
+    const provider = new TerminalViewProvider({ fsPath: "/mock/extension" } as vscode.Uri, sm, "sidebar");
+    const { webviewView, messageHandlers, disposeHandlers, postMessageSpy } = createMockWebviewView();
+    provider.resolveWebviewView(webviewView, {} as vscode.WebviewViewResolveContext, {} as vscode.CancellationToken);
+
+    for (const handler of messageHandlers) {
+      handler({ type: "ready" });
+    }
+    postMessageSpy.mockClear();
+
+    // Simulate webview dispose — should unsubscribe theme listener.
+    for (const handler of disposeHandlers) {
+      handler();
+    }
+
+    const { __setActiveColorTheme, __getThemeListenerCount } = await import("../test/__mocks__/vscode");
+    expect(__getThemeListenerCount()).toBe(0);
+
+    __setActiveColorTheme(1 /* Light */);
+    const themeCalls = postMessageSpy.mock.calls.filter(
+      (args) => (args[0] as { type?: string }).type === "themeChanged",
+    );
+    expect(themeCalls).toHaveLength(0);
 
     sm.dispose();
   });

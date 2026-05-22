@@ -121,6 +121,28 @@ export interface OpenFileMessage {
   col?: number;
 }
 
+/** Request the extension host to read a file for the hover preview popup. */
+export interface RequestFilePreviewMessage {
+  type: "requestFilePreview";
+  /** Unique per-hover correlation id (echoed back in `filePreviewResult`). */
+  requestId: string;
+  /** Source terminal session id (used to resolve relative paths via cwd chain). */
+  sessionId: string;
+  /** Raw matched path text without any line/column suffix. */
+  path: string;
+  /** Optional 1-based line number parsed from the suffix. */
+  line?: number;
+  /** Optional 1-based column number parsed from the suffix. */
+  col?: number;
+  /**
+   * When true, the host bypasses the trust-policy block (dotfile / sensitive
+   * folder / out-of-workspace) that would otherwise return `requires-
+   * confirmation`. Set by the webview when the user explicitly holds Cmd
+   * (macOS) / Ctrl (Win/Linux) during the hover.
+   */
+  override?: boolean;
+}
+
 /**
  * All messages that can be sent from the WebView to the Extension Host.
  * Use msg.type as the discriminant in switch/case for exhaustive handling.
@@ -138,7 +160,9 @@ export type WebViewToExtensionMessage =
   | RequestCloseSplitPaneMessage
   | FocusMessage
   | OpenLinkMessage
-  | OpenFileMessage;
+  | OpenFileMessage
+  | RequestFilePreviewMessage
+  | UpdateHoverPreviewSettingMessage;
 
 // ─── Extension → WebView Messages ───────────────────────────────────
 
@@ -277,6 +301,118 @@ export interface InsertPathEffectMessage {
   type: "insertPathEffect";
 }
 
+/** Outcome of a `requestFilePreview` for hover. See spec "IPC contract — requestFilePreview / filePreviewResult". */
+export type FilePreviewStatus =
+  | "ok"
+  | "not-found"
+  | "binary"
+  | "too-large"
+  | "ambiguous"
+  | "error"
+  | "requires-confirmation";
+
+/**
+ * Fields present on every `filePreviewResult` regardless of `status`. The
+ * `path` echo guarantees the popup header has a non-empty value to display.
+ */
+interface FilePreviewResultBase {
+  type: "filePreviewResult";
+  /** Echoes the `requestId` from the originating `RequestFilePreviewMessage`. */
+  requestId: string;
+  /** Echoes the original `path` from the request — header fallback when `absPath` is unknown. */
+  path: string;
+  /** Echoes the 1-based line number from the request — popup uses it to scroll-to-line. */
+  line?: number;
+}
+
+/**
+ * Result variants of a hover-preview request — discriminated union on `status`
+ * so consumers narrow without optional-chaining (review round-1 W1).
+ *
+ *   - `ok`: file was read; `content`, `languageId`, `isMarkdown`, `totalBytes`,
+ *     `totalLines`, `absPath` all required. `truncated` flags the 200 KB / 500-
+ *     line cap from `readFileForPreview`.
+ *   - `binary` / `too-large`: file was resolved; we know `absPath` and
+ *     `totalBytes` but not the contents. `languageId` + `isMarkdown` are still
+ *     provided so the popup can label the placeholder.
+ *   - `requires-confirmation`: file was resolved but the trust policy (dotfile
+ *     / known-sensitive folder / out-of-workspace) blocked auto-preview. The
+ *     popup shows a "Press Cmd/Ctrl to preview" placeholder. `absPath` is
+ *     provided so the user can verify what they're about to load.
+ *   - `not-found` / `ambiguous` / `error`: only base fields (`requestId`,
+ *     `path`).
+ */
+export type FilePreviewResultMessage =
+  | (FilePreviewResultBase & {
+      status: "ok";
+      content: string;
+      languageId: string;
+      isMarkdown: boolean;
+      truncated: boolean;
+      totalBytes: number;
+      totalLines: number;
+      absPath: string;
+    })
+  | (FilePreviewResultBase & {
+      status: "binary" | "too-large";
+      languageId: string;
+      isMarkdown: boolean;
+      totalBytes: number;
+      absPath: string;
+    })
+  | (FilePreviewResultBase & {
+      status: "requires-confirmation";
+      /**
+       * Reason the policy blocked auto-preview — purely informational. The
+       * popup placeholder reads the same "Press Cmd/Ctrl to preview" for every
+       * reason; this field is for diagnostics + future-proofing.
+       *   - `dotfile`: basename starts with `.` (e.g. `.env`).
+       *   - `sensitive-dir`: path lives inside `.git`, `.ssh`, `.aws`,
+       *     `.config`, `node_modules`, …
+       *   - `out-of-workspace`: not under any trust base (initialCwd +
+       *     workspace folders).
+       */
+      reason: "dotfile" | "sensitive-dir" | "out-of-workspace";
+      /** Resolved absolute path — present so the popup header shows the target. */
+      absPath?: string;
+      /** Total file size from `stat`, optional — included when resolver had it. */
+      totalBytes?: number;
+    })
+  | (FilePreviewResultBase & {
+      status: "not-found" | "ambiguous" | "error";
+    });
+
+/** VSCode color theme kind, mapped for Shiki theme selection in the webview popup. */
+export interface ThemeChangedMessage {
+  type: "themeChanged";
+  /**
+   * Light / Dark / HighContrastLight / HighContrast — one of four kinds.
+   * See `design.md` D8 for the mapping to Shiki themes.
+   */
+  kind: "light" | "dark" | "hc-light" | "hc-dark";
+}
+
+/** Hover-preview user-facing settings, mirrored from `contributes.configuration`. */
+export interface HoverPreviewSettings {
+  /** Debounce in milliseconds (matches `anywhereTerminal.hoverPreview.delay`). */
+  delay: number;
+  /** Trust policy on/off (matches `anywhereTerminal.hoverPreview.blockSensitive`). */
+  blockSensitive: boolean;
+}
+
+/** Host → webview: new settings snapshot (sent on init + onDidChangeConfiguration). */
+export interface HoverPreviewSettingsMessage {
+  type: "hoverPreviewSettings";
+  settings: HoverPreviewSettings;
+}
+
+/** Webview → host: ask the host to persist a setting via `workspace.getConfiguration().update()`. */
+export interface UpdateHoverPreviewSettingMessage {
+  type: "updateHoverPreviewSetting";
+  key: keyof HoverPreviewSettings;
+  value: boolean | number;
+}
+
 /**
  * All messages that can be sent from the Extension Host to the WebView.
  * Use msg.type as the discriminant in switch/case for exhaustive handling.
@@ -297,4 +433,7 @@ export type ExtensionToWebViewMessage =
   | CloseSplitPaneByIdMessage
   | SplitPaneAtMessage
   | CtxClearMessage
-  | InsertPathEffectMessage;
+  | InsertPathEffectMessage
+  | FilePreviewResultMessage
+  | ThemeChangedMessage
+  | HoverPreviewSettingsMessage;

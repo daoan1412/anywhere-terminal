@@ -11,8 +11,13 @@
 import * as path from "node:path";
 import * as vscode from "vscode";
 import type { OpenFileMessage } from "../types/messages";
-import { expandTildeAndFileUri } from "./pathPreprocess";
-import { resolveCwdRelative } from "./resolveCwdRelative";
+import {
+  type BuildCandidatesResult,
+  buildCandidates as buildCandidatesShared,
+  escapeGlob as escapeGlobShared,
+  hasTraversal,
+  isAbsolutePath,
+} from "./pathResolution";
 
 /** Dependencies for openFileLink — injectable for unit tests. */
 export interface OpenFileLinkDeps {
@@ -78,10 +83,9 @@ export const DEFAULT_FIND_FILES_MAX_RESULTS = 50;
  * cap before timing out, so a runaway setting would freeze the click. */
 const FIND_FILES_MAX_RESULTS_CEILING = 1000;
 
-/** Escape glob meta-characters in a user-controlled path component so findFiles treats it literally. */
-export function escapeGlob(p: string): string {
-  return p.replace(/[*?[\]{}]/g, (c) => `[${c}]`);
-}
+// Re-export `escapeGlob` from `pathResolution.ts` so existing import sites in
+// other modules and tests keep working without churn.
+export const escapeGlob = escapeGlobShared;
 
 /**
  * Promise.race wrapper that rejects with a fixed Error if the thenable
@@ -125,18 +129,6 @@ function withTimeout<T>(p: Thenable<T>, ms: number, onTimeout?: () => void): Pro
       },
     );
   });
-}
-
-const POSIX_ABSOLUTE = /^\//;
-const WIN32_ABSOLUTE = /^[A-Za-z]:[\\/]/;
-
-function isAbsolutePath(p: string): boolean {
-  return process.platform === "win32" ? WIN32_ABSOLUTE.test(p) : POSIX_ABSOLUTE.test(p);
-}
-
-/** Return true if any path segment is exactly "..". Used to reject traversal before findFiles. */
-function hasTraversal(p: string): boolean {
-  return p.split(/[\\/]/).some((seg) => seg === "..");
 }
 
 /**
@@ -188,81 +180,15 @@ function workspaceRelative(fsPath: string, folders: readonly { uri: { fsPath: st
   return fsPath;
 }
 
-/**
- * Build the ordered, deduplicated list of candidate absolute paths to try.
- *
- * After `expandTildeAndFileUri` normalizes `~` and `file://` URIs, the
- * function branches on absoluteness:
- *
- * - `passthrough-malformed` (broken `file://`) → `[]`, resolver short-circuits.
- * - Absolute → single candidate. **This short-circuit fixes a latent bug**
- *   in the previous implementation where `path.join(cwd, absolutePath)`
- *   produced bogus concatenations (`/cwd/Users/...`) because Node `path.join`
- *   strips the leading separator instead of treating the second arg as root.
- * - Relative → each cwd source (liveCwd, currentCwd, initialCwd, every
- *   workspaceFolder) fans out via `resolveCwdRelative` so a click on
- *   `a/file.md` while the terminal is in `/x/y/a` tries BOTH `/x/y/a/a/file.md`
- *   AND `/x/y/a/file.md`.
- *
- * Returns the per-source candidate count alongside the deduped list so the
- * trace logger can surface fan-out behaviour for diagnostics.
- */
+// `buildCandidates` was extracted to `./pathResolution.ts` so it can be shared
+// with the hover-preview resolver (`previewFileLink.ts`). The wrapper here
+// preserves the local `BuildCandidatesResult` shape that downstream code expects.
 function buildCandidates(
   msg: OpenFileMessage,
   deps: OpenFileLinkDeps,
   liveCwd: string | undefined,
-): {
-  candidates: string[];
-  transformedPath: string;
-  sourceCounts: Record<string, number>;
-  malformed: boolean;
-} {
-  const { path: transformed, kind } = expandTildeAndFileUri(msg.path);
-  if (kind === "passthrough-malformed") {
-    return {
-      candidates: [],
-      transformedPath: transformed,
-      sourceCounts: { malformed: 1 },
-      malformed: true,
-    };
-  }
-  if (isAbsolutePath(transformed)) {
-    return {
-      candidates: [path.resolve(transformed)],
-      transformedPath: transformed,
-      sourceCounts: { absolute: 1 },
-      malformed: false,
-    };
-  }
-  const sources: Array<[string, string | undefined]> = [
-    ["liveCwd", liveCwd],
-    ["currentCwd", deps.getCurrentCwd(msg.sessionId)],
-    ["initialCwd", deps.getInitialCwd(msg.sessionId)],
-  ];
-  for (const [i, folder] of (deps.workspaceFolders ?? []).entries()) {
-    sources.push([`ws[${i}]`, folder.uri.fsPath]);
-  }
-  const seen = new Set<string>();
-  const candidates: string[] = [];
-  const sourceCounts: Record<string, number> = {};
-  for (const [label, cwd] of sources) {
-    if (!cwd) {
-      continue;
-    }
-    let added = 0;
-    for (const c of resolveCwdRelative(cwd, transformed)) {
-      const normalized = path.resolve(c);
-      if (!seen.has(normalized)) {
-        seen.add(normalized);
-        candidates.push(normalized);
-        added++;
-      }
-    }
-    if (added > 0) {
-      sourceCounts[label] = added;
-    }
-  }
-  return { candidates, transformedPath: transformed, sourceCounts, malformed: false };
+): BuildCandidatesResult {
+  return buildCandidatesShared(msg, deps, liveCwd);
 }
 
 /** Compare two normalized paths with platform-appropriate case sensitivity. */

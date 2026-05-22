@@ -9,9 +9,13 @@ import { FitAddon } from "@xterm/addon-fit";
 import { WebLinksAddon } from "@xterm/addon-web-links";
 import { WebglAddon } from "@xterm/addon-webgl";
 import { Terminal } from "@xterm/xterm";
-import type { TerminalConfig } from "../../types/messages";
+import type { HoverPreviewSettings, TerminalConfig } from "../../types/messages";
 import { type ClipboardProvider, createKeyEventHandler } from "../InputHandler";
 import { FilePathLinkProvider } from "../links/FilePathLinkProvider";
+import { HoverPreviewController, type HoverPreviewThemeKind } from "../links/HoverPreviewController";
+import { HoverPreviewPopup } from "../links/HoverPreviewPopup";
+import { createMarkdownRenderer } from "../links/markdownRenderer";
+import { createSyntaxRenderer, isHighlighterReady, whenHighlighterReady } from "../links/syntaxRenderer";
 import { fitTerminal as fitTerminalCore } from "../resize/XtermFitService";
 import { createLeaf, getAllSessionIds } from "../SplitModel";
 import type { TerminalInstance, WebviewStateStore } from "../state/WebviewStateStore";
@@ -26,6 +30,16 @@ export interface TerminalFactoryDeps {
   postMessage: (msg: unknown) => void;
   onTabBarUpdate: () => void;
   getIsComposing: () => boolean;
+  /**
+   * Reads the latest theme kind for the hover-preview popup. Driven by the
+   * extension host's `themeChanged` IPC.
+   */
+  getHoverPreviewTheme: () => HoverPreviewThemeKind;
+  /**
+   * Reads the latest hover-preview settings (debounce, wrap, enabled, etc).
+   * Driven by the host's `hoverPreviewSettings` IPC.
+   */
+  getHoverPreviewSettings: () => HoverPreviewSettings;
 }
 
 /**
@@ -50,6 +64,14 @@ export class TerminalFactory {
   private readonly postMessage: (msg: unknown) => void;
   private readonly onTabBarUpdate: () => void;
   private readonly getIsComposing: () => boolean;
+  private readonly getHoverPreviewTheme: () => HoverPreviewThemeKind;
+  private readonly getHoverPreviewSettings: () => HoverPreviewSettings;
+
+  /**
+   * Active hover-preview controllers indexed by session id. main.ts routes
+   * `filePreviewResult` to `controllers.get(sessionId).onMessage(msg)`.
+   */
+  readonly hoverControllers = new Map<string, HoverPreviewController>();
 
   constructor(deps: TerminalFactoryDeps) {
     this.themeManager = deps.themeManager;
@@ -57,6 +79,8 @@ export class TerminalFactory {
     this.postMessage = deps.postMessage;
     this.onTabBarUpdate = deps.onTabBarUpdate;
     this.getIsComposing = deps.getIsComposing;
+    this.getHoverPreviewTheme = deps.getHoverPreviewTheme;
+    this.getHoverPreviewSettings = deps.getHoverPreviewSettings;
   }
 
   /**
@@ -177,6 +201,108 @@ export class TerminalFactory {
     terminal.loadAddon(fitAddon);
     terminal.loadAddon(webLinksAddon);
 
+    // Build the hover-preview controller + renderers + popup for this terminal.
+    // The controller is also registered in `hoverControllers` so main.ts can
+    // route `filePreviewResult` messages by session id.
+    // See: asimov/changes/add-hover-file-preview/design.md "Architecture", D10
+    const syntaxRenderer = createSyntaxRenderer({ getTheme: this.getHoverPreviewTheme });
+    const markdownRenderer = createMarkdownRenderer({ getTheme: this.getHoverPreviewTheme });
+    // Schedule a re-render once the Shiki highlighter finishes loading. The
+    // initial render at first-hover falls back to plain `<pre>` when the
+    // singleton isn't yet ready (round-1 W4); this wrapper re-injects styled
+    // HTML once Shiki resolves, only if the element is still in the DOM.
+    //
+    // `onAsyncRefresh` (round-2 W5) is invoked AFTER innerHTML replacement so
+    // the popup can re-apply the active-line highlight + scroll. Without it,
+    // the first hover with a `:line` suffix loses focus the moment Shiki
+    // catches up (it replaces the plain-text DOM that held the active class).
+    const renderCodeWithRefresh = (
+      content: string,
+      languageId: string,
+      theme: HoverPreviewThemeKind,
+      onAsyncRefresh?: () => void,
+    ): HTMLElement => {
+      const el = syntaxRenderer.renderElement(content, languageId, theme);
+      if (!isHighlighterReady()) {
+        void whenHighlighterReady().then(() => {
+          if (el.isConnected) {
+            el.innerHTML = syntaxRenderer.renderElement(content, languageId, theme).innerHTML;
+            try {
+              onAsyncRefresh?.();
+            } catch {
+              // Best-effort — popup's reapply must never throw out of here.
+            }
+          }
+        });
+      }
+      return el;
+    };
+    const renderMarkdownWithRefresh = (
+      content: string,
+      theme: HoverPreviewThemeKind,
+      onAsyncRefresh?: () => void,
+    ): HTMLElement => {
+      const el = markdownRenderer.render(content, theme);
+      if (!isHighlighterReady()) {
+        void whenHighlighterReady().then(() => {
+          if (el.isConnected) {
+            el.innerHTML = markdownRenderer.render(content, theme).innerHTML;
+            try {
+              onAsyncRefresh?.();
+            } catch {
+              // Best-effort.
+            }
+          }
+        });
+      }
+      return el;
+    };
+    // Forward-declared so the popup's `onDismiss` callback can invalidate the
+    // controller's `activeRequestId` even when dismissal originates inside
+    // the popup itself (e.g. Escape key pressed while popup is shown).
+    let hoverController: HoverPreviewController;
+    const hoverPopup = new HoverPreviewPopup({
+      renderCode: renderCodeWithRefresh,
+      renderMarkdown: renderMarkdownWithRefresh,
+      onDismiss: () => hoverController?.dismiss(),
+      // Forward popup pointer enter/leave to the controller so the leave-grace
+      // timer doesn't fire while the cursor is over the popup. Without these
+      // hooks, `link.leave` dismisses the popup the instant the cursor crosses
+      // the 12px gap between link and popup, blocking scroll/interaction.
+      onPointerEnter: () => hoverController?.onPopupEnter(),
+      onPointerLeave: () => hoverController?.onPopupLeave(),
+      getSettings: () => this.getHoverPreviewSettings(),
+      onUpdateSetting: (key, value) => this.postMessage({ type: "updateHoverPreviewSetting", key, value }),
+      // Header "Open" button → reuse the same openFile flow as clicking the
+      // underlined link in the terminal. Prefer absPath so the host's resolver
+      // hits the absolute candidate first; fall back to the echoed request
+      // path when absPath is absent (e.g. ambiguous match).
+      onOpenFile: (result) => {
+        const openPath =
+          (result.status === "ok" ||
+          result.status === "binary" ||
+          result.status === "too-large" ||
+          result.status === "requires-confirmation"
+            ? result.absPath
+            : undefined) ?? result.path;
+        this.postMessage({
+          type: "openFile",
+          path: openPath,
+          sessionId: id,
+          ...(result.line !== undefined ? { line: result.line } : {}),
+        });
+      },
+    });
+    hoverController = new HoverPreviewController({
+      terminal,
+      sessionId: id,
+      postMessage: (msg) => this.postMessage(msg),
+      getTheme: this.getHoverPreviewTheme,
+      popup: hoverPopup,
+      debounceMs: this.getHoverPreviewSettings().delay,
+    });
+    this.hoverControllers.set(id, hoverController);
+
     // Register a custom link provider for file paths in terminal output.
     // Underlines + cursor:pointer come from xterm's built-in link decorations;
     // activation posts an `openFile` message that the extension host resolves
@@ -187,6 +313,7 @@ export class TerminalFactory {
         sessionId: id,
         postMessage: (msg) => this.postMessage(msg),
         platform: navigator.platform.includes("Win") ? "win32" : "posix",
+        hoverController,
       }),
     );
 
@@ -329,6 +456,24 @@ export class TerminalFactory {
       activeInstance.terminal.focus();
     } else {
       fallbackInstance.terminal.focus();
+    }
+  }
+
+  /**
+   * Dispose hover-preview controller for a session. Idempotent; safe to call
+   * even when no controller is registered (e.g. terminal never opened).
+   *
+   * See: asimov/changes/add-hover-file-preview/design.md D10
+   */
+  disposeHoverController(sessionId: string): void {
+    const controller = this.hoverControllers.get(sessionId);
+    if (controller) {
+      try {
+        controller.dispose();
+      } catch {
+        // Best-effort.
+      }
+      this.hoverControllers.delete(sessionId);
     }
   }
 

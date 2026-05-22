@@ -1,10 +1,35 @@
 import * as vscode from "vscode";
 import type { SessionManager } from "../session/SessionManager";
 import { readTerminalConfig, readTerminalSettings } from "../settings/SettingsReader";
-import type { WebViewToExtensionMessage } from "../types/messages";
+import type { ThemeChangedMessage, WebViewToExtensionMessage } from "../types/messages";
+import { affectsHoverPreview, readHoverPreviewSettings, updateHoverPreviewSetting } from "./hoverPreviewSettings";
 import { openExternalLink } from "./openExternalLink";
 import { DEFAULT_FIND_FILES_MAX_RESULTS, openFileLink } from "./openFileLink";
+import { previewFileLink } from "./previewFileLink";
+import { isValidPreviewRequest } from "./previewValidation";
+import { readBytesBounded } from "./readBytesBounded";
 import { getTerminalHtml } from "./webviewHtml";
+
+/**
+ * Map VSCode's `ColorThemeKind` to the four-way `ThemeChangedMessage["kind"]`
+ * union the webview popup understands. See `design.md` D8 for the table.
+ */
+export function themeKindFor(kind: vscode.ColorThemeKind): ThemeChangedMessage["kind"] {
+  switch (kind) {
+    case vscode.ColorThemeKind.Light:
+      return "light";
+    case vscode.ColorThemeKind.Dark:
+      return "dark";
+    case vscode.ColorThemeKind.HighContrastLight:
+      return "hc-light";
+    case vscode.ColorThemeKind.HighContrast:
+      return "hc-dark";
+    default:
+      // Should be unreachable — the union is closed in vscode.d.ts. Fall back
+      // to dark as the conservative default (VSCode itself defaults to dark).
+      return "dark";
+  }
+}
 
 /**
  * WebviewViewProvider for sidebar and panel terminal views.
@@ -30,6 +55,16 @@ export class TerminalViewProvider implements vscode.WebviewViewProvider {
 
   /** Last active pane session ID reported by the webview (for split-pane aware routing). */
   private _lastActivePaneSessionId: string | undefined;
+
+  /**
+   * In-flight hover-preview cancellation tokens, keyed by `sessionId`. A new
+   * `requestFilePreview` for the same `sessionId` cancels + disposes the
+   * prior entry before starting. Cleared on closeTab / requestCloseSplitPane
+   * and on webview dispose.
+   *
+   * See: asimov/changes/add-hover-file-preview/design.md D9, D10
+   */
+  private readonly _previewTokens = new Map<string, vscode.CancellationTokenSource>();
 
   /** Public accessor for the current webview view. */
   get view(): vscode.WebviewView | undefined {
@@ -72,7 +107,39 @@ export class TerminalViewProvider implements vscode.WebviewViewProvider {
       }),
     );
 
-    // 4. Wire visibility handler (for deferred resize on re-show + output pause/resume)
+    // 4a. Wire theme-change bridge — keep the popup-rendering theme in sync
+    // with the user's active VSCode color theme.
+    // See: asimov/changes/add-hover-file-preview/design.md D8
+    disposables.push(
+      vscode.window.onDidChangeActiveColorTheme((theme) => {
+        if (!this._ready) {
+          // onReady posts the initial theme; skip until then.
+          return;
+        }
+        this.safePostMessage(webviewView.webview, {
+          type: "themeChanged",
+          kind: themeKindFor(theme.kind),
+        } satisfies ThemeChangedMessage);
+      }),
+    );
+
+    // 4a-bis. Wire hover-preview settings bridge — re-post on every change to
+    // `anywhereTerminal.hoverPreview.*` so the webview controller / popup
+    // pick up new debounce / wrap / disabled toggles without reload.
+    // See: asimov/changes/add-hover-file-preview/design.md D17
+    disposables.push(
+      vscode.workspace.onDidChangeConfiguration((event) => {
+        if (!affectsHoverPreview(event) || !this._ready) {
+          return;
+        }
+        this.safePostMessage(webviewView.webview, {
+          type: "hoverPreviewSettings",
+          settings: readHoverPreviewSettings(),
+        });
+      }),
+    );
+
+    // 4b. Wire visibility handler (for deferred resize on re-show + output pause/resume)
     disposables.push(
       webviewView.onDidChangeVisibility(() => {
         const viewId = this.getViewId();
@@ -96,11 +163,108 @@ export class TerminalViewProvider implements vscode.WebviewViewProvider {
       for (const d of disposables) {
         d.dispose();
       }
+      // Cancel + dispose any in-flight preview tokens — see design.md D10.
+      this.cancelAllPreviewTokens();
       // Pause output for the view — sessions survive but don't flush to a disposed webview
       this.sessionManager.pauseOutputForView(this.getViewId());
       this._view = undefined;
       this._ready = false;
     });
+  }
+
+  /**
+   * Handle a hover-preview request. Supersedes any prior in-flight request for
+   * the same session via the cancellation-token map.
+   *
+   * See: asimov/changes/add-hover-file-preview/design.md D9
+   */
+  private async handleRequestFilePreview(
+    message: Extract<WebViewToExtensionMessage, { type: "requestFilePreview" }>,
+    webview: vscode.Webview,
+  ): Promise<void> {
+    // Reject unknown sessionId BEFORE any resolution work. Without this, a
+    // forged or stale id reaches `previewFileLink` where `trustBasesFor`
+    // returns an empty list — historically that meant the trust check was
+    // skipped entirely. Round-2 W3 plugs that hole on the host side too.
+    if (!this.sessionManager.getSession(message.sessionId)) {
+      return;
+    }
+    // Supersede: cancel + dispose any prior request for this session.
+    this.cancelPreviewToken(message.sessionId);
+    const source = new vscode.CancellationTokenSource();
+    this._previewTokens.set(message.sessionId, source);
+
+    try {
+      const allSettings = readHoverPreviewSettings();
+      const result = await previewFileLink(
+        message,
+        {
+          getInitialCwd: (id) => this.sessionManager.getInitialCwd(id),
+          getCurrentCwd: (id) => this.sessionManager.getCurrentCwd(id),
+          getLiveCwd: (id) => this.sessionManager.getLiveCwd(id),
+          workspaceFolders: vscode.workspace.workspaceFolders,
+          fs: {
+            stat: (uri) => vscode.workspace.fs.stat(uri),
+            readFile: (uri) => vscode.workspace.fs.readFile(uri),
+            readBytes: (uri, maxBytes) => readBytesBounded(uri, maxBytes),
+          },
+          findFiles: (include, exclude, maxResults, token) =>
+            vscode.workspace.findFiles(include, exclude, maxResults, token),
+          uriFactory: { file: vscode.Uri.file },
+          createCancellationTokenSource: () => new vscode.CancellationTokenSource(),
+          directoryFileType: vscode.FileType.Directory,
+          symbolicLinkFileType: vscode.FileType.SymbolicLink,
+          relativePatternFactory: (base, glob) => new vscode.RelativePattern(base, glob),
+          settings: { blockSensitive: allSettings.blockSensitive },
+        },
+        source.token,
+      );
+      // Drop the result if cancelled — webview already invalidated its requestId.
+      if (result && !source.token.isCancellationRequested) {
+        this.safePostMessage(webview, result);
+      }
+    } catch (err) {
+      console.warn("[AnyWhere Terminal] requestFilePreview failed:", err);
+    } finally {
+      // Only remove the entry if it's STILL ours — a supersession may have
+      // replaced the map value before we got here.
+      if (this._previewTokens.get(message.sessionId) === source) {
+        this._previewTokens.delete(message.sessionId);
+      }
+      // ALWAYS dispose our own source — this finally owns `source` exclusively.
+      // Deferred from `cancelPreviewToken` (review round-1 W6) so the token
+      // stays accessible to in-flight `isCancellationRequested` checks.
+      try {
+        source.dispose();
+      } catch {
+        // Best-effort.
+      }
+    }
+  }
+
+  /**
+   * Cancel the in-flight preview token for `sessionId` and remove it from the
+   * map. Does NOT dispose — that's deferred to the owning
+   * `handleRequestFilePreview`'s finally block so its `await`-loop can still
+   * observe `token.isCancellationRequested` safely.
+   */
+  private cancelPreviewToken(sessionId: string): void {
+    const prior = this._previewTokens.get(sessionId);
+    if (prior) {
+      try {
+        prior.cancel();
+      } catch {
+        // Best-effort.
+      }
+      this._previewTokens.delete(sessionId);
+    }
+  }
+
+  /** Cancel ALL in-flight preview tokens (called on webview dispose). Disposal is owned by the handlers. */
+  private cancelAllPreviewTokens(): void {
+    for (const sessionId of [...this._previewTokens.keys()]) {
+      this.cancelPreviewToken(sessionId);
+    }
   }
 
   /**
@@ -186,6 +350,8 @@ export class TerminalViewProvider implements vscode.WebviewViewProvider {
 
         case "closeTab":
           if (typeof message.tabId === "string") {
+            // Cancel any in-flight hover-preview for this session before destroying.
+            this.cancelPreviewToken(message.tabId);
             this.sessionManager.destroySession(message.tabId);
             this.safePostMessage(webviewView.webview, {
               type: "tabRemoved",
@@ -240,6 +406,7 @@ export class TerminalViewProvider implements vscode.WebviewViewProvider {
         case "requestCloseSplitPane": {
           if (typeof (message as { sessionId?: unknown }).sessionId === "string") {
             const closeMsg = message as { sessionId: string };
+            this.cancelPreviewToken(closeMsg.sessionId);
             this.sessionManager.destroySession(closeMsg.sessionId);
           }
           break;
@@ -280,6 +447,31 @@ export class TerminalViewProvider implements vscode.WebviewViewProvider {
           }
           break;
 
+        case "requestFilePreview":
+          if (isValidPreviewRequest(message)) {
+            void this.handleRequestFilePreview(message, webviewView.webview);
+          }
+          break;
+
+        case "updateHoverPreviewSetting":
+          // Webview-driven setting update (e.g. footer toggle). Persist into
+          // vscode's user-scope configuration; the change fires
+          // onDidChangeConfiguration which re-posts `hoverPreviewSettings` back
+          // to the webview. See: design.md D17.
+          if (
+            typeof (message as { key?: unknown }).key === "string" &&
+            (typeof (message as { value?: unknown }).value === "boolean" ||
+              typeof (message as { value?: unknown }).value === "number")
+          ) {
+            void updateHoverPreviewSetting(
+              (message as { key: string }).key as Parameters<typeof updateHoverPreviewSetting>[0],
+              (message as { value: boolean | number }).value,
+            ).catch((err) => {
+              console.warn("[AnyWhere Terminal] updateHoverPreviewSetting failed:", err);
+            });
+          }
+          break;
+
         default:
           // Silently ignore unknown message types
           break;
@@ -301,6 +493,24 @@ export class TerminalViewProvider implements vscode.WebviewViewProvider {
   private onReady(webviewView: vscode.WebviewView): void {
     // Mark webview as ready — gates outbound messages
     this._ready = true;
+
+    // Post the initial theme so the hover-preview renderer can pick the
+    // correct Shiki theme before the first hover. Subsequent changes flow
+    // through the onDidChangeActiveColorTheme subscription wired in
+    // resolveWebviewView.
+    this.safePostMessage(webviewView.webview, {
+      type: "themeChanged",
+      kind: themeKindFor(vscode.window.activeColorTheme.kind),
+    } satisfies ThemeChangedMessage);
+
+    // Post initial hover-preview settings so the controller picks up the
+    // user's `delay` / `enabled` / `blockSensitive` before the first hover.
+    // Subsequent edits flow through the onDidChangeConfiguration subscription
+    // wired in resolveWebviewView.
+    this.safePostMessage(webviewView.webview, {
+      type: "hoverPreviewSettings",
+      settings: readHoverPreviewSettings(),
+    });
 
     try {
       const viewId = this.getViewId();

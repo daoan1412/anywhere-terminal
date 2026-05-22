@@ -240,6 +240,182 @@ export function getTerminalHtml(
       animation: insert-path-flash 0.8s ease-out forwards;
     }
 
+    /* Hover-preview popup — see asimov/changes/add-hover-file-preview/design.md D2, D8. */
+    .anywhere-hover-preview {
+      box-sizing: border-box;
+      border: 1px solid var(--vscode-editorHoverWidget-border, rgba(128, 128, 128, 0.35));
+      background: var(--vscode-editorHoverWidget-background, rgba(30, 30, 30, 0.98));
+      color: var(--vscode-editorHoverWidget-foreground, var(--vscode-editor-foreground, #ddd));
+      border-radius: 6px;
+      box-shadow: 0 6px 16px rgba(0, 0, 0, 0.3);
+      font-family: var(--vscode-editor-font-family, "Menlo", "Consolas", monospace);
+      font-size: var(--vscode-editor-font-size, 12px);
+      padding: 0;
+      pointer-events: auto;
+    }
+    .anywhere-hover-preview-header {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      padding: 6px 10px;
+      border-bottom: 1px solid var(--vscode-editorHoverWidget-border, rgba(128, 128, 128, 0.35));
+      color: var(--vscode-descriptionForeground, #999);
+      font-size: 11px;
+    }
+    .anywhere-hover-preview-header-path {
+      flex: 1 1 auto;
+      min-width: 0;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      direction: rtl; /* keep the file name visible when the abs path is long */
+      text-align: left;
+      unicode-bidi: plaintext;
+      user-select: text;
+      cursor: text;
+    }
+    .anywhere-hover-preview-open-btn {
+      flex: 0 0 auto;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      width: 20px;
+      height: 20px;
+      padding: 0;
+      background: transparent;
+      border: none;
+      border-radius: 3px;
+      color: inherit;
+      cursor: pointer;
+      opacity: 0.75;
+    }
+    .anywhere-hover-preview-open-btn:hover,
+    .anywhere-hover-preview-open-btn:focus-visible {
+      background: var(--vscode-toolbar-hoverBackground, rgba(255, 255, 255, 0.08));
+      opacity: 1;
+      outline: none;
+    }
+    .anywhere-hover-preview-open-btn svg {
+      width: 14px;
+      height: 14px;
+      display: block;
+    }
+    .anywhere-hover-preview-body {
+      padding: 8px 10px;
+      overflow: auto;
+      counter-reset: anywhere-line;
+      user-select: text;
+      -webkit-user-select: text;
+      cursor: text;
+    }
+    .anywhere-hover-preview-body pre,
+    .anywhere-hover-preview-plain {
+      margin: 0;
+      white-space: pre;
+      font-family: inherit;
+      font-size: inherit;
+    }
+    /* Markdown body: force no-wrap on prose so long lines scroll horizontally
+     * the same way code does. The popup root has overflow:auto, so users can
+     * scroll sideways. Code fences inside markdown already have their own
+     * white-space:pre via pre.shiki — this rule only flattens the surrounding
+     * p / h* / li / table / blockquote text. */
+    .anywhere-hover-preview-md {
+      white-space: pre;
+    }
+    .anywhere-hover-preview-md pre.shiki {
+      white-space: pre;
+    }
+    /* Shiki sets its theme's background-color inline on the <pre class="shiki">.
+     * That clashes with the popup chrome's editorHoverWidget background — on
+     * horizontal scroll the right edge shows a different shade of dark, and
+     * Shiki's bg over a non-matching popup bg looks like a "selected" block.
+     * Override to transparent so the popup's background shows through
+     * uniformly; tokens still keep their per-token foreground colors.
+     * min-width:100% prevents short content from leaving a strip of popup bg
+     * to the right of the Shiki pre. */
+    .anywhere-hover-preview pre.shiki,
+    .anywhere-hover-preview pre.shiki code,
+    .anywhere-hover-preview-md pre.shiki,
+    .anywhere-hover-preview-md pre.shiki code {
+      background: transparent !important;
+      background-color: transparent !important;
+      min-width: 100%;
+      box-sizing: border-box;
+    }
+    /* CSS-counter gutter — works for both Shiki output and the plain-text
+     * fallback because both wrap each line in span.line. */
+    .anywhere-hover-preview-body .line {
+      counter-increment: anywhere-line;
+      position: relative;
+    }
+    .anywhere-hover-preview-body-numbers .line::before {
+      content: counter(anywhere-line);
+      display: inline-block;
+      width: 3ch;
+      margin-right: 12px;
+      color: var(--vscode-editorLineNumber-foreground, #858585);
+      text-align: right;
+      user-select: none;
+      opacity: 0.7;
+    }
+    .anywhere-hover-preview-placeholder {
+      padding: 4px 0;
+      color: var(--vscode-descriptionForeground, #999);
+    }
+    .anywhere-hover-preview-truncated {
+      margin-top: 6px;
+      color: var(--vscode-descriptionForeground, #999);
+      font-style: italic;
+      font-size: 11px;
+    }
+    .anywhere-hover-preview-md a {
+      pointer-events: none;
+      text-decoration: underline;
+      color: var(--vscode-textLink-foreground, #4daafc);
+    }
+    /* Footer toolbar — toggles for wrap/auto + delay input. See: design.md D17. */
+    .anywhere-hover-preview-footer {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      padding: 6px 10px;
+      border-top: 1px solid var(--vscode-editorHoverWidget-border, rgba(128, 128, 128, 0.35));
+      background: var(--vscode-editorHoverWidget-statusBarBackground, rgba(255, 255, 255, 0.03));
+      font-size: 11px;
+      color: var(--vscode-descriptionForeground, #999);
+    }
+    .anywhere-hover-preview-footer-toggle,
+    .anywhere-hover-preview-footer-delay {
+      display: inline-flex;
+      align-items: center;
+      gap: 4px;
+      cursor: pointer;
+      user-select: none;
+    }
+    .anywhere-hover-preview-footer-delay {
+      margin-left: auto;
+    }
+    .anywhere-hover-preview-footer-delay input {
+      width: 56px;
+      padding: 2px 4px;
+      background: var(--vscode-input-background, rgba(0, 0, 0, 0.2));
+      color: var(--vscode-input-foreground, inherit);
+      border: 1px solid var(--vscode-input-border, transparent);
+      border-radius: 2px;
+      font-size: 11px;
+    }
+    .anywhere-hover-preview-footer input[type="checkbox"] {
+      cursor: pointer;
+    }
+    /* Highlight the line referenced by path:LineNo / path#LineNo. */
+    .anywhere-hover-preview .line.anywhere-hover-preview-line-active {
+      background-color: var(--vscode-editor-rangeHighlightBackground, rgba(255, 200, 0, 0.15));
+      box-shadow: inset 2px 0 0 var(--vscode-editorWarning-foreground, #cca700);
+      display: inline-block;
+      min-width: 100%;
+    }
+
     /* Split handle — visible 1px separator at rest, full sash on hover */
     .split-handle {
       flex: 0 0 4px;

@@ -12,6 +12,8 @@ import type {
   ErrorMessage,
   ExitMessage,
   ExtensionToWebViewMessage,
+  FilePreviewResultMessage,
+  HoverPreviewSettingsMessage,
   InsertPathEffectMessage,
   OutputMessage,
   RestoreMessage,
@@ -20,6 +22,7 @@ import type {
   SplitPaneMessage,
   TabCreatedMessage,
   TabRemovedMessage,
+  ThemeChangedMessage,
 } from "../../types/messages";
 
 // ─── Types ──────────────────────────────────────────────────────────
@@ -47,6 +50,9 @@ export interface MessageHandlers {
   onCtxClear(msg: CtxClearMessage): void;
   onError(msg: ErrorMessage): void;
   onInsertPathEffect(msg: InsertPathEffectMessage): void;
+  onFilePreviewResult(msg: FilePreviewResultMessage): void;
+  onThemeChanged(msg: ThemeChangedMessage): void;
+  onHoverPreviewSettings(msg: HoverPreviewSettingsMessage): void;
 }
 
 // ─── Factory ────────────────────────────────────────────────────────
@@ -108,6 +114,15 @@ export function createMessageRouter(handlers: MessageHandlers): (msg: ExtensionT
         break;
       case "insertPathEffect":
         handlers.onInsertPathEffect(msg);
+        break;
+      case "filePreviewResult":
+        handlers.onFilePreviewResult(msg);
+        break;
+      case "themeChanged":
+        handlers.onThemeChanged(msg);
+        break;
+      case "hoverPreviewSettings":
+        handlers.onHoverPreviewSettings(msg);
         break;
       case "init":
         // init is handled directly by main.ts — not routed

@@ -2,9 +2,14 @@ import * as crypto from "node:crypto";
 import * as vscode from "vscode";
 import type { SessionManager } from "../session/SessionManager";
 import { readTerminalConfig, readTerminalSettings } from "../settings/SettingsReader";
-import type { WebViewToExtensionMessage } from "../types/messages";
+import type { ThemeChangedMessage, WebViewToExtensionMessage } from "../types/messages";
+import { affectsHoverPreview, readHoverPreviewSettings, updateHoverPreviewSetting } from "./hoverPreviewSettings";
 import { openExternalLink } from "./openExternalLink";
 import { DEFAULT_FIND_FILES_MAX_RESULTS, openFileLink } from "./openFileLink";
+import { previewFileLink } from "./previewFileLink";
+import { isValidPreviewRequest } from "./previewValidation";
+import { readBytesBounded } from "./readBytesBounded";
+import { themeKindFor } from "./TerminalViewProvider";
 import { getTerminalHtml } from "./webviewHtml";
 
 /**
@@ -34,6 +39,9 @@ export class TerminalEditorProvider {
   private _ready = false;
   /** The WebviewPanel managed by this instance. */
   private readonly _panel: vscode.WebviewPanel;
+
+  /** In-flight hover-preview cancellation tokens, keyed by `sessionId`. See: design.md D9, D10 */
+  private readonly _previewTokens = new Map<string, vscode.CancellationTokenSource>();
 
   private constructor(
     private readonly extensionUri: vscode.Uri,
@@ -92,7 +100,34 @@ export class TerminalEditorProvider {
       }),
     );
 
-    // 3. Wire visibility handler (for deferred resize on tab switch)
+    // 3a. Wire theme-change bridge for hover-preview popup theming.
+    // See: asimov/changes/add-hover-file-preview/design.md D8
+    disposables.push(
+      vscode.window.onDidChangeActiveColorTheme((theme) => {
+        if (!this._ready) {
+          return;
+        }
+        this.safePostMessage({
+          type: "themeChanged",
+          kind: themeKindFor(theme.kind),
+        } satisfies ThemeChangedMessage);
+      }),
+    );
+
+    // 3a-bis. Wire hover-preview settings bridge. See: design.md D17
+    disposables.push(
+      vscode.workspace.onDidChangeConfiguration((event) => {
+        if (!affectsHoverPreview(event) || !this._ready) {
+          return;
+        }
+        this.safePostMessage({
+          type: "hoverPreviewSettings",
+          settings: readHoverPreviewSettings(),
+        });
+      }),
+    );
+
+    // 3b. Wire visibility handler (for deferred resize on tab switch)
     disposables.push(
       this._panel.onDidChangeViewState((e) => {
         if (e.webviewPanel.visible && this._ready) {
@@ -106,9 +141,90 @@ export class TerminalEditorProvider {
       for (const d of disposables) {
         d.dispose();
       }
+      // Cancel + dispose any in-flight preview tokens (D10).
+      this.cancelAllPreviewTokens();
       TerminalEditorProvider._activePanels.delete(this._panel);
       this.sessionManager.destroyAllForView(this._viewId);
     });
+  }
+
+  /**
+   * Cancel the in-flight preview token for `sessionId` and remove it from the
+   * map. Does NOT dispose — disposal is owned by the handler's finally block
+   * so in-flight `isCancellationRequested` checks remain safe. See round-1 W6.
+   */
+  private cancelPreviewToken(sessionId: string): void {
+    const prior = this._previewTokens.get(sessionId);
+    if (prior) {
+      try {
+        prior.cancel();
+      } catch {
+        // Best-effort.
+      }
+      this._previewTokens.delete(sessionId);
+    }
+  }
+
+  /** Cancel + dispose ALL in-flight preview tokens. */
+  private cancelAllPreviewTokens(): void {
+    for (const sessionId of [...this._previewTokens.keys()]) {
+      this.cancelPreviewToken(sessionId);
+    }
+  }
+
+  /** Handle a hover-preview request. See: design.md D9 */
+  private async handleRequestFilePreview(
+    message: Extract<WebViewToExtensionMessage, { type: "requestFilePreview" }>,
+  ): Promise<void> {
+    // Reject unknown sessionId BEFORE resolution work — see TerminalViewProvider
+    // counterpart + round-2 W3.
+    if (!this.sessionManager.getSession(message.sessionId)) {
+      return;
+    }
+    this.cancelPreviewToken(message.sessionId);
+    const source = new vscode.CancellationTokenSource();
+    this._previewTokens.set(message.sessionId, source);
+    try {
+      const allSettings = readHoverPreviewSettings();
+      const result = await previewFileLink(
+        message,
+        {
+          getInitialCwd: (id) => this.sessionManager.getInitialCwd(id),
+          getCurrentCwd: (id) => this.sessionManager.getCurrentCwd(id),
+          getLiveCwd: (id) => this.sessionManager.getLiveCwd(id),
+          workspaceFolders: vscode.workspace.workspaceFolders,
+          fs: {
+            stat: (uri) => vscode.workspace.fs.stat(uri),
+            readFile: (uri) => vscode.workspace.fs.readFile(uri),
+            readBytes: (uri, maxBytes) => readBytesBounded(uri, maxBytes),
+          },
+          findFiles: (include, exclude, maxResults, token) =>
+            vscode.workspace.findFiles(include, exclude, maxResults, token),
+          uriFactory: { file: vscode.Uri.file },
+          createCancellationTokenSource: () => new vscode.CancellationTokenSource(),
+          directoryFileType: vscode.FileType.Directory,
+          symbolicLinkFileType: vscode.FileType.SymbolicLink,
+          relativePatternFactory: (base, glob) => new vscode.RelativePattern(base, glob),
+          settings: { blockSensitive: allSettings.blockSensitive },
+        },
+        source.token,
+      );
+      if (result && !source.token.isCancellationRequested) {
+        this.safePostMessage(result);
+      }
+    } catch (err) {
+      console.warn("[AnyWhere Terminal] requestFilePreview failed (editor):", err);
+    } finally {
+      if (this._previewTokens.get(message.sessionId) === source) {
+        this._previewTokens.delete(message.sessionId);
+      }
+      // Always dispose our own source — review round-1 W6.
+      try {
+        source.dispose();
+      } catch {
+        // Best-effort.
+      }
+    }
   }
 
   /**
@@ -181,6 +297,7 @@ export class TerminalEditorProvider {
 
         case "closeTab":
           if (typeof message.tabId === "string") {
+            this.cancelPreviewToken(message.tabId);
             this.sessionManager.destroySession(message.tabId);
             this.safePostMessage({
               type: "tabRemoved",
@@ -188,6 +305,17 @@ export class TerminalEditorProvider {
             });
           }
           break;
+
+        case "requestCloseSplitPane": {
+          // Mirrors TerminalViewProvider — cancel the in-flight hover preview
+          // for the pane being closed BEFORE destroying its session.
+          if (typeof (message as { sessionId?: unknown }).sessionId === "string") {
+            const closeMsg = message as { sessionId: string };
+            this.cancelPreviewToken(closeMsg.sessionId);
+            this.sessionManager.destroySession(closeMsg.sessionId);
+          }
+          break;
+        }
 
         case "clear":
           if (typeof message.tabId === "string") {
@@ -223,6 +351,28 @@ export class TerminalEditorProvider {
           }
           break;
 
+        case "requestFilePreview":
+          if (isValidPreviewRequest(message)) {
+            void this.handleRequestFilePreview(message);
+          }
+          break;
+
+        case "updateHoverPreviewSetting":
+          // Mirrors TerminalViewProvider — webview-driven setting update.
+          if (
+            typeof (message as { key?: unknown }).key === "string" &&
+            (typeof (message as { value?: unknown }).value === "boolean" ||
+              typeof (message as { value?: unknown }).value === "number")
+          ) {
+            void updateHoverPreviewSetting(
+              (message as { key: string }).key as Parameters<typeof updateHoverPreviewSetting>[0],
+              (message as { value: boolean | number }).value,
+            ).catch((err) => {
+              console.warn("[AnyWhere Terminal] updateHoverPreviewSetting failed (editor):", err);
+            });
+          }
+          break;
+
         default:
           break;
       }
@@ -237,6 +387,19 @@ export class TerminalEditorProvider {
    */
   private onReady(): void {
     this._ready = true;
+
+    // Post the initial theme so the popup renderer can pick the right Shiki
+    // theme before the first hover.
+    this.safePostMessage({
+      type: "themeChanged",
+      kind: themeKindFor(vscode.window.activeColorTheme.kind),
+    } satisfies ThemeChangedMessage);
+
+    // Post initial hover-preview settings — see design.md D17.
+    this.safePostMessage({
+      type: "hoverPreviewSettings",
+      settings: readHoverPreviewSettings(),
+    });
 
     try {
       // Create initial session via SessionManager with resolved settings
