@@ -111,6 +111,42 @@
           "default": true,
           "scope": "application",
           "description": "Block auto-preview for dotfiles (.env, .bashrc), known-sensitive folders (.git, .ssh, .aws, node_modules), and files outside the workspace. The user can press Cmd (macOS) / Ctrl (Win/Linux) during the hover to override. Application-scoped: a hostile workspace cannot disable this trust policy via .vscode/settings.json."
+        },
+        "anywhereTerminal.fileTree.autoReveal": {
+          "type": [
+            "boolean",
+            "string"
+          ],
+          "enum": [
+            true,
+            false,
+            "focusNoScroll"
+          ],
+          "default": true,
+          "description": "When enabled, the file tree highlights the file currently focused in the editor. Use 'focusNoScroll' to select without scrolling."
+        },
+        "anywhereTerminal.fileTree.autoRevealExclude": {
+          "type": "object",
+          "additionalProperties": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "when": {
+                    "type": "string"
+                  }
+                }
+              }
+            ]
+          },
+          "default": {
+            "**/node_modules": true,
+            "**/bower_components": true
+          },
+          "description": "Glob patterns whose matching files (or any ancestor folder) are excluded from auto-reveal. Keys are glob patterns; values are true to exclude, false to disable a pattern. VS Code-style 'when'-condition objects are accepted (so settings copied from explorer.autoRevealExclude validate cleanly) but treated as 'true' — full 'when' evaluation is not honored in this version."
         }
       }
     },
@@ -509,6 +545,7 @@
     "esbuild": "^0.27.3",
     "jsdom": "^28.1.0",
     "markdown-it": "^14.1.1",
+    "minimatch": "^10.2.5",
     "npm-run-all": "^4.1.5",
     "shiki": "^4.1.0",
     "typescript": "^5.9.3",

@@ -608,8 +608,14 @@ export class Tree<T extends object, TTemplate extends ITemplateData = ITemplateD
    * element isn't currently visible (its ancestors are collapsed). Caller
    * is responsible for expanding ancestors first — see `revealPath` flows
    * in `FileTreePanel`.
+   *
+   * `relativeTop` (0-1): fractional position to anchor the row at in the
+   * viewport. `0` = top edge, `0.5` = center, `1` = bottom. When omitted, the
+   * underlying list widget uses a minimum-scroll algorithm that lands the row
+   * at whichever edge is closer — which can land the row hugging the viewport
+   * edge. Pass `0.5` for auto-reveal flows to match VS Code's explorer.
    */
-  revealElement(element: T): void {
+  revealElement(element: T, relativeTop?: number): void {
     if (this.disposed) {
       return;
     }
@@ -620,7 +626,7 @@ export class Tree<T extends object, TTemplate extends ITemplateData = ITemplateD
     for (let i = 0; i < length; i++) {
       const row = this.list.element(i);
       if (row.element === element) {
-        this.list.reveal(i);
+        this.list.reveal(i, relativeTop);
         return;
       }
     }

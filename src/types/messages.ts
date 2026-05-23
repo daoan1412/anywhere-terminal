@@ -558,18 +558,31 @@ export interface WorkspaceRootChangedMessage {
 }
 
 /**
- * Triggered by the `anywhereTerminal.ctx.revealInFileTree` command (terminal
- * pane right-click). The extension resolves the pane's live cwd (querying the
- * PTY shell process via `SessionManager.getLiveCwd` — `lsof` on macOS, `/proc/<pid>/cwd`
- * on Linux) and posts it here. The webview then asks `FileTreePanel.revealPath`
- * to expand ancestors + scroll the row in. `cwd` is null only when the OS
- * query failed (e.g. Windows, permission denied) — webview falls back to the
- * workspace root in that case.
+ * Two valid shapes:
+ *
+ * 1. OSC 7 path (`source: 'osc7'` or omitted): set `sessionId` + `cwd`.
+ *    Triggered by `anywhereTerminal.ctx.revealInFileTree` (terminal pane
+ *    right-click). The extension resolves the pane's live cwd (querying the
+ *    PTY shell process via `SessionManager.getLiveCwd` — `lsof` on macOS,
+ *    `/proc/<pid>/cwd` on Linux) and posts it here. The webview then asks
+ *    `FileTreePanel.revealPath` to expand ancestors + scroll the row in.
+ *    `cwd` is null only when the OS query failed (e.g. Windows, permission
+ *    denied) — webview falls back to the workspace root in that case.
+ *
+ * 2. Auto-reveal path (`source: 'autoReveal'`): set `absPath` (and optionally
+ *    `focusNoScroll`). Triggered by `ActiveFileRevealer` when the active
+ *    editor tab changes. Bypasses cwd resolution. When `focusNoScroll` is
+ *    true, the webview selects + focuses the row without scrolling the tree.
+ *    When the file tree panel is closed, the webview short-circuits silently
+ *    instead of opening the panel.
  */
 export interface RevealInFileTreeMessage {
   type: "reveal-in-file-tree";
-  sessionId: string;
-  cwd: string | null;
+  sessionId?: string;
+  cwd?: string | null;
+  absPath?: string;
+  focusNoScroll?: boolean;
+  source?: "osc7" | "autoReveal";
 }
 
 /**

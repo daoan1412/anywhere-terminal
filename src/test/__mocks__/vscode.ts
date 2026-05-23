@@ -2,6 +2,24 @@
 // Used by Vitest via resolve.alias in vitest.config.mts
 // Stubs only the subset of VS Code API used by our source code.
 
+// ─── Disposable ─────────────────────────────────────────────────────
+
+export const Disposable = {
+  from(...disposables: ReadonlyArray<{ dispose: () => void }>) {
+    return {
+      dispose: () => {
+        for (const d of disposables) {
+          try {
+            d.dispose();
+          } catch {
+            // mirror VS Code: swallow per-disposable errors so subsequent dispose still runs
+          }
+        }
+      },
+    };
+  },
+};
+
 // ─── Uri ────────────────────────────────────────────────────────────
 
 // Minimal RFC 3986-ish URI parser stub. Only the fields our code reads
@@ -339,6 +357,12 @@ export const window = {
       },
     };
   },
+  // tabGroups attached below — see Tab inputs + tabGroups section
+  tabGroups: undefined as unknown as {
+    activeTabGroup: { activeTab: { input?: unknown } | undefined };
+    onDidChangeTabs: (h: (e: unknown) => void) => { dispose: () => void };
+    onDidChangeTabGroups: (h: (e: unknown) => void) => { dispose: () => void };
+  },
 };
 
 /** Test helper: change the active color theme and fire all subscribers. */
@@ -362,6 +386,107 @@ export const ViewColumn = {
   One: 1,
   Two: 2,
 };
+
+// ─── Tab inputs + tabGroups ─────────────────────────────────────────
+
+// Constructor-shaped stubs so production code can use `instanceof` checks
+// (e.g. `tab.input instanceof vscode.TabInputText`).
+export class TabInputText {
+  constructor(public readonly uri: { scheme: string; fsPath: string }) {}
+}
+export class TabInputCustom {
+  constructor(
+    public readonly uri: { scheme: string; fsPath: string },
+    public readonly viewType: string = "",
+  ) {}
+}
+export class TabInputNotebook {
+  constructor(
+    public readonly uri: { scheme: string; fsPath: string },
+    public readonly notebookType: string = "",
+  ) {}
+}
+export class TabInputTextDiff {
+  constructor(
+    public readonly original: { scheme: string; fsPath: string },
+    public readonly modified: { scheme: string; fsPath: string },
+  ) {}
+}
+export class TabInputNotebookDiff {
+  constructor(
+    public readonly original: { scheme: string; fsPath: string },
+    public readonly modified: { scheme: string; fsPath: string },
+    public readonly notebookType: string = "",
+  ) {}
+}
+export class TabInputTerminal {}
+export class TabInputWebview {
+  constructor(public readonly viewType: string = "") {}
+}
+
+type Tab = { input?: unknown; label?: string; isActive?: boolean };
+type TabChangeEvent = { changed: readonly Tab[]; closed: readonly Tab[]; opened: readonly Tab[] };
+type TabGroupChangeEvent = { changed: readonly unknown[]; closed: readonly unknown[]; opened: readonly unknown[] };
+
+const _tabChangeHandlers: Array<(e: TabChangeEvent) => void> = [];
+const _tabGroupChangeHandlers: Array<(e: TabGroupChangeEvent) => void> = [];
+
+const _activeTabGroup: { activeTab: Tab | undefined } = { activeTab: undefined };
+
+const tabGroups = {
+  activeTabGroup: _activeTabGroup,
+  onDidChangeTabs(handler: (e: TabChangeEvent) => void) {
+    _tabChangeHandlers.push(handler);
+    return {
+      dispose: () => {
+        const idx = _tabChangeHandlers.indexOf(handler);
+        if (idx >= 0) {
+          _tabChangeHandlers.splice(idx, 1);
+        }
+      },
+    };
+  },
+  onDidChangeTabGroups(handler: (e: TabGroupChangeEvent) => void) {
+    _tabGroupChangeHandlers.push(handler);
+    return {
+      dispose: () => {
+        const idx = _tabGroupChangeHandlers.indexOf(handler);
+        if (idx >= 0) {
+          _tabGroupChangeHandlers.splice(idx, 1);
+        }
+      },
+    };
+  },
+};
+
+// Wire onto the previously-declared window object so production code that
+// reads `vscode.window.tabGroups` finds it.
+(window as unknown as { tabGroups: typeof tabGroups }).tabGroups = tabGroups;
+
+/**
+ * Test helper: set the currently-active tab AND fire an onDidChangeTabs event.
+ * Mirrors what VS Code does when the user switches tabs.
+ */
+export function __setActiveTab(tab: Tab | undefined): void {
+  _activeTabGroup.activeTab = tab;
+  const event: TabChangeEvent = { changed: tab ? [tab] : [], closed: [], opened: [] };
+  for (const handler of [..._tabChangeHandlers]) {
+    handler(event);
+  }
+}
+
+/** Test helper: fire an onDidChangeTabGroups event (e.g. when a group becomes active). */
+export function __fireTabGroupChange(): void {
+  const event: TabGroupChangeEvent = { changed: [], closed: [], opened: [] };
+  for (const handler of [..._tabGroupChangeHandlers]) {
+    handler(event);
+  }
+}
+
+/** Test helper: how many tab-change listeners are currently attached (both kinds combined). */
+export function __getTabChangeListenerCount(): number {
+  return _tabChangeHandlers.length + _tabGroupChangeHandlers.length;
+}
 
 // ─── commands ───────────────────────────────────────────────────────
 
@@ -433,4 +558,7 @@ export function __resetAll(): void {
   _showQuickPickImpl = async () => undefined;
   _themeChangeHandlers.length = 0;
   _activeColorTheme = { kind: ColorThemeKind.Dark };
+  _tabChangeHandlers.length = 0;
+  _tabGroupChangeHandlers.length = 0;
+  _activeTabGroup.activeTab = undefined;
 }

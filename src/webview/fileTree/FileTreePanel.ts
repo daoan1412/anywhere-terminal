@@ -203,14 +203,27 @@ export class FileTreePanel {
    *
    * Opens the panel if it's currently closed.
    */
-  async revealPath(absPath: string): Promise<void> {
+  async revealPath(absPath: string, opts?: { focusNoScroll?: boolean; source?: "osc7" | "autoReveal" }): Promise<void> {
     if (this.disposed) {
+      return;
+    }
+    // Auto-reveal panel-hidden gate: don't auto-open the tree just because the
+    // user switched editor tabs. The OSC 7 path (no source, or source 'osc7')
+    // still opens the panel below.
+    if (opts?.source === "autoReveal" && !this.open) {
       return;
     }
     // Make sure the panel is visible before we try to scroll the row.
     if (!this.open) {
       this.setOpen(true);
     }
+
+    const focusNoScroll = opts?.focusNoScroll === true;
+    // Auto-reveal anchors the row in the middle of the viewport so siblings
+    // remain visible — matches VS Code's explorer behavior. OSC 7 keeps the
+    // existing minimum-scroll behavior (no relativeTop) so right-click "Reveal
+    // in File Tree" reveal UX is unchanged.
+    const revealRelativeTop = opts?.source === "autoReveal" ? 0.5 : undefined;
 
     // Out-of-current-root path or no tree mounted (empty state) → re-root.
     const outOfRoot =
@@ -220,7 +233,9 @@ export class FileTreePanel {
       // After re-root, the new rootNode IS the target. Reveal + select +
       // focus so the user lands inside the folder they asked for.
       if (this.tree && this.rootNode) {
-        this.tree.revealElement(this.rootNode);
+        if (!focusNoScroll) {
+          this.tree.revealElement(this.rootNode, revealRelativeTop);
+        }
         this.tree.setSelection(this.rootNode);
         this.tree.domFocus();
         // Auto-expand the new root so its children are visible immediately —
@@ -258,7 +273,9 @@ export class FileTreePanel {
       }
       current = next;
     }
-    this.tree?.revealElement(current);
+    if (!focusNoScroll) {
+      this.tree?.revealElement(current, revealRelativeTop);
+    }
     this.tree?.setSelection(current);
     this.tree?.domFocus();
   }

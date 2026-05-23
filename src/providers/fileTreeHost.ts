@@ -24,10 +24,12 @@
 import * as vscode from "vscode";
 import type {
   ReadDirectoryResponseMessage,
+  RevealInFileTreeMessage,
   SetFileTreePositionMessage,
   WebViewToExtensionMessage,
   WorkspaceRootChangedMessage,
 } from "../types/messages";
+import { ActiveFileRevealer } from "./ActiveFileRevealer";
 import { handleRequestReadDirectory, type RootProvider, readEnabledExcludePatterns } from "./fileTreeRpcHandler";
 
 /**
@@ -66,8 +68,9 @@ export class FileTreeHost implements RootProvider {
   }
 
   /**
-   * Wire the workspace-folder bridge to this provider's webview. Returns a
-   * `Disposable` the caller pushes into its cleanup list.
+   * Wire the workspace-folder bridge AND the active-file auto-reveal listener
+   * to this provider's webview. Returns a `Disposable` the caller pushes into
+   * its cleanup list.
    *
    * `isReady` is a getter (not a snapshot) because providers gate `safePostMessage`
    * on a flag that flips after the webview signals `ready`. We don't want to
@@ -75,10 +78,14 @@ export class FileTreeHost implements RootProvider {
    *
    * `post` is the provider's own `safePostMessage` shim — we don't call
    * `webview.postMessage` directly so providers can keep their retry / error
-   * logging in one place.
+   * logging in one place. The shim's `_ready` gate also handles the
+   * `ActiveFileRevealer` postMessage path without extra logic here.
    */
-  attach(deps: { isReady: () => boolean; post: (msg: WorkspaceRootChangedMessage) => void }): vscode.Disposable {
-    return vscode.workspace.onDidChangeWorkspaceFolders(() => {
+  attach(deps: {
+    isReady: () => boolean;
+    post: (msg: WorkspaceRootChangedMessage | RevealInFileTreeMessage) => void;
+  }): vscode.Disposable {
+    const workspaceFolderSub = vscode.workspace.onDidChangeWorkspaceFolders(() => {
       this.rootGeneration += 1;
       if (!deps.isReady()) {
         return;
@@ -89,6 +96,13 @@ export class FileTreeHost implements RootProvider {
         rootGeneration: this.rootGeneration,
       });
     });
+
+    const revealer = new ActiveFileRevealer(
+      () => this.workspaceRoot,
+      (msg) => deps.post(msg),
+    );
+
+    return vscode.Disposable.from(workspaceFolderSub, revealer);
   }
 
   /**

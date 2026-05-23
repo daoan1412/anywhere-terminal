@@ -155,15 +155,28 @@ export class FileTreeController {
   }
 
   handleReveal(msg: RevealInFileTreeMessage): void {
+    // Auto-reveal contract: an explicit absolute path bypasses cwd resolution.
+    if (msg.absPath) {
+      void this.panel.revealPath(msg.absPath, {
+        focusNoScroll: msg.focusNoScroll,
+        source: msg.source,
+      });
+      return;
+    }
+    // OSC 7 contract: resolve via sessionId → instanceCwd → workspace root.
     // Prefer the extension-resolved cwd (queried via OS process table, so it
     // tracks `cd` without needing shell integration). Fall back to the
     // webview-side OSC 7 cwd, then to the last-known workspace root.
+    if (!msg.sessionId) {
+      console.warn("[AnyWhere Terminal] reveal-in-file-tree: missing both absPath and sessionId");
+      return;
+    }
     const instanceCwd = this.deps.getInstanceCwd(msg.sessionId);
     const target = msg.cwd ?? instanceCwd ?? this.lastWorkspaceRoot;
     if (!target) {
       console.warn("[AnyWhere Terminal] reveal-in-file-tree: no cwd or workspace root resolvable");
       return;
     }
-    void this.panel.revealPath(target);
+    void this.panel.revealPath(target, { source: msg.source });
   }
 }
