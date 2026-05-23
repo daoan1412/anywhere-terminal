@@ -27,14 +27,68 @@
   user-select: none;
 }
 
-/* Gitignored rows — dimmed to match VS Code's Explorer. `--vscode-list-deemphasizedForeground`
- * is what VS Code uses for the same purpose; we fall back to a 55% opacity tint when
- * the variable isn't defined by the active theme. */
-.file-tree-row.is-ignored,
-.file-tree-row.is-ignored .name,
-.file-tree-row.is-ignored .icon {
-  color: var(--vscode-list-deemphasizedForeground, var(--vscode-foreground));
-  opacity: 0.55;
+/* Git decoration — one rule per status. All colours bind to the
+ * `--vscode-gitDecoration-*ResourceForeground` family so light/dark theme
+ * switches resolve live without JS. The `.name` reuses the row colour via
+ * `color: inherit` (default), so we only need to set it on the row. The
+ * `.icon` keeps its Seti tint and is deliberately NOT overridden — VS Code
+ * does the same so file icons stay recognisable even on decorated rows.
+ *
+ * Migrated from the legacy `.is-ignored` rule (single source of truth: now
+ * `git-ignored` on the row, set by ReadOnlyFileRenderer from FileNode.gitStatus).
+ */
+.file-tree-row.git-modified {
+  color: var(--vscode-gitDecoration-modifiedResourceForeground, var(--vscode-foreground));
+}
+.file-tree-row.git-added {
+  color: var(--vscode-gitDecoration-addedResourceForeground, var(--vscode-foreground));
+}
+.file-tree-row.git-deleted {
+  color: var(--vscode-gitDecoration-deletedResourceForeground, var(--vscode-foreground));
+}
+/* Strike through the filename only — VS Code Explorer leaves the icon clean. */
+.file-tree-row.git-deleted .name {
+  text-decoration: line-through;
+}
+.file-tree-row.git-renamed {
+  color: var(--vscode-gitDecoration-renamedResourceForeground, var(--vscode-foreground));
+}
+.file-tree-row.git-untracked {
+  color: var(--vscode-gitDecoration-untrackedResourceForeground, var(--vscode-foreground));
+}
+.file-tree-row.git-conflicted {
+  color: var(--vscode-gitDecoration-conflictingResourceForeground, var(--vscode-foreground));
+}
+.file-tree-row.git-ignored {
+  color: var(--vscode-gitDecoration-ignoredResourceForeground, var(--vscode-foreground));
+}
+
+/* Git status badge — right-aligned single character on every row. Recycled
+ * across renders: `is-visible` toggles `display`; `textContent` carries the
+ * letter (or `•` for folders). The fixed `min-width` keeps file names from
+ * jittering when a badge appears/disappears mid-scroll. */
+.file-tree-row .git-badge {
+  display: none;
+  flex-shrink: 0;
+  min-width: 12px;
+  text-align: center;
+  margin-left: 4px;
+  margin-right: 4px;
+  font-size: 11px;
+  font-weight: 600;
+  line-height: 1;
+  color: inherit;
+  opacity: 0.9;
+}
+.file-tree-row .git-badge.is-visible {
+  display: inline-block;
+}
+
+/* Folder dirty propagation — the badge `•` carries the dirty colour, but the
+ * folder row's filename stays the default colour. This mirrors VS Code's
+ * Explorer where parent folders use the badge as the only signal. */
+.file-tree-row.git-folder-dirty .git-badge {
+  color: var(--vscode-gitDecoration-modifiedResourceForeground, var(--vscode-foreground));
 }
 
 /* Hover + selection backgrounds live on the OUTER `.monaco-list-row` (stamped

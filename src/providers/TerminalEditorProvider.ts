@@ -4,6 +4,7 @@ import type { SessionManager } from "../session/SessionManager";
 import { readTerminalConfig, readTerminalSettings } from "../settings/SettingsReader";
 import type { ThemeChangedMessage, WebViewToExtensionMessage } from "../types/messages";
 import { FileTreeHost } from "./fileTreeHost";
+import type { GitDecorationProvider } from "./gitDecorationProvider";
 import { affectsHoverPreview, readHoverPreviewSettings, updateHoverPreviewSetting } from "./hoverPreviewSettings";
 import { openExternalLink } from "./openExternalLink";
 import { DEFAULT_FIND_FILES_MAX_RESULTS, openFileLink } from "./openFileLink";
@@ -77,10 +78,12 @@ export class TerminalEditorProvider {
    * Shared file-tree wiring (rootGeneration, workspaceRoot getter,
    * onDidChangeWorkspaceFolders subscription, message dispatch). Same
    * companion class TerminalViewProvider uses — single point of change
-   * keeps the sidebar / panel / editor providers in lockstep.
+   * keeps the sidebar / panel / editor providers in lockstep. The optional
+   * `gitDecorationProvider` (passed via `createPanel`) is shared across the
+   * three providers so revision sequences line up.
    * See: providers/fileTreeHost.ts; design.md D10.
    */
-  private readonly fileTreeHost = new FileTreeHost();
+  private readonly fileTreeHost: FileTreeHost;
 
   /** Public accessor for `extension.ts` ctx command routing. */
   get rootGeneration(): number {
@@ -126,9 +129,11 @@ export class TerminalEditorProvider {
     private readonly extensionUri: vscode.Uri,
     private readonly sessionManager: SessionManager,
     panel: vscode.WebviewPanel,
+    gitDecorationProvider: GitDecorationProvider | null = null,
   ) {
     this._panel = panel;
     this._viewId = `editor-${crypto.randomUUID()}`;
+    this.fileTreeHost = new FileTreeHost(gitDecorationProvider);
     this.setupPanel();
   }
 
@@ -138,7 +143,11 @@ export class TerminalEditorProvider {
    * Each invocation creates an independent terminal with its own PTY.
    * The returned Disposable kills the PTY and disposes the panel on cleanup.
    */
-  static createPanel(context: vscode.ExtensionContext, sessionManager: SessionManager): vscode.Disposable {
+  static createPanel(
+    context: vscode.ExtensionContext,
+    sessionManager: SessionManager,
+    gitDecorationProvider: GitDecorationProvider | null = null,
+  ): vscode.Disposable {
     const panel = vscode.window.createWebviewPanel(
       TerminalEditorProvider.viewType,
       "Terminal",
@@ -150,7 +159,7 @@ export class TerminalEditorProvider {
       },
     );
 
-    const provider = new TerminalEditorProvider(context.extensionUri, sessionManager, panel);
+    const provider = new TerminalEditorProvider(context.extensionUri, sessionManager, panel, gitDecorationProvider);
 
     // Track this panel for config updates + the provider instance for host-side
     // commands (rename). Disposal happens in `setupPanel`'s onDidDispose.

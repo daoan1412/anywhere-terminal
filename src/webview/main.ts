@@ -400,6 +400,9 @@ const routeMessage = createMessageRouter({
   onFileTreeSearchResponse(msg) {
     fileTreeController?.handleSearchResponse(msg);
   },
+  onGitStatusChanged(msg) {
+    fileTreeController?.handleGitStatusChanged(msg);
+  },
 });
 
 // ─── Init & Bootstrap ───────────────────────────────────────────────

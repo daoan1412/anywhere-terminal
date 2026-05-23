@@ -1,4 +1,5 @@
 import * as vscode from "vscode";
+import { createGitDecorationProvider } from "./providers/gitDecorationProvider";
 import { resolveRenameTargetTabId } from "./providers/resolveRenameTarget";
 import { TerminalEditorProvider } from "./providers/TerminalEditorProvider";
 import { TerminalViewProvider } from "./providers/TerminalViewProvider";
@@ -26,8 +27,19 @@ export function activate(context: vscode.ExtensionContext) {
   // custom-tab-name persistence (anywhereTerminal.tabCustomNames); see design.md D3 of add-tab-rename.
   const sessionManager = new SessionManager(context.workspaceState);
 
+  // Shared GitDecorationProvider — one singleton, threaded through every
+  // FileTreeHost so the three webviews (sidebar / panel / editor) see one
+  // consistent revision sequence. See: add-file-tree-git-decorations design.md D8, D10.
+  const gitDecorationProvider = createGitDecorationProvider();
+  context.subscriptions.push(gitDecorationProvider);
+
   // Sidebar view
-  const sidebarProvider = new TerminalViewProvider(context.extensionUri, sessionManager, "sidebar");
+  const sidebarProvider = new TerminalViewProvider(
+    context.extensionUri,
+    sessionManager,
+    "sidebar",
+    gitDecorationProvider,
+  );
 
   context.subscriptions.push(
     vscode.window.registerWebviewViewProvider(TerminalViewProvider.sidebarViewType, sidebarProvider, {
@@ -36,7 +48,7 @@ export function activate(context: vscode.ExtensionContext) {
   );
 
   // Panel view
-  const panelProvider = new TerminalViewProvider(context.extensionUri, sessionManager, "panel");
+  const panelProvider = new TerminalViewProvider(context.extensionUri, sessionManager, "panel", gitDecorationProvider);
 
   context.subscriptions.push(
     vscode.window.registerWebviewViewProvider(TerminalViewProvider.panelViewType, panelProvider, {
@@ -47,7 +59,7 @@ export function activate(context: vscode.ExtensionContext) {
   // Editor terminal command — each invocation creates an independent editor tab terminal
   context.subscriptions.push(
     vscode.commands.registerCommand("anywhereTerminal.newTerminalInEditor", () => {
-      const panelDisposable = TerminalEditorProvider.createPanel(context, sessionManager);
+      const panelDisposable = TerminalEditorProvider.createPanel(context, sessionManager, gitDecorationProvider);
       context.subscriptions.push(panelDisposable);
     }),
   );

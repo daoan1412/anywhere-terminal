@@ -568,6 +568,18 @@ export class Tree<T extends object, TTemplate extends ITemplateData = ITemplateD
    * previous cached children are discarded immediately; any in-flight promise
    * for that element is abandoned (stale-async drop).
    */
+  /**
+   * Re-run `renderElement` for every currently-materialised row WITHOUT
+   * re-fetching children. Use this after mutating row data in place (e.g.
+   * a git status update on a cached `FileNode`) so the visible DOM reflects
+   * the new state. Far cheaper than `refresh()` — no read-directory RPC,
+   * no `getChildren` call, just one pass through the recycled row pool.
+   */
+  rerenderRows(): void {
+    this.assertNotDisposed();
+    this.list.rerender();
+  }
+
   refresh(element?: T): void {
     this.assertNotDisposed();
     const target = element ?? this.root;

@@ -146,3 +146,122 @@ describe("ReadOnlyFileRenderer", () => {
     expect(() => template.row.dispatchEvent(evt)).not.toThrow();
   });
 });
+
+describe("ReadOnlyFileRenderer — git decorations", () => {
+  it("applies the matching git-{status} class for each GitStatus value", () => {
+    const cases: Array<[FileNode["gitStatus"], string]> = [
+      ["modified", "git-modified"],
+      ["added", "git-added"],
+      ["deleted", "git-deleted"],
+      ["renamed", "git-renamed"],
+      ["untracked", "git-untracked"],
+      ["conflicted", "git-conflicted"],
+      ["ignored", "git-ignored"],
+    ];
+    for (const [status, cls] of cases) {
+      const { template } = mountRow({ name: "x.ts", path: "/repo/x.ts", kind: "file", gitStatus: status }, 0);
+      expect(template.row.classList.contains(cls)).toBe(true);
+    }
+  });
+
+  it("strips a previously-applied git-* class when status clears", () => {
+    const renderer = new ReadOnlyFileRenderer();
+    const container = document.createElement("div");
+    const template = renderer.renderTemplate(container);
+
+    renderer.renderElement({ name: "a.ts", path: "/repo/a.ts", kind: "file", gitStatus: "modified" }, 0, template);
+    expect(template.row.classList.contains("git-modified")).toBe(true);
+
+    renderer.renderElement({ name: "a.ts", path: "/repo/a.ts", kind: "file" /* no status */ }, 0, template);
+    expect(template.row.classList.contains("git-modified")).toBe(false);
+    for (const cls of template.row.classList) {
+      expect(cls.startsWith("git-")).toBe(false);
+    }
+  });
+
+  it("stamps the right badge letter for files and clears it when undecorated", () => {
+    const renderer = new ReadOnlyFileRenderer();
+    const container = document.createElement("div");
+    const template = renderer.renderTemplate(container);
+
+    const expectLetter = (status: FileNode["gitStatus"], letter: string) => {
+      renderer.renderElement({ name: "x", path: "/x", kind: "file", gitStatus: status }, 0, template);
+      expect(template.gitBadge.textContent).toBe(letter);
+      expect(template.gitBadge.classList.contains("is-visible")).toBe(letter.length > 0);
+    };
+
+    expectLetter("modified", "M");
+    expectLetter("added", "A");
+    expectLetter("deleted", "D");
+    expectLetter("renamed", "R");
+    expectLetter("untracked", "U");
+    expectLetter("conflicted", "C");
+    expectLetter("ignored", ""); // ignored gets tint but no badge
+    expectLetter(undefined, "");
+  });
+
+  it("renders a folder dirty badge `•` and applies git-folder-dirty when dirtyDescendantCount > 0", () => {
+    const folder: FileNode = {
+      name: "src",
+      path: "/repo/src",
+      kind: "directory",
+      dirtyDescendantCount: 3,
+    };
+    const { template } = mountRow(folder, 0);
+    expect(template.row.classList.contains("git-folder-dirty")).toBe(true);
+    expect(template.gitBadge.textContent).toBe("•");
+    expect(template.gitBadge.classList.contains("is-visible")).toBe(true);
+  });
+
+  it("clears the folder dirty badge when dirtyDescendantCount drops to 0", () => {
+    const renderer = new ReadOnlyFileRenderer();
+    const container = document.createElement("div");
+    const template = renderer.renderTemplate(container);
+    renderer.renderElement({ name: "src", path: "/repo/src", kind: "directory", dirtyDescendantCount: 2 }, 0, template);
+    expect(template.row.classList.contains("git-folder-dirty")).toBe(true);
+    renderer.renderElement({ name: "src", path: "/repo/src", kind: "directory", dirtyDescendantCount: 0 }, 0, template);
+    expect(template.row.classList.contains("git-folder-dirty")).toBe(false);
+    expect(template.gitBadge.classList.contains("is-visible")).toBe(false);
+  });
+
+  it("does NOT apply the deprecated `.is-ignored` class anywhere", () => {
+    const { template } = mountRow(
+      { name: "x.ts", path: "/repo/x.ts", kind: "file", ignored: true, gitStatus: "ignored" },
+      0,
+    );
+    expect(template.row.classList.contains("is-ignored")).toBe(false);
+    // Cache-look in case of stale state.
+    for (const cls of template.row.classList) {
+      expect(cls).not.toBe("is-ignored");
+    }
+  });
+
+  it("search-row mode hydrates git status from the data source's cache", () => {
+    const lookup = {
+      getCachedNode: (p: string) => (p === "/repo/changed.ts" ? { gitStatus: "modified" as const } : undefined),
+    };
+    const renderer = new ReadOnlyFileRenderer(lookup);
+    const container = document.createElement("div");
+    const template = renderer.renderTemplate(container);
+
+    const matched: FileNode = {
+      name: "changed.ts",
+      path: "/repo/changed.ts",
+      kind: "file",
+      searchRow: { relativePath: "changed.ts", variant: "match" },
+    };
+    renderer.renderElement(matched, 0, template);
+    expect(template.row.classList.contains("git-modified")).toBe(true);
+    expect(template.gitBadge.textContent).toBe("M");
+
+    const uncached: FileNode = {
+      name: "untouched.ts",
+      path: "/repo/untouched.ts",
+      kind: "file",
+      searchRow: { relativePath: "untouched.ts", variant: "match" },
+    };
+    renderer.renderElement(uncached, 0, template);
+    expect(template.row.classList.contains("git-modified")).toBe(false);
+    expect(template.gitBadge.classList.contains("is-visible")).toBe(false);
+  });
+});

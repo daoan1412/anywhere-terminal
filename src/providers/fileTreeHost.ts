@@ -24,6 +24,7 @@
 import * as vscode from "vscode";
 import type {
   FileTreeSearchResponseMessage,
+  GitStatusChangedMessage,
   ReadDirectoryResponseMessage,
   RevealInFileTreeMessage,
   SetFileTreePositionMessage,
@@ -33,6 +34,7 @@ import type {
 import { ActiveFileRevealer } from "./ActiveFileRevealer";
 import { handleRequestReadDirectory, type RootProvider, readEnabledExcludePatterns } from "./fileTreeRpcHandler";
 import { createDefaultSearchVscodeApi, FileTreeSearchHandler } from "./fileTreeSearchHandler";
+import type { GitDecorationProvider } from "./gitDecorationProvider";
 
 /**
  * Init-message fields the host contributes. Providers spread this into their
@@ -63,6 +65,14 @@ export class FileTreeHost implements RootProvider {
    */
   private searchHandler: FileTreeSearchHandler | null = null;
 
+  /**
+   * Optional git decoration provider. When provided, the host stamps every
+   * `FileEntry` it ships back via `request-read-directory` with the current
+   * `gitStatus` + `gitRevision`. When `null` (e.g. in unit tests that don't
+   * exercise git decorations), entries omit those fields.
+   */
+  constructor(private readonly gitDecorationProvider: GitDecorationProvider | null = null) {}
+
   /** Absolute path of the first workspace folder, or null when no workspace is open. */
   get workspaceRoot(): string | null {
     return vscode.workspace.workspaceFolders?.[0]?.uri.fsPath ?? null;
@@ -91,9 +101,16 @@ export class FileTreeHost implements RootProvider {
    */
   attach(deps: {
     isReady: () => boolean;
-    post: (msg: WorkspaceRootChangedMessage | RevealInFileTreeMessage) => void;
+    post: (msg: WorkspaceRootChangedMessage | RevealInFileTreeMessage | GitStatusChangedMessage) => void;
   }): vscode.Disposable {
     const workspaceFolderSub = vscode.workspace.onDidChangeWorkspaceFolders(() => {
+      // The GitDecorationProvider owns its own workspace-folder reset (O-W3
+      // — without this, every FileTreeHost would call reset() once on a
+      // folder change, making the fan-out scale with the host count). We
+      // just bump the per-host generation and post `workspace-root-changed`.
+      // The webview clears its nodeCache + per-path revision watermark on
+      // that message, which is what evicts any phantom decorations from
+      // the previous workspace state.
       this.rootGeneration += 1;
       if (!deps.isReady()) {
         return;
@@ -105,12 +122,27 @@ export class FileTreeHost implements RootProvider {
       });
     });
 
+    // Forward each git decoration delta to the webview, stamped with the
+    // current rootGeneration. The webview drops mismatched-generation
+    // messages via the same gate it uses for read-directory responses.
+    const gitDeltaSub = this.gitDecorationProvider?.onDidChange((delta) => {
+      if (!deps.isReady()) {
+        return;
+      }
+      deps.post({
+        type: "git-status-changed",
+        rootGeneration: this.rootGeneration,
+        revision: delta.revision,
+        changes: delta.changes,
+      });
+    }) ?? { dispose: () => {} };
+
     const revealer = new ActiveFileRevealer(
       () => this.workspaceRoot,
       (msg) => deps.post(msg),
     );
 
-    return vscode.Disposable.from(workspaceFolderSub, revealer, {
+    return vscode.Disposable.from(workspaceFolderSub, gitDeltaSub, revealer, {
       dispose: () => {
         this.searchHandler?.dispose();
         this.searchHandler = null;
@@ -135,7 +167,15 @@ export class FileTreeHost implements RootProvider {
   ): boolean {
     switch (msg.type) {
       case "request-read-directory":
-        void handleRequestReadDirectory(msg, this, post, vscode.workspace.fs, vscode.Uri, readEnabledExcludePatterns());
+        void handleRequestReadDirectory(
+          msg,
+          this,
+          post,
+          vscode.workspace.fs,
+          vscode.Uri,
+          readEnabledExcludePatterns(),
+          this.gitDecorationProvider,
+        );
         return true;
       case "request-file-tree-search":
         if (!this.searchHandler) {

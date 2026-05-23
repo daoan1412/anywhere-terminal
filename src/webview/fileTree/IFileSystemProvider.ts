@@ -23,11 +23,28 @@ export interface FileNode {
   kind: "file" | "directory";
   /**
    * True when git considers this entry ignored. Propagated from
-   * `FileEntry.ignored` in the RPC response. The renderer applies an
-   * `is-ignored` class so the row renders dimmed (mirrors VS Code's
-   * Explorer behaviour for gitignored files).
+   * `FileEntry.ignored` in the RPC response. Retained for upstream callers
+   * that still depend on the raw flag; the renderer reads `gitStatus`
+   * instead.
    */
   ignored?: boolean;
+  /**
+   * Highest-severity git status for this entry, or undefined when not
+   * decorated. Written EXCLUSIVELY by `FileSystemDataSource.applyStatusTransition`
+   * (snapshot, delta, and pending-status drain all funnel through there). Direct
+   * assignment is forbidden — it would skip the per-path revision guard and
+   * desync the ancestor refcount.
+   *
+   * See: asimov/changes/add-file-tree-git-decorations/design.md D10, D11.
+   */
+  gitStatus?: import("../../types/messages").GitStatus;
+  /**
+   * Folders only — count of descendants currently in a "dirty for propagation"
+   * status (modified / added / renamed / untracked / conflicted). Zero (or
+   * undefined) means no dirty descendants; > 0 lights up the folder badge.
+   * Mutated EXCLUSIVELY by `applyStatusTransition`. See: design.md D5, D6.
+   */
+  dirtyDescendantCount?: number;
   /**
    * Set ONLY for rows produced by the in-panel search controller. Signals
    * the renderer to switch to the search-row template (relative path

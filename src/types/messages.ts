@@ -20,6 +20,14 @@ export interface TerminalConfig {
 // See: asimov/changes/port-vscode-async-data-tree/design.md § Interfaces, D10
 
 /** A single entry returned by `readDirectory()` — see design.md § Interfaces. */
+/**
+ * Approximation of VS Code's git decoration palette. Out-of-band statuses from
+ * the built-in git extension (TYPE_CHANGED, COPIED, INTENT_TO_ADD/RENAME,
+ * submodule) collapse into the nearest of these seven values via the host's
+ * status mapper. See: asimov/changes/add-file-tree-git-decorations/design.md D2.
+ */
+export type GitStatus = "modified" | "added" | "deleted" | "renamed" | "untracked" | "conflicted" | "ignored";
+
 export interface FileEntry {
   /** Basename (no path components). */
   name: string;
@@ -28,13 +36,28 @@ export interface FileEntry {
   /** Whether the entry is a file or a directory. Symlinks are followed; if they resolve to neither, the entry is omitted. */
   kind: "file" | "directory";
   /**
-   * True when git considers this entry ignored relative to the workspace
-   * root. Set by the extension host via `gitIgnoreChecker.getIgnoredPaths`
-   * before the response is posted to the webview. The webview applies a
-   * `.is-ignored` class so the row is rendered dimmed (mirrors VS Code's
-   * Explorer behaviour for gitignored files).
+   * True when git considers this entry ignored relative to the workspace root
+   * (populated by `gitIgnoreChecker.getIgnoredPaths`). The host upgrades
+   * `ignored: true` into `gitStatus: "ignored"` when no higher-severity status
+   * exists, so the webview reads `gitStatus` as the single source of truth for
+   * rendering — `ignored` is retained for hosts/tests that depend on the
+   * existing field semantics.
    */
   ignored?: boolean;
+  /**
+   * Highest-severity git status for this entry, or omitted when the file has no
+   * decoration. Set by the host's `GitDecorationProvider` when assembling the
+   * read-directory response. See:
+   * asimov/changes/add-file-tree-git-decorations/specs/git-decoration-source/spec.md.
+   */
+  gitStatus?: GitStatus;
+  /**
+   * Provider revision at which `gitStatus` was sampled. Always present when the
+   * host has a working git provider — the webview uses it to reject stale
+   * snapshots that race against fresher delta messages. See:
+   * asimov/changes/add-file-tree-git-decorations/design.md D10.
+   */
+  gitRevision?: number;
 }
 
 /** Position of the file-tree panel relative to the terminal area. */
@@ -626,6 +649,20 @@ export interface WorkspaceRootChangedMessage {
 }
 
 /**
+ * Extension → Webview: incremental delta from the host's `GitDecorationProvider`.
+ * `revision` is monotonic across the provider's lifetime; the webview drops any
+ * delta whose path-revision pair is older than the one it has already applied.
+ * `status: null` means the file no longer has a decoration. See:
+ * asimov/changes/add-file-tree-git-decorations/specs/git-decoration-source/spec.md.
+ */
+export interface GitStatusChangedMessage {
+  type: "git-status-changed";
+  rootGeneration: number;
+  revision: number;
+  changes: ReadonlyArray<{ path: string; status: GitStatus | null }>;
+}
+
+/**
  * Two valid shapes:
  *
  * 1. OSC 7 path (`source: 'osc7'` or omitted): set `sessionId` + `cwd`.
@@ -683,4 +720,5 @@ export type ExtensionToWebViewMessage =
   | ToggleFileTreeMessage
   | SetFileTreePositionMessage
   | WorkspaceRootChangedMessage
+  | GitStatusChangedMessage
   | RevealInFileTreeMessage;

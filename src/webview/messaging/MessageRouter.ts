@@ -14,6 +14,7 @@ import type {
   ExtensionToWebViewMessage,
   FilePreviewResultMessage,
   FileTreeSearchResponseMessage,
+  GitStatusChangedMessage,
   HoverPreviewSettingsMessage,
   InsertPathEffectMessage,
   OutputMessage,
@@ -69,6 +70,8 @@ export interface MessageHandlers {
   onRevealInFileTree(msg: RevealInFileTreeMessage): void;
   // ── File-tree search (add-file-tree-search) ──
   onFileTreeSearchResponse(msg: FileTreeSearchResponseMessage): void;
+  // ── File-tree git decorations (add-file-tree-git-decorations) ──
+  onGitStatusChanged(msg: GitStatusChangedMessage): void;
 }
 
 // ─── Factory ────────────────────────────────────────────────────────
@@ -160,6 +163,9 @@ export function createMessageRouter(handlers: MessageHandlers): (msg: ExtensionT
         break;
       case "file-tree-search-response":
         handlers.onFileTreeSearchResponse(msg);
+        break;
+      case "git-status-changed":
+        handlers.onGitStatusChanged(msg);
         break;
       case "init":
         // init is handled directly by main.ts — not routed

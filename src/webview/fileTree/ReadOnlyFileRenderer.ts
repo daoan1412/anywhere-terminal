@@ -28,10 +28,43 @@
 // See: asimov/changes/port-vscode-async-data-tree/design.md D8 + D11,
 //      specs/file-tree-panel/spec.md#requirement-file-tree-panel-component
 
+import type { GitStatus } from "../../types/messages";
 import { resolveSetiIcon } from "../../vendor/seti/setiIconResolver";
 import type { FileNode } from "./IFileSystemProvider";
 import type { ITemplateData, ITreeMatchData, ITreeRenderer } from "./ITreeRenderer";
 import { renderHighlightedText } from "./search/renderHighlightedText";
+
+/** All `git-*` row classes that may be applied; iterated to strip before re-stamp. */
+const GIT_STATUS_CLASSES = [
+  "git-modified",
+  "git-added",
+  "git-deleted",
+  "git-renamed",
+  "git-untracked",
+  "git-conflicted",
+  "git-ignored",
+] as const;
+
+/** Map from `GitStatus` to the single-letter file badge (folders use `•` separately). */
+const STATUS_BADGE: Record<GitStatus, string> = {
+  modified: "M",
+  added: "A",
+  deleted: "D",
+  renamed: "R",
+  untracked: "U",
+  conflicted: "C",
+  ignored: "",
+};
+
+/** Apply at most one `git-{status}` class to `row`, removing any previously-applied one. */
+function applyGitClass(row: HTMLElement, status: GitStatus | undefined): void {
+  for (const cls of GIT_STATUS_CLASSES) {
+    row.classList.remove(cls);
+  }
+  if (status) {
+    row.classList.add(`git-${status}`);
+  }
+}
 
 /** Custom MIME type that authoritatively marks a drag as originating from this file tree. */
 export const FILE_TREE_DRAG_MIME = "application/x-anywhere-terminal-file-tree-path";
@@ -42,16 +75,42 @@ export interface RowTemplate extends ITemplateData {
   chevron: HTMLElement;
   icon: HTMLElement;
   name: HTMLElement;
+  /**
+   * Single-letter (or `•` for folders) git status badge. Always present in
+   * the recycled DOM; `is-visible` toggles display + `textContent` carries
+   * the letter. Never created/destroyed per render — honours the recycled-
+   * row contract that the vendored listWidget relies on.
+   */
+  gitBadge: HTMLElement;
   /** Currently bound element — read by the row's dragstart listener. Null between renders. */
   currentElement: FileNode | null;
   /** Stable bound listener so disposeTemplate can detach cleanly. */
   onDragStart: (ev: DragEvent) => void;
 }
 
+/**
+ * Optional accessor the renderer uses to look up `gitStatus` for search-row
+ * paths. Search rows have no direct git data on the search result — they
+ * borrow whatever the data source already cached for the absolute path.
+ * Returns undefined when the path has not been loaded (no badge then).
+ *
+ * See: asimov/changes/add-file-tree-git-decorations/design.md D13.
+ */
+export interface GitStatusLookup {
+  getCachedNode(absPath: string): { gitStatus?: GitStatus } | undefined;
+}
+
 export class ReadOnlyFileRenderer implements ITreeRenderer<FileNode, RowTemplate> {
   public static readonly TEMPLATE_ID = "file-tree-row";
 
   public readonly templateId: string = ReadOnlyFileRenderer.TEMPLATE_ID;
+
+  /**
+   * Optional lookup the renderer uses to colour search-result rows by the
+   * cached `FileNode.gitStatus` for the same absolute path. Pass `null` (or
+   * omit) to render search rows without decorations.
+   */
+  constructor(private readonly statusLookup: GitStatusLookup | null = null) {}
 
   public renderTemplate(container: HTMLElement): RowTemplate {
     const doc = container.ownerDocument;
@@ -71,9 +130,15 @@ export class ReadOnlyFileRenderer implements ITreeRenderer<FileNode, RowTemplate
     const name = doc.createElement("span");
     name.className = "name";
 
+    // Git status badge — single span on every row, recycled across renders.
+    // `is-visible` toggles `display`; the letter content drives appearance.
+    const gitBadge = doc.createElement("span");
+    gitBadge.className = "git-badge";
+
     row.appendChild(chevron);
     row.appendChild(icon);
     row.appendChild(name);
+    row.appendChild(gitBadge);
     container.appendChild(row);
 
     const template: RowTemplate = {
@@ -81,6 +146,7 @@ export class ReadOnlyFileRenderer implements ITreeRenderer<FileNode, RowTemplate
       chevron,
       icon,
       name,
+      gitBadge,
       currentElement: null,
       onDragStart: (ev: DragEvent) => {
         // Read late so the recycled row's current binding wins.
@@ -133,10 +199,6 @@ export class ReadOnlyFileRenderer implements ITreeRenderer<FileNode, RowTemplate
     // Tree rows are draggable; search rows are not (toggled inside `renderSearchRow`).
     template.row.setAttribute("draggable", "true");
 
-    // Dim gitignored rows. The flag flows from the extension host via
-    // `FileEntry.ignored` → `FileNode.ignored`. CSS lowers opacity on this class.
-    template.row.classList.toggle("is-ignored", element.ignored === true);
-
     if (isFile) {
       const { char, color } = resolveSetiIcon(element.name);
       template.icon.classList.add("seti-file-icon");
@@ -153,8 +215,31 @@ export class ReadOnlyFileRenderer implements ITreeRenderer<FileNode, RowTemplate
     template.name.replaceChildren();
     template.name.textContent = element.name;
 
+    // Git status: single `git-{status}` row class + badge letter. Folders
+    // additionally light up `git-folder-dirty` + `•` badge when any
+    // descendant is dirty (refcount maintained by FileSystemDataSource).
+    applyGitClass(template.row, element.gitStatus);
+    template.row.classList.toggle("git-folder-dirty", !isFile && (element.dirtyDescendantCount ?? 0) > 0);
+    this.applyBadge(template, element, isFile);
+
     // Bind the element to the template so the dragstart listener can read it.
     template.currentElement = element;
+  }
+
+  /**
+   * Stamp the badge span. Files get their per-status letter (M/A/D/R/U/C);
+   * folders get `•` when they have dirty descendants. Otherwise hide the
+   * span via the `is-visible` class.
+   */
+  private applyBadge(template: RowTemplate, element: FileNode, isFile: boolean): void {
+    let text = "";
+    if (isFile && element.gitStatus) {
+      text = STATUS_BADGE[element.gitStatus];
+    } else if (!isFile && (element.dirtyDescendantCount ?? 0) > 0) {
+      text = "•";
+    }
+    template.gitBadge.textContent = text;
+    template.gitBadge.classList.toggle("is-visible", text.length > 0);
   }
 
   /**
@@ -173,10 +258,11 @@ export class ReadOnlyFileRenderer implements ITreeRenderer<FileNode, RowTemplate
     template.icon.classList.remove("seti-file-icon");
     template.icon.textContent = "";
     template.icon.style.color = "";
-    template.row.classList.remove("is-ignored");
     template.row.classList.add("is-search-row");
     template.row.style.paddingLeft = "8px";
     template.row.classList.add(`is-search-row--${meta.variant}`);
+    // Folder-dirty propagation is meaningless in flat-list mode — clear it.
+    template.row.classList.remove("git-folder-dirty");
 
     // Synthetic rows (overflow footer / error marker) are NOT draggable
     // and have no click target — the panel keyboard handler skips them.
@@ -185,6 +271,17 @@ export class ReadOnlyFileRenderer implements ITreeRenderer<FileNode, RowTemplate
     } else {
       template.row.setAttribute("draggable", "true");
     }
+
+    // Decorate search match/non-match rows from the cached FileNode's
+    // gitStatus (D13). Overflow/error rows get no decoration.
+    let lookedUpStatus: GitStatus | undefined;
+    if ((meta.variant === "match" || meta.variant === "non-match") && this.statusLookup) {
+      lookedUpStatus = this.statusLookup.getCachedNode(element.path)?.gitStatus;
+    }
+    applyGitClass(template.row, lookedUpStatus);
+    // For search rows we always treat the row as a file for badge purposes —
+    // folder-dirty propagation isn't applicable in flat-list mode.
+    this.applyBadge(template, { ...element, gitStatus: lookedUpStatus }, /* isFile */ true);
 
     // Clear the prior name content so we can re-build with text + spans.
     template.name.replaceChildren();

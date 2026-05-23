@@ -17,6 +17,7 @@
 import * as path from "node:path";
 import * as vscode from "vscode";
 import type { FileEntry, ReadDirectoryResponseMessage, RequestReadDirectoryMessage } from "../types/messages";
+import type { GitDecorationProvider } from "./gitDecorationProvider";
 import { getIgnoredPaths } from "./gitIgnoreChecker";
 
 /**
@@ -125,6 +126,13 @@ export async function handleRequestReadDirectory(
    * Caller is responsible for filtering out disabled (`false`) entries.
    */
   excludePatterns: ReadonlyArray<string> = [],
+  /**
+   * Optional git decoration provider. When provided, each `FileEntry` is
+   * stamped with `gitStatus` (when decorated) and `gitRevision` (always — used
+   * by the webview to defeat snapshot/delta ordering races). When `null`,
+   * the entries' `gitStatus`/`gitRevision` fields are omitted.
+   */
+  gitDecorationProvider: GitDecorationProvider | null = null,
 ): Promise<void> {
   const currentGeneration = provider.rootGeneration;
 
@@ -217,6 +225,23 @@ export async function handleRequestReadDirectory(
           e.ignored = true;
         }
       }
+    }
+  }
+
+  // 8. Stamp each entry with the current git status + revision (D3, D7, D10).
+  //    Higher-severity statuses from the git extension win over `.gitignore`
+  //    detection (e.g. a file matched by .gitignore but force-added stays
+  //    `added`, not `ignored`). The revision is always present so the webview
+  //    can reject stale snapshots that race against fresher delta messages.
+  if (gitDecorationProvider) {
+    for (const e of entries) {
+      const { status, revision } = gitDecorationProvider.getStatus(e.path);
+      if (status !== undefined) {
+        e.gitStatus = status;
+      } else if (e.ignored) {
+        e.gitStatus = "ignored";
+      }
+      e.gitRevision = revision;
     }
   }
 

@@ -17,6 +17,7 @@
 
 import type {
   FileTreeSearchResponseMessage,
+  GitStatusChangedMessage,
   ReadDirectoryResponseMessage,
   RevealInFileTreeMessage,
   SetFileTreePositionMessage,
@@ -145,6 +146,22 @@ export class FileTreeController {
   handleWorkspaceRootChanged(msg: WorkspaceRootChangedMessage): void {
     this.lastWorkspaceRoot = msg.rootPath;
     this.panel.handleRootChanged(msg);
+  }
+
+  /**
+   * Drop a `git-status-changed` delta from the host. Gated on `rootGeneration`
+   * so a delta belonging to the previous workspace generation can't bleed
+   * into the new one (mirrors the gate `handleReadDirectoryResponse` uses
+   * internally). The panel forwards into `FileSystemDataSource.applyGitStatusDelta`
+   * which routes through `applyStatusTransition`.
+   */
+  handleGitStatusChanged(msg: GitStatusChangedMessage): void {
+    if (msg.rootGeneration !== this.panel.getCurrentRootGeneration()) {
+      // Stale generation — silently drop; matches the contract on every
+      // other host-pushed message.
+      return;
+    }
+    this.panel.handleGitStatusChanged(msg.revision, msg.changes);
   }
 
   handleToggle(): void {

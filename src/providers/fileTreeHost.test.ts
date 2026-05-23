@@ -7,9 +7,20 @@
 // providers forgot to forward `request-file-tree-search` (i.e., the search
 // RPC silently lost) is exactly the kind of regression these tests guard.
 
-import { describe, expect, it, vi } from "vitest";
-import type { RequestFileTreeSearchMessage, WebViewToExtensionMessage } from "../types/messages";
+import * as fs from "node:fs";
+import * as os from "node:os";
+import * as path from "node:path";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import * as vscode from "vscode";
+import type {
+  GitStatus,
+  ReadDirectoryResponseMessage,
+  RequestFileTreeSearchMessage,
+  RequestReadDirectoryMessage,
+  WebViewToExtensionMessage,
+} from "../types/messages";
 import { FileTreeHost } from "./fileTreeHost";
+import type { GitDecorationProvider } from "./gitDecorationProvider";
 
 describe("FileTreeHost.handleMessage", () => {
   it("handles `request-file-tree-search` and posts a response back", async () => {
@@ -43,5 +54,214 @@ describe("FileTreeHost.handleMessage", () => {
     const unrelated = { type: "input", tabId: "t", data: "x" } as WebViewToExtensionMessage;
     expect(host.handleMessage(unrelated, noopPost)).toBe(false);
     expect(noopPost).not.toHaveBeenCalled();
+  });
+});
+
+describe("FileTreeHost — git decoration stamping on read-directory", () => {
+  // Stand up a real on-disk temp directory so the RPC handler can enumerate
+  // it through the production code path (no extra mocking of `fs`).
+  let tmp: string;
+  let fileA: string;
+  let fileB: string;
+
+  beforeEach(() => {
+    tmp = fs.mkdtempSync(path.join(os.tmpdir(), "atest-gitstamp-"));
+    fileA = path.join(tmp, "a.ts");
+    fileB = path.join(tmp, "b.ts");
+    fs.writeFileSync(fileA, "");
+    fs.writeFileSync(fileB, "");
+    // The vscode mock doesn't ship a `workspace.fs.readDirectory`; install one
+    // that delegates to node:fs so the production RPC handler enumerates the
+    // real tmp dir. FileType bit values: File=1, Directory=2 (matches `vscode.FileType`).
+    (vscode.workspace.fs as unknown as { readDirectory: unknown }).readDirectory = async (uri: { fsPath: string }) => {
+      const entries = fs.readdirSync(uri.fsPath, { withFileTypes: true });
+      return entries.map((e): [string, number] => [e.name, e.isDirectory() ? 2 : 1]);
+    };
+  });
+
+  afterEach(() => {
+    delete (vscode.workspace.fs as unknown as { readDirectory?: unknown }).readDirectory;
+    try {
+      fs.rmSync(tmp, { recursive: true, force: true });
+    } catch {
+      // best-effort
+    }
+  });
+
+  function makeRpc(): RequestReadDirectoryMessage {
+    return {
+      type: "request-read-directory",
+      requestId: "rq",
+      rootGeneration: 0,
+      path: tmp,
+    };
+  }
+
+  function fakeProvider(table: ReadonlyMap<string, GitStatus>, revision = 7): GitDecorationProvider {
+    return {
+      getStatus: (p: string) => {
+        const status = table.get(p);
+        return { status, revision };
+      },
+      currentRevision: () => revision,
+      onDidChange: () => ({ dispose: () => {} }),
+      reset: () => {},
+      dispose: () => {},
+    };
+  }
+
+  async function runRpc(provider: GitDecorationProvider | null): Promise<ReadDirectoryResponseMessage> {
+    const host = new FileTreeHost(provider);
+    const posted: ReadDirectoryResponseMessage[] = [];
+    host.handleMessage(makeRpc(), (m) => posted.push(m as ReadDirectoryResponseMessage));
+    // The handler is async; allow time for fs.readDirectory + git check-ignore
+    // (which spawns a process — on a non-git directory it exits with code 128
+    // typically within a few ms, but give it generous headroom on slow CI).
+    for (let i = 0; i < 50 && posted.length === 0; i++) {
+      await new Promise((r) => setTimeout(r, 20));
+    }
+    expect(posted.length).toBe(1);
+    return posted[0];
+  }
+
+  it("stamps every entry with revision and copies higher-severity status", async () => {
+    const provider = fakeProvider(new Map([[fileA, "modified"]]), 7);
+    const resp = await runRpc(provider);
+    expect(resp.entries).toBeDefined();
+    const a = resp.entries!.find((e) => e.path === fileA);
+    const b = resp.entries!.find((e) => e.path === fileB);
+    expect(a?.gitStatus).toBe<GitStatus>("modified");
+    expect(a?.gitRevision).toBe(7);
+    expect(b?.gitStatus).toBeUndefined();
+    expect(b?.gitRevision).toBe(7);
+  });
+
+  it("omits gitStatus/gitRevision when no provider is wired", async () => {
+    const resp = await runRpc(null);
+    expect(resp.entries).toBeDefined();
+    for (const e of resp.entries!) {
+      expect(e.gitStatus).toBeUndefined();
+      expect(e.gitRevision).toBeUndefined();
+    }
+  });
+
+  it("revision increases across two reads with an intervening provider state change", async () => {
+    let currentRev = 3;
+    let currentTable = new Map<string, GitStatus>([[fileA, "modified"]]);
+    const provider: GitDecorationProvider = {
+      getStatus: (p) => ({ status: currentTable.get(p), revision: currentRev }),
+      currentRevision: () => currentRev,
+      onDidChange: () => ({ dispose: () => {} }),
+      reset: () => {},
+      dispose: () => {},
+    };
+    const first = await runRpc(provider);
+    expect(first.entries!.find((e) => e.path === fileA)?.gitRevision).toBe(3);
+    currentRev = 9;
+    currentTable = new Map([[fileA, "added"]]);
+    const second = await runRpc(provider);
+    expect(second.entries!.find((e) => e.path === fileA)?.gitRevision).toBe(9);
+    expect(second.entries!.find((e) => e.path === fileA)?.gitStatus).toBe<GitStatus>("added");
+  });
+});
+
+describe("FileTreeHost.attach — git delta forwarding", () => {
+  it("forwards provider deltas as git-status-changed messages with current rootGeneration", () => {
+    let onDelta:
+      | ((d: { revision: number; changes: ReadonlyArray<{ path: string; status: GitStatus | null }> }) => void)
+      | null = null;
+    const provider: GitDecorationProvider = {
+      getStatus: () => ({ status: undefined, revision: 0 }),
+      currentRevision: () => 0,
+      onDidChange: (listener) => {
+        onDelta = listener;
+        return { dispose: () => {} };
+      },
+      reset: () => {},
+      dispose: () => {},
+    };
+    const host = new FileTreeHost(provider);
+    const posted: Array<{ type: string; rootGeneration?: number; revision?: number }> = [];
+    const sub = host.attach({
+      isReady: () => true,
+      post: (m) => posted.push(m as { type: string; rootGeneration?: number; revision?: number }),
+    });
+    expect(onDelta).not.toBeNull();
+
+    // Bump generation to 1 so we know the host stamps the current value, not 0.
+    host.rootGeneration = 1;
+    onDelta!({ revision: 42, changes: [{ path: "/x", status: "modified" }] });
+
+    expect(posted).toHaveLength(1);
+    expect(posted[0].type).toBe("git-status-changed");
+    expect(posted[0].rootGeneration).toBe(1);
+    expect(posted[0].revision).toBe(42);
+
+    sub.dispose();
+  });
+
+  it("does NOT post deltas when the webview is not ready yet", () => {
+    let onDelta:
+      | ((d: { revision: number; changes: ReadonlyArray<{ path: string; status: GitStatus | null }> }) => void)
+      | null = null;
+    const provider: GitDecorationProvider = {
+      getStatus: () => ({ status: undefined, revision: 0 }),
+      currentRevision: () => 0,
+      onDidChange: (listener) => {
+        onDelta = listener;
+        return { dispose: () => {} };
+      },
+      reset: () => {},
+      dispose: () => {},
+    };
+    const host = new FileTreeHost(provider);
+    const posted: unknown[] = [];
+    let ready = false;
+    const sub = host.attach({
+      isReady: () => ready,
+      post: (m) => posted.push(m),
+    });
+    onDelta!({ revision: 1, changes: [{ path: "/x", status: "modified" }] });
+    expect(posted).toHaveLength(0);
+
+    ready = true;
+    onDelta!({ revision: 2, changes: [{ path: "/x", status: "added" }] });
+    expect(posted).toHaveLength(1);
+
+    sub.dispose();
+  });
+
+  it("bumps rootGeneration on workspace folder change WITHOUT calling provider.reset() (O-W3)", () => {
+    // The provider now owns its own workspace-folder reset (subscribes once
+    // inside `createGitDecorationProvider`). FileTreeHost must NOT call
+    // `provider.reset()` — otherwise the reset fan-out scales with the host
+    // count again.
+    const resetSpy = vi.fn();
+    const provider: GitDecorationProvider = {
+      getStatus: () => ({ status: undefined, revision: 0 }),
+      currentRevision: () => 0,
+      onDidChange: () => ({ dispose: () => {} }),
+      reset: resetSpy,
+      dispose: () => {},
+    };
+
+    let folderHandler: (() => void) | null = null;
+    const original = vscode.workspace.onDidChangeWorkspaceFolders;
+    (vscode.workspace as { onDidChangeWorkspaceFolders: unknown }).onDidChangeWorkspaceFolders = ((h: () => void) => {
+      folderHandler = h;
+      return { dispose: () => {} };
+    }) as unknown;
+
+    try {
+      const host = new FileTreeHost(provider);
+      const sub = host.attach({ isReady: () => true, post: () => {} });
+      const beforeGen = host.rootGeneration;
+      folderHandler!();
+      expect(resetSpy).not.toHaveBeenCalled();
+      expect(host.rootGeneration).toBe(beforeGen + 1);
+      sub.dispose();
+    } finally {
+      (vscode.workspace as { onDidChangeWorkspaceFolders: unknown }).onDidChangeWorkspaceFolders = original;
+    }
   });
 });

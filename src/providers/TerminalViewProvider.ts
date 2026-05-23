@@ -3,6 +3,7 @@ import type { SessionManager } from "../session/SessionManager";
 import { readTerminalConfig, readTerminalSettings } from "../settings/SettingsReader";
 import type { ThemeChangedMessage, WebViewToExtensionMessage } from "../types/messages";
 import { FileTreeHost } from "./fileTreeHost";
+import type { GitDecorationProvider } from "./gitDecorationProvider";
 import { affectsHoverPreview, readHoverPreviewSettings, updateHoverPreviewSetting } from "./hoverPreviewSettings";
 import { openExternalLink } from "./openExternalLink";
 import { DEFAULT_FIND_FILES_MAX_RESULTS, openFileLink } from "./openFileLink";
@@ -71,9 +72,12 @@ export class TerminalViewProvider implements vscode.WebviewViewProvider {
    * Shared file-tree wiring (rootGeneration counter, workspaceRoot getter,
    * onDidChangeWorkspaceFolders subscription, message dispatch). Same
    * instance lives on the editor provider; both delegate through it so the
-   * three providers never drift out of sync. See: design.md D10.
+   * three providers never drift out of sync. The optional
+   * `gitDecorationProvider` is shared across all three providers — passing
+   * the same singleton lets every webview see the same revision sequence.
+   * See: design.md D10.
    */
-  private readonly fileTreeHost = new FileTreeHost();
+  private readonly fileTreeHost: FileTreeHost;
 
   /** Public for external readers (extension.ts ctx commands). Forwarded to fileTreeHost. */
   get rootGeneration(): number {
@@ -99,7 +103,10 @@ export class TerminalViewProvider implements vscode.WebviewViewProvider {
     private readonly extensionUri: vscode.Uri,
     private readonly sessionManager: SessionManager,
     private readonly location: "sidebar" | "panel" = "sidebar",
-  ) {}
+    gitDecorationProvider: GitDecorationProvider | null = null,
+  ) {
+    this.fileTreeHost = new FileTreeHost(gitDecorationProvider);
+  }
 
   resolveWebviewView(
     webviewView: vscode.WebviewView,

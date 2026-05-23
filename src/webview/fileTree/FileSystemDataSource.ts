@@ -24,9 +24,45 @@
 //        #requirement-file-system-provider-interface-webview-side
 //        #requirement-rpc-correlation
 
-import type { FileEntry, ReadDirectoryResponseMessage, RequestReadDirectoryMessage } from "../../types/messages";
+import type {
+  FileEntry,
+  GitStatus,
+  ReadDirectoryResponseMessage,
+  RequestReadDirectoryMessage,
+} from "../../types/messages";
 import type { FileNode, FileStat, IFileSystemProvider } from "./IFileSystemProvider";
 import type { ITreeDataSource } from "./ITreeDataSource";
+
+/** POSIX-and-Windows-safe parent path; returns null when no parent (root or basename-only). */
+function dirname(p: string): string | null {
+  const lastSlash = Math.max(p.lastIndexOf("/"), p.lastIndexOf("\\"));
+  if (lastSlash === -1) {
+    return null;
+  }
+  // Preserve a leading "/" for POSIX roots — `/a` → `/`, but `/` → null.
+  if (lastSlash === 0) {
+    return p.length === 1 ? null : "/";
+  }
+  return p.slice(0, lastSlash);
+}
+
+/**
+ * Statuses that "propagate" — a file in any of these makes ancestor folders
+ * render their dirty badge. `deleted` and `ignored` deliberately do not
+ * propagate (mirrors VS Code; see design.md D6).
+ */
+function isDirtyForPropagation(status: GitStatus | undefined): boolean {
+  switch (status) {
+    case "modified":
+    case "added":
+    case "renamed":
+    case "untracked":
+    case "conflicted":
+      return true;
+    default:
+      return false;
+  }
+}
 
 /**
  * Local cancellation marker. Kept tiny so we don't drag in the vendored
@@ -90,6 +126,33 @@ export class FileSystemDataSource implements IFileSystemProvider, ITreeDataSourc
    * cache lifetime is bounded by those events as well.
    */
   private readonly nodeCache = new Map<string, FileNode>();
+  /**
+   * Per-path revision at which `FileNode.gitStatus` was last set. Guards the
+   * single transition function from applying older snapshots over a newer
+   * delta (D10). Keyed by absolute path; cleared on `handleRootChanged`.
+   */
+  private readonly revisionByPath = new Map<string, number>();
+  /**
+   * Status updates that arrived before the containing directory was loaded.
+   * Drained the moment a matching `FileNode` lands in the cache. Cleared on
+   * `handleRootChanged`. See: design.md D10, spec § "Pending status for
+   * late-arriving directories".
+   *
+   * Revision-guarded (O-W1): a delta carrying a revision older than what's
+   * already in the pending entry is rejected, mirroring the
+   * `applyStatusTransition` watermark for cached nodes. Without this guard,
+   * a late-arriving older delta could overwrite a newer pending status for
+   * an unknown path.
+   */
+  private readonly pendingStatuses = new Map<string, { status: GitStatus | null; revision: number }>();
+  /**
+   * Reverse index: parent absolute path → set of last-known child absolute
+   * paths from the most recent `getChildren` call. Used to evict stale
+   * `nodeCache` entries when a path disappears from a later listing (O-W2).
+   * Without this, a file removed from disk would leave its `FileNode` cached
+   * forever — a memory leak bounded by workspace size but unbounded by time.
+   */
+  private readonly childrenByParent = new Map<string, Set<string>>();
 
   constructor(
     init: FileSystemDataSourceInit,
@@ -127,27 +190,207 @@ export class FileSystemDataSource implements IFileSystemProvider, ITreeDataSourc
     // identity-keyed cache (Tree.nodes Map) requires this contract; without
     // it, re-expansion would always cache-miss and leak entries (B1).
     // We mutate the cached node's fields when metadata changes (kind,
-    // ignored) so consumers observe the latest backend state.
-    return entries.map((e) => {
+    // ignored) so consumers observe the latest backend state. Git status is
+    // funneled through `applyStatusTransition` so the per-path revision guard
+    // and ancestor refcount stay correct (D11).
+    const newChildPaths = new Set<string>();
+    const result = entries.map((e) => {
+      newChildPaths.add(e.path);
       const cached = this.nodeCache.get(e.path);
+      let node: FileNode;
+      let isFreshlyCached = false;
       if (cached) {
-        // Refresh mutable fields. Identity preserved.
         cached.name = e.name;
         cached.kind = e.kind;
         cached.ignored = e.ignored;
-        return cached;
+        node = cached;
+      } else {
+        node = {
+          name: e.name,
+          path: e.path,
+          kind: e.kind,
+          ignored: e.ignored,
+        };
+        this.nodeCache.set(e.path, node);
+        isFreshlyCached = true;
       }
-      const node: FileNode = {
-        name: e.name,
-        path: e.path,
-        kind: e.kind,
-        // Propagate git-ignored flag from the RPC entry. Undefined when the
-        // extension host couldn't run `git check-ignore` (no repo, no git, etc.).
-        ignored: e.ignored,
-      };
-      this.nodeCache.set(e.path, node);
+      // Stamp git status through the single transition function. When the
+      // entry carries no revision (e.g. tests / hosts without a provider),
+      // skip — there's no version to compare against.
+      if (e.gitRevision !== undefined) {
+        this.applyStatusTransition(node, e.gitStatus, e.gitRevision);
+      }
+      // Drain any pending status that arrived before this directory loaded.
+      // The transition function's own revision guard decides whether the
+      // pending value or the snapshot wins.
+      if (isFreshlyCached) {
+        const pending = this.pendingStatuses.get(e.path);
+        if (pending !== undefined) {
+          this.pendingStatuses.delete(e.path);
+          this.applyStatusTransition(node, pending.status ?? undefined, pending.revision);
+        }
+      }
       return node;
     });
+    // O-W2: Evict cache entries for paths that disappeared from this
+    // listing. In normal operation git emits the corresponding `deleted` /
+    // `null` delta first (so the leaf is no longer dirty by the time we
+    // evict), but a race or out-of-band disk change could leave a dirty
+    // leaf in the subtree we evict. We walk the subtree via
+    // `childrenByParent` and adjust ancestor refcounts for any dirty leaf
+    // BEFORE deleting cache entries — otherwise the ancestor walk would
+    // break early on a missing intermediate.
+    const oldChildren = this.childrenByParent.get(path);
+    if (oldChildren) {
+      for (const oldPath of oldChildren) {
+        if (!newChildPaths.has(oldPath)) {
+          this.evictSubtree(oldPath);
+        }
+      }
+    }
+    this.childrenByParent.set(path, newChildPaths);
+    return result;
+  }
+
+  /**
+   * Evict an absolute path and every cached descendant via BFS over
+   * `childrenByParent`. Refcount drift defense (O-W2): for each dirty leaf
+   * inside the subtree, walk ancestors with `-1` while cache is still
+   * intact, then delete all subtree entries.
+   */
+  private evictSubtree(rootPath: string): void {
+    const subtree: string[] = [];
+    const stack = [rootPath];
+    while (stack.length > 0) {
+      const p = stack.pop();
+      if (p === undefined) {
+        break;
+      }
+      subtree.push(p);
+      const kids = this.childrenByParent.get(p);
+      if (kids) {
+        for (const k of kids) {
+          stack.push(k);
+        }
+      }
+    }
+    // Phase 1: subtract dirty contributions from external ancestors. Must
+    // happen before deletion so the walk doesn't break on a missing
+    // intermediate cache entry. Walks that pass through evicted-but-not-yet-
+    // deleted folders inside the subtree harmlessly tick their counters —
+    // those folders are about to be removed.
+    for (const p of subtree) {
+      const node = this.nodeCache.get(p);
+      if (node && isDirtyForPropagation(node.gitStatus)) {
+        this.walkAncestorsAndAdjust(p, -1);
+      }
+    }
+    // Phase 2: actually delete the cache + per-path state.
+    for (const p of subtree) {
+      this.nodeCache.delete(p);
+      this.revisionByPath.delete(p);
+      this.pendingStatuses.delete(p);
+      this.childrenByParent.delete(p);
+    }
+  }
+
+  /**
+   * Apply an incremental git-status delta. Routes every change through the
+   * single `applyStatusTransition` writer for nodes already cached; stashes
+   * status for paths whose containing directory hasn't loaded yet so it can
+   * be applied on the next insert. `status: null` clears any matching
+   * pending entry to bound the map's growth (spec § "Pending status for
+   * late-arriving directories").
+   *
+   * See: asimov/changes/add-file-tree-git-decorations/design.md D10, D11.
+   */
+  applyGitStatusDelta(revision: number, changes: ReadonlyArray<{ path: string; status: GitStatus | null }>): boolean {
+    if (this.disposed) {
+      return false;
+    }
+    let changed = false;
+    for (const c of changes) {
+      const node = this.nodeCache.get(c.path);
+      if (node) {
+        changed = this.applyStatusTransition(node, c.status ?? undefined, revision) || changed;
+        if (c.status === null) {
+          // Status cleared — also drop any stale pending entry.
+          this.pendingStatuses.delete(c.path);
+        }
+      } else {
+        // O-W1: Revision-guard the pending entry. A delta carrying an older
+        // revision than what's already pending is rejected, mirroring the
+        // `applyStatusTransition` watermark for cached nodes. Without this
+        // guard, a stale delta arriving after a newer one could clear or
+        // overwrite the fresher pending value for an unknown path.
+        const existing = this.pendingStatuses.get(c.path);
+        if (existing !== undefined && revision <= existing.revision) {
+          continue;
+        }
+        if (c.status === null) {
+          // Nothing to clear in the cache and we don't want to store
+          // "becomes clean" speculatively — drop.
+          this.pendingStatuses.delete(c.path);
+        } else {
+          this.pendingStatuses.set(c.path, { status: c.status, revision });
+        }
+      }
+    }
+    return changed;
+  }
+
+  /**
+   * The single allowed writer of `FileNode.gitStatus` and
+   * `FileNode.dirtyDescendantCount`. Implements D10 (revision-guarded apply)
+   * + D11 (snapshot / delta / pending all funnel here). Snapshot, delta, and
+   * the pending-status drain on cache insert all call this function — there
+   * is no other path that mutates these fields.
+   */
+  private applyStatusTransition(node: FileNode, next: GitStatus | undefined, revision: number): boolean {
+    const stored = this.revisionByPath.get(node.path);
+    if (stored !== undefined && revision <= stored) {
+      // Older or equal — reject. (Equal is a no-op rather than an error so a
+      // double-apply within the same batch is harmless.)
+      return false;
+    }
+    this.revisionByPath.set(node.path, revision);
+    const prevStatus = node.gitStatus;
+    if (prevStatus === next) {
+      // No state change beyond bumping the revision watermark.
+      return false;
+    }
+    const prevDirty = isDirtyForPropagation(prevStatus);
+    const nextDirty = isDirtyForPropagation(next);
+    node.gitStatus = next;
+    if (prevDirty === nextDirty) {
+      return true;
+    }
+    const delta = nextDirty ? 1 : -1;
+    this.walkAncestorsAndAdjust(node.path, delta);
+    return true;
+  }
+
+  /**
+   * Walk every cached ancestor of `absPath` and add `delta` to its
+   * `dirtyDescendantCount`. Stops as soon as a cache miss is hit — uncached
+   * paths cannot render badges anyway, so we save the work. Clamps at zero
+   * to defend against any one-off underflow (refcount drift symptom).
+   */
+  private walkAncestorsAndAdjust(absPath: string, delta: number): void {
+    let current = dirname(absPath);
+    while (current && current !== absPath) {
+      const ancestor = this.nodeCache.get(current);
+      if (!ancestor) {
+        break;
+      }
+      const next = (ancestor.dirtyDescendantCount ?? 0) + delta;
+      ancestor.dirtyDescendantCount = next < 0 ? 0 : next;
+      const parent = dirname(current);
+      if (!parent || parent === current) {
+        break;
+      }
+      current = parent;
+    }
   }
 
   // ─── IFileSystemProvider ──────────────────────────────────────────
@@ -233,6 +476,12 @@ export class FileSystemDataSource implements IFileSystemProvider, ITreeDataSourc
     // longer exist (different workspace), and any surviving `FileNode`
     // identities would re-enter the Tree's `nodes` Map under stale paths.
     this.nodeCache.clear();
+    // Drop the per-path revision watermark too — a new root starts at
+    // revision 0 from the (reset) decoration provider, so retaining old
+    // watermarks would reject the legitimate first-snapshot stamping.
+    this.revisionByPath.clear();
+    this.pendingStatuses.clear();
+    this.childrenByParent.clear();
   }
 
   /** Test/inspection only — exposes the workspace root the source currently points at. */
@@ -265,5 +514,18 @@ export class FileSystemDataSource implements IFileSystemProvider, ITreeDataSourc
     }
     this.pending.clear();
     this.nodeCache.clear();
+    this.revisionByPath.clear();
+    this.pendingStatuses.clear();
+    this.childrenByParent.clear();
+  }
+
+  /**
+   * Inspect-only accessor used by search-row rendering (see spec § "Flat-list /
+   * search mode honors decorations via cache lookup"). Returns the cached
+   * `FileNode` for an absolute path, or undefined when the path hasn't been
+   * loaded into the tree yet.
+   */
+  getCachedNode(absPath: string): FileNode | undefined {
+    return this.nodeCache.get(absPath);
   }
 }

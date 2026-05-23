@@ -25,6 +25,7 @@ import type {
   CancelFileTreeSearchMessage,
   FileTreePosition,
   FileTreeSearchResponseMessage,
+  GitStatus,
   OpenFileMessage,
   ReadDirectoryResponseMessage,
   RequestFileTreeSearchMessage,
@@ -565,6 +566,34 @@ export class FileTreePanel {
     this.dataSource?.handleResponse(msg);
   }
 
+  /**
+   * Webview-side workspace generation that the panel currently bound its
+   * data source to. Used by `FileTreeController` to drop `git-status-changed`
+   * deltas that belong to a previous root.
+   */
+  getCurrentRootGeneration(): number {
+    return this.currentRootGeneration;
+  }
+
+  /**
+   * Forward an incremental git-status delta to the data source. The data
+   * source applies it through the same `applyStatusTransition` writer the
+   * snapshot path uses, so revision races and the dirty-folder refcount stay
+   * correct (see design.md D10 + D11).
+   */
+  handleGitStatusChanged(revision: number, changes: ReadonlyArray<{ path: string; status: GitStatus | null }>): void {
+    const changed = this.dataSource?.applyGitStatusDelta(revision, changes) ?? false;
+    if (!changed) {
+      return;
+    }
+    // The data source mutates cached FileNode objects in place. The vendored
+    // listWidget recycles row DOM and only invokes `renderElement` when its
+    // own diff sees a change — which it can't, because we mutated existing
+    // references. `rerenderRows()` re-runs the renderer for every visible
+    // row without re-fetching children (cheap; no read-directory RPCs).
+    this.tree?.rerenderRows();
+  }
+
   dispose(): void {
     if (this.disposed) {
       return;
@@ -971,7 +1000,9 @@ export class FileTreePanel {
       );
     }
 
-    const renderer = new ReadOnlyFileRenderer();
+    // Pass the data source as the status lookup so search rows can mirror the
+    // cached `FileNode.gitStatus` for matching absolute paths (D13).
+    const renderer = new ReadOnlyFileRenderer(this.dataSource);
     // Tree mounts inside the dedicated body — keeps the toolbar header above
     // the list and untouched by Tree's internal DOM management.
     //
