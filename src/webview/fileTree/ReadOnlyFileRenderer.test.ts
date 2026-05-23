@@ -51,7 +51,7 @@ describe("ReadOnlyFileRenderer", () => {
     expect(template.icon.textContent).toBe("");
     expect(template.name.textContent).toBe("src");
     expect(template.row.dataset.depth).toBe("0");
-    expect(template.row.style.paddingLeft).toBe("0px");
+    expect(template.row.style.paddingLeft).toBe("20px");
   });
 
   it("renders a file row with a Seti glyph icon and a hidden chevron slot", () => {
@@ -76,7 +76,7 @@ describe("ReadOnlyFileRenderer", () => {
     expect(template.icon.style.color).toMatch(/^#?[a-z0-9]+|rgb/i);
     expect(template.name.textContent).toBe("README.md");
     expect(template.row.dataset.depth).toBe("2");
-    expect(template.row.style.paddingLeft).toBe("32px");
+    expect(template.row.style.paddingLeft).toBe("60px");
   });
 
   it("rebinds the same template when an existing row is reused", () => {
@@ -94,7 +94,7 @@ describe("ReadOnlyFileRenderer", () => {
     expect(template.icon.classList.contains("seti-file-icon")).toBe(true);
     expect(template.icon.classList.contains("icon-hidden")).toBe(false);
     expect(template.name.textContent).toBe("a.ts");
-    expect(template.row.style.paddingLeft).toBe("16px");
+    expect(template.row.style.paddingLeft).toBe("40px");
 
     // disposeTemplate now detaches the dragstart listener; calling it must not throw.
     expect(() => renderer.disposeTemplate(template)).not.toThrow();

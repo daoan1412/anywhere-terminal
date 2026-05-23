@@ -4,6 +4,17 @@ All notable changes to **AnyWhere Terminal** are documented in this file.
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.11.1] — 2026-05-23
+
+### Fixed
+
+- **Cmd+Backspace / Ctrl+Backspace (kill-line) now works regardless of focus.** The shortcut was previously only routed through xterm.js's `attachCustomKeyEventHandler`, which only fires when xterm's hidden textarea has DOM focus. With the file tree open, clicking the tree shifted focus away from xterm, so `Cmd+Delete` in the terminal area became a no-op. Routed at the document-capture level alongside `Cmd+Left/Right` (start/end of line) and `Option+Left/Right` (word jump) so it reaches the active pane regardless of which sibling element holds focus.
+
+### Changed
+
+- **File-tree header root row** — uses the actual workspace folder name (no more `ALL-CAPS` text-transform, `0.05em` letter-spacing, or 11px font-size). The heading now reads as a normal folder name.
+- **File-tree row indentation** matches VS Code Explorer's stepping: `paddingLeft = 20 + depth * 20px`. Step is `chevron-width (16) + flex gap (4) = 20px`, so a child row's leading glyph (chevron or file icon) sits roughly under its parent row's name first letter. Top-level rows sit just inside the header root name.
+
 ## [0.11.0] — 2026-05-23
 
 ### Added

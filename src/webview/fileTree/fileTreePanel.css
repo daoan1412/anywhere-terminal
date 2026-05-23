@@ -219,11 +219,7 @@
   cursor: pointer;
   user-select: none;
   color: var(--vscode-foreground);
-  /* Slightly higher contrast than body rows — this is a heading. */
   font-weight: 600;
-  font-size: 11px;
-  letter-spacing: 0.05em;
-  text-transform: uppercase;
 }
 .file-tree-header__root:hover {
   background: var(--vscode-list-hoverBackground);

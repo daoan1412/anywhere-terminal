@@ -101,7 +101,9 @@ export class ReadOnlyFileRenderer implements ITreeRenderer<FileNode, RowTemplate
 
   public renderElement(element: FileNode, depth: number, template: RowTemplate): void {
     template.row.dataset.depth = String(depth);
-    template.row.style.paddingLeft = `${depth * 16}px`;
+    // Indent step = chevron/icon (16) + flex gap (4) = 20px, so each deeper
+    // level's leading glyph sits roughly under its parent's NAME first letter.
+    template.row.style.paddingLeft = `${20 + depth * 20}px`;
 
     const isFile = element.kind === "file";
 

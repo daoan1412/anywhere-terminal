@@ -554,7 +554,11 @@ function bootstrap(): void {
         return;
       }
 
-      // macOS: Cmd+Left → start of line (\x01), Cmd+Right → end of line (\x05)
+      // macOS: Cmd+Left → start of line (\x01), Cmd+Right → end of line (\x05),
+      // Cmd+Backspace → kill-line (\x15). Handled at document-capture so the
+      // shortcut works even when DOM focus is on the file tree or another
+      // sibling of the xterm textarea (where xterm's attached keydown handler
+      // would otherwise never see the event).
       if (isMac && e.metaKey && !e.ctrlKey && !e.altKey && !e.shiftKey) {
         if (e.key === "ArrowLeft") {
           vscode.postMessage({ type: "input", tabId: targetId, data: "\x01" });
@@ -568,6 +572,19 @@ function bootstrap(): void {
           e.stopPropagation();
           return;
         }
+        if (e.key === "Backspace") {
+          vscode.postMessage({ type: "input", tabId: targetId, data: "\x15" });
+          e.preventDefault();
+          e.stopPropagation();
+          return;
+        }
+      }
+      // Non-mac: Ctrl+Backspace → kill-line (\x15). Same global routing.
+      if (!isMac && e.ctrlKey && !e.metaKey && !e.altKey && !e.shiftKey && e.key === "Backspace") {
+        vscode.postMessage({ type: "input", tabId: targetId, data: "\x15" });
+        e.preventDefault();
+        e.stopPropagation();
+        return;
       }
 
       // macOS: Option+Left → backward-word (\x1bb), Option+Right → forward-word (\x1bf)
