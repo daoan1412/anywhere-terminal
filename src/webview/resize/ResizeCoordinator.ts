@@ -1,8 +1,8 @@
 // src/webview/resize/ResizeCoordinator.ts — Resize coordination and policy
 //
 // Coordinates ResizeObserver events, debounce timers, visibility state,
-// location inference, and fit delegation. Owns resize policy — when to fit,
-// when to defer, when to skip.
+// and fit delegation. Owns resize policy — when to fit, when to defer,
+// when to skip.
 //
 // See: docs/design/resize-handling.md
 
@@ -11,19 +11,6 @@ import type { SplitNode } from "../SplitModel";
 import { getAllSessionIds } from "../SplitModel";
 
 // ─── Types ──────────────────────────────────────────────────────────
-
-/** Terminal location for resize-based inference. */
-type TerminalLocation = "panel" | "sidebar";
-
-/**
- * Webview "shape" — same buckets as TerminalLocation, exposed under a more
- * intent-revealing name for callers that don't care about terminal placement
- * (e.g. the file-tree panel using shape to seed default position).
- */
-export type WebviewShape = "panel" | "sidebar";
-
-/** Listener function signature for `onDidChangeShape`. */
-export type ShapeListener = (shape: WebviewShape) => void;
 
 /** Minimal terminal instance interface for fit operations. */
 interface FittableInstance {
@@ -54,58 +41,22 @@ const RESIZE_DEBOUNCE_MS = 100;
  * - `splitFitTimeout` — debounce timer for split-pane resize events
  * - `observer` — ResizeObserver instance
  *
- * Does NOT own: ThemeManager or terminal instances. Communicates location changes
- * via the injected `onLocationChange` callback.
+ * Does NOT own: ThemeManager or terminal instances. Terminal location is the
+ * extension's responsibility (baked into `data-terminal-location` on body) —
+ * this coordinator never re-infers it from container aspect ratio.
  */
 export class ResizeCoordinator {
   private pendingResize = false;
   private fitTimeout: number | undefined;
   private splitFitTimeout: number | undefined;
   private observer: ResizeObserver | undefined;
-  /**
-   * Latest computed shape — seeded from the first ResizeObserver callback,
-   * then updated on every size change. Null until the observer has fired
-   * once.
-   */
-  private currentShapeValue: WebviewShape | null = null;
-  /** Listeners registered via `onDidChangeShape`. Fired only when shape flips. */
-  private readonly shapeListeners = new Set<ShapeListener>();
 
   private readonly fitTerminal: (instance: FittableInstance) => void;
   private readonly getState: () => ResizeState;
-  private readonly onLocationChange: (location: TerminalLocation) => void;
 
-  constructor(
-    fitTerminal: (instance: FittableInstance) => void,
-    getState: () => ResizeState,
-    onLocationChange: (location: TerminalLocation) => void,
-  ) {
+  constructor(fitTerminal: (instance: FittableInstance) => void, getState: () => ResizeState) {
     this.fitTerminal = fitTerminal;
     this.getState = getState;
-    this.onLocationChange = onLocationChange;
-  }
-
-  // ─── Shape detection (added by port-vscode-async-data-tree D5) ───
-
-  /**
-   * Returns the most recently observed webview shape, or "sidebar" before the
-   * first observation (matches the historical pre-init default). File-tree
-   * default-position seeding (design D5) reads this on first reveal.
-   */
-  currentShape(): WebviewShape {
-    return this.currentShapeValue ?? "sidebar";
-  }
-
-  /**
-   * Subscribe to shape-flip events. The listener fires ONLY when the shape
-   * actually changes (panel↔sidebar) — not on every resize tick. The returned
-   * function unsubscribes.
-   */
-  onDidChangeShape(listener: ShapeListener): () => void {
-    this.shapeListeners.add(listener);
-    return () => {
-      this.shapeListeners.delete(listener);
-    };
   }
 
   /**
@@ -125,15 +76,6 @@ export class ResizeCoordinator {
         if (width === 0 || height === 0) {
           this.pendingResize = true;
           return;
-        }
-
-        const shape = ResizeCoordinator.inferLocationFromSize(width, height);
-        this.onLocationChange(shape);
-        if (this.currentShapeValue !== shape) {
-          this.currentShapeValue = shape;
-          for (const l of this.shapeListeners) {
-            l(shape);
-          }
         }
 
         this.debouncedFit();
@@ -244,10 +186,5 @@ export class ResizeCoordinator {
         this.fitTerminal(instance);
       }
     }
-  }
-
-  /** Choose location by container aspect ratio when views are moved. */
-  private static inferLocationFromSize(width: number, height: number): TerminalLocation {
-    return width > height * 1.2 ? "panel" : "sidebar";
   }
 }

@@ -31,7 +31,7 @@ import { WebviewStateStore } from "./state/WebviewStateStore";
 import { buildTabBarData, handleTabKeyboardShortcut, renderTabBar } from "./TabBarUtils";
 import { hideRenameOverlay, repositionRenameOverlay, showRenameOverlay } from "./tabRenameOverlay";
 import { TerminalFactory } from "./terminal/TerminalFactory";
-import { type TerminalLocation, ThemeManager } from "./theme/ThemeManager";
+import { ThemeManager } from "./theme/ThemeManager";
 import { showBanner } from "./ui/BannerService";
 
 // Inject the vendored Seti icon-font @font-face rule (with the woff embedded
@@ -109,16 +109,9 @@ const dragDropHandler = new DragDropHandler({
   },
 });
 
-function updateLocation(location: TerminalLocation): void {
-  if (themeManager.updateLocation(location)) {
-    themeManager.applyToAll(store.terminals.values());
-  }
-}
-
 const resizeCoordinator = new ResizeCoordinator(
   (instance) => factory.fitTerminal(instance),
   () => ({ activeTabId: store.activeTabId, terminals: store.terminals, tabLayouts: store.tabLayouts }),
-  (location) => updateLocation(location),
 );
 
 const splitRenderer = new SplitTreeRenderer({

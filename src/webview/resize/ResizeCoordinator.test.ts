@@ -63,7 +63,7 @@ describe("ResizeCoordinator", () => {
   it("debounces fit calls — multiple calls within 100ms result in one fit", () => {
     const fitTerminal = vi.fn();
     const state = createMockState("tab-1");
-    const coordinator = new ResizeCoordinator(fitTerminal, () => state, vi.fn());
+    const coordinator = new ResizeCoordinator(fitTerminal, () => state);
 
     coordinator.debouncedFit();
     coordinator.debouncedFit();
@@ -91,7 +91,7 @@ describe("ResizeCoordinator", () => {
     tabLayouts.set("tab-1", layout);
 
     const state = { activeTabId: "tab-1", terminals, tabLayouts };
-    const coordinator = new ResizeCoordinator(fitTerminal, () => state, vi.fn());
+    const coordinator = new ResizeCoordinator(fitTerminal, () => state);
 
     coordinator.debouncedFitAllLeaves("tab-1");
     vi.advanceTimersByTime(100);
@@ -102,7 +102,7 @@ describe("ResizeCoordinator", () => {
   it("sets pendingResize when container dimensions are zero", () => {
     const fitTerminal = vi.fn();
     const state = createMockState("tab-1");
-    const coordinator = new ResizeCoordinator(fitTerminal, () => state, vi.fn());
+    const coordinator = new ResizeCoordinator(fitTerminal, () => state);
 
     const container = document.createElement("div");
     coordinator.setup(container);
@@ -118,7 +118,7 @@ describe("ResizeCoordinator", () => {
   it("flushes pending resize on onViewShow", () => {
     const fitTerminal = vi.fn();
     const state = createMockState("tab-1");
-    const coordinator = new ResizeCoordinator(fitTerminal, () => state, vi.fn());
+    const coordinator = new ResizeCoordinator(fitTerminal, () => state);
 
     const container = document.createElement("div");
     coordinator.setup(container);
@@ -136,34 +136,37 @@ describe("ResizeCoordinator", () => {
   it("onViewShow does nothing when no pending resize", () => {
     const fitTerminal = vi.fn();
     const state = createMockState("tab-1");
-    const coordinator = new ResizeCoordinator(fitTerminal, () => state, vi.fn());
+    const coordinator = new ResizeCoordinator(fitTerminal, () => state);
 
     coordinator.onViewShow();
     expect(fitTerminal).not.toHaveBeenCalled();
   });
 
-  it("infers location from aspect ratio via setup ResizeObserver", () => {
+  it("does not change body background when container aspect ratio flips", () => {
+    // Regression: ResizeCoordinator used to infer "panel" vs "sidebar" location
+    // from container aspect ratio (width > height * 1.2) and toggle the body
+    // background between --vscode-panel-background and --vscode-sideBar-background
+    // on every resize tick, causing visible flicker when stretching the view.
+    // Background ownership belongs to the extension-provided data-terminal-location.
+    document.body.style.backgroundColor = "rgb(10, 20, 30)";
+
     const fitTerminal = vi.fn();
     const state = createMockState("tab-1");
-    const onLocationChange = vi.fn();
-    const coordinator = new ResizeCoordinator(fitTerminal, () => state, onLocationChange);
+    const coordinator = new ResizeCoordinator(fitTerminal, () => state);
 
     const container = document.createElement("div");
     coordinator.setup(container);
 
-    // Wide container (width > height * 1.2) => panel
-    triggerResize(500, 200);
-    expect(onLocationChange).toHaveBeenCalledWith("panel");
+    triggerResize(500, 200); // would have flipped to "panel"
+    triggerResize(200, 500); // would have flipped back to "sidebar"
 
-    // Tall container (width <= height * 1.2) => sidebar
-    triggerResize(200, 500);
-    expect(onLocationChange).toHaveBeenCalledWith("sidebar");
+    expect(document.body.style.backgroundColor).toBe("rgb(10, 20, 30)");
   });
 
   it("dispose disconnects observer and clears timers", () => {
     const fitTerminal = vi.fn();
     const state = createMockState("tab-1");
-    const coordinator = new ResizeCoordinator(fitTerminal, () => state, vi.fn());
+    const coordinator = new ResizeCoordinator(fitTerminal, () => state);
 
     const container = document.createElement("div");
     coordinator.setup(container);
