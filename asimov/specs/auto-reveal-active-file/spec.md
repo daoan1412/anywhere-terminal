@@ -1,4 +1,5 @@
-## ADDED Requirements
+# auto-reveal-active-file Specification
+## Requirements
 
 ### Requirement: Auto-reveal setting schema
 
@@ -87,8 +88,3 @@ No window reload SHALL be required.
 
 When the resolved `autoReveal` mode is `"none"` (corresponding to user-configured `false`/`"false"`), the resolver SHALL return early before computing the path. The `onDidChangeActiveTab` subscription SHALL remain registered for the lifetime of the host — the early-return cost is negligible.
 
-## MODIFIED Requirements
-
-### Requirement: State persistence schema
-
-The system SHALL persist the file tree's `open: boolean`, its current `position: 'top' | 'bottom' | 'left' | 'right'`, and its `expandedPaths: string[]` into `WebviewStateStore` under a single new key `fileTree` on the `WebviewState` interface. The schema SHALL be additive so future fields (selection, scroll, sash size, custom names, last-revealed-path) can be added without migration.
