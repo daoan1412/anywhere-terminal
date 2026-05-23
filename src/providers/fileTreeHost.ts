@@ -28,7 +28,7 @@ import type {
   WebViewToExtensionMessage,
   WorkspaceRootChangedMessage,
 } from "../types/messages";
-import { handleRequestReadDirectory, readEnabledExcludePatterns, type RootProvider } from "./fileTreeRpcHandler";
+import { handleRequestReadDirectory, type RootProvider, readEnabledExcludePatterns } from "./fileTreeRpcHandler";
 
 /**
  * Init-message fields the host contributes. Providers spread this into their
@@ -77,10 +77,7 @@ export class FileTreeHost implements RootProvider {
    * `webview.postMessage` directly so providers can keep their retry / error
    * logging in one place.
    */
-  attach(deps: {
-    isReady: () => boolean;
-    post: (msg: WorkspaceRootChangedMessage) => void;
-  }): vscode.Disposable {
+  attach(deps: { isReady: () => boolean; post: (msg: WorkspaceRootChangedMessage) => void }): vscode.Disposable {
     return vscode.workspace.onDidChangeWorkspaceFolders(() => {
       this.rootGeneration += 1;
       if (!deps.isReady()) {
@@ -111,14 +108,7 @@ export class FileTreeHost implements RootProvider {
   ): boolean {
     switch (msg.type) {
       case "request-read-directory":
-        void handleRequestReadDirectory(
-          msg,
-          this,
-          post,
-          vscode.workspace.fs,
-          vscode.Uri,
-          readEnabledExcludePatterns(),
-        );
+        void handleRequestReadDirectory(msg, this, post, vscode.workspace.fs, vscode.Uri, readEnabledExcludePatterns());
         return true;
       case "request-set-file-tree-position":
         // Drive the QuickPick locally so the response lands on THIS webview

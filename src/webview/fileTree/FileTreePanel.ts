@@ -136,8 +136,6 @@ export class FileTreePanel {
    * read would be silently dropped by the host's STALE_ROOT check.
    */
   private currentRootGeneration: number;
-  /** Header strip (root row on the left, close + move buttons on the right). Created once. */
-  private headerEl: HTMLElement | null = null;
   /** Clickable root row inside the header — chevron + name. Used by `syncHeaderRoot` to stamp aria-expanded. */
   private headerRootRowEl: HTMLElement | null = null;
   /** Name span inside the header root row — updated whenever the workspace root changes. */
@@ -586,8 +584,7 @@ export class FileTreePanel {
     closeBtn.className = "file-tree-header__btn";
     closeBtn.title = "Close File Tree";
     closeBtn.setAttribute("aria-label", "Close File Tree");
-    closeBtn.innerHTML =
-      `<svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" aria-hidden="true"><line x1="4" y1="4" x2="12" y2="12"/><line x1="12" y1="4" x2="4" y2="12"/></svg>`;
+    closeBtn.innerHTML = `<svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" aria-hidden="true"><line x1="4" y1="4" x2="12" y2="12"/><line x1="12" y1="4" x2="4" y2="12"/></svg>`;
     closeBtn.addEventListener("click", (ev) => {
       ev.preventDefault();
       ev.stopPropagation();
@@ -619,7 +616,6 @@ export class FileTreePanel {
     header.appendChild(actions);
 
     this.deps.host.appendChild(header);
-    this.headerEl = header;
     this.headerRootRowEl = rootRow;
     this.headerRootNameEl = name;
   }

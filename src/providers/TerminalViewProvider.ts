@@ -500,9 +500,7 @@ export class TerminalViewProvider implements vscode.WebviewViewProvider {
           // Both file-tree messages are dispatched by FileTreeHost so the
           // sidebar / panel / editor providers share one wiring. See
           // providers/fileTreeHost.ts.
-          this.fileTreeHost.handleMessage(message, (response) =>
-            this.safePostMessage(webviewView.webview, response),
-          );
+          this.fileTreeHost.handleMessage(message, (response) => this.safePostMessage(webviewView.webview, response));
           break;
 
         case "updateHoverPreviewSetting":

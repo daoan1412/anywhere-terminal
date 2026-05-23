@@ -153,7 +153,7 @@
 .split-leaf:focus,
 .split-leaf:focus-visible,
 .split-leaf.active-pane {
-  outline: none !important;
+  outline: none;
 }
 
 /* ============================================================

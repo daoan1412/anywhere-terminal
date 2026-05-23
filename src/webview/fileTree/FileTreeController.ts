@@ -82,7 +82,11 @@ export class FileTreeController {
    */
   private lastWorkspaceRoot: string | null;
 
-  private constructor(panel: FileTreePanel, lastWorkspaceRoot: string | null, private readonly deps: FileTreeControllerDeps) {
+  private constructor(
+    panel: FileTreePanel,
+    lastWorkspaceRoot: string | null,
+    private readonly deps: FileTreeControllerDeps,
+  ) {
     this.panel = panel;
     this.lastWorkspaceRoot = lastWorkspaceRoot;
   }
