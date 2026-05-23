@@ -4,6 +4,17 @@ All notable changes to **AnyWhere Terminal** are documented in this file.
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.11.4] — 2026-05-23
+
+### Added
+
+- **VS Code-style git decorations in the file tree.** Files carry their git status as a single-letter badge (`M`, `A`, `U`, `D`, `C`, `R`) plus a color tint that follows the theme's `gitDecoration.*ResourceForeground` palette — modified yellow, untracked green, deleted red with strike-through, etc. Parent folders show a `•` indicator when any descendant is dirty (excluding `deleted` and `ignored`, matching VS Code Explorer). Works across sidebar, panel, and editor-tab file trees, driven by the built-in `vscode.git` extension — no separate dependency, and the tree degrades gracefully when git is disabled, uninstalled, or fails to activate.
+- **Decoration updates land within ~100 ms.** Status changes from the editor, terminal, or external tools propagate through a debounced delta channel; multiple bursts coalesce into a single repaint per window. A monotonic per-path revision counter rejects out-of-order applies so a stale snapshot can't overwrite a fresher delta.
+
+### Changed
+
+- **Scrollbar gutter widened around the git status badge** so the `M`/`A`/`U` letter is never overlapped by the vertical scrollbar when the file list is scrollable.
+
 ## [0.11.3] — 2026-05-23
 
 ### Added
