@@ -32,10 +32,14 @@ import { Emitter, type Event } from "vs/base/common/event";
 import type { IDisposable } from "vs/base/common/lifecycle.js";
 
 import type { ITreeDataSource } from "./ITreeDataSource";
-import type { ITemplateData, ITreeRenderer } from "./ITreeRenderer";
+import type { ITemplateData, ITreeMatch, ITreeMatchData, ITreeRenderer } from "./ITreeRenderer";
 
 /** Default row height for tree items (matches existing file-tree styling). */
 const DEFAULT_ROW_HEIGHT = 22;
+
+/** Re-exported aliases — the canonical types live in `ITreeRenderer.ts`. */
+export type IMatch = ITreeMatch;
+export type IMatchData = ITreeMatchData;
 
 /**
  * Internal flat row record. The Tree synthesizes one of these per visible
@@ -49,6 +53,12 @@ interface FlatRow<T> {
   readonly depth: number;
   readonly expanded: boolean;
   readonly hasChildren: boolean;
+  /**
+   * Per-row match metadata from `setFlatItems`'s matchMap. Passed through to
+   * the renderer for highlight rendering. Undefined for rows with no
+   * associated match data — renderers MUST treat `undefined` as "no highlights".
+   */
+  readonly matchData?: ITreeMatchData;
 }
 
 /**
@@ -132,6 +142,22 @@ export class Tree<T extends object, TTemplate extends ITemplateData = ITemplateD
   private readonly listDisposables: IDisposable[] = [];
   private disposed = false;
   private readonly hideRoot: boolean;
+  /**
+   * Flat-list override — when non-null, the underlying List renders these
+   * items directly at depth 0 (no tree walk, no filter, no expansion). Used
+   * for in-panel search result display. `setFlatItems(null)` restores normal
+   * tree rendering. See: add-file-tree-search design D3.
+   */
+  private _flatItems: T[] | null = null;
+  /** Optional matchData map for flat-list items. */
+  private _flatMatchData: ReadonlyMap<T, ITreeMatchData> | null = null;
+  /**
+   * Snapshot of the selected element at the moment flat-list mode was
+   * entered. Restored on `setFlatItems(null)` so the tree's pre-search
+   * selection survives a round-trip into the search results list and back.
+   * `undefined` means no snapshot is held (we're not in flat-list mode).
+   */
+  private _preFlatSelection: T | null | undefined;
 
   constructor(
     container: HTMLElement,
@@ -168,7 +194,7 @@ export class Tree<T extends object, TTemplate extends ITemplateData = ITemplateD
         // Track row-container so synchronous re-stamping (on expand/collapse,
         // or selection change) can find it without walking the DOM.
         this.elementToRowDom.set(row.element, t.container);
-        renderer.renderElement(row.element, row.depth, t.user);
+        renderer.renderElement(row.element, row.depth, t.user, row.matchData);
       },
       disposeTemplate: (t: InnerTemplate<TTemplate>) => renderer.disposeTemplate(t.user),
     };
@@ -666,6 +692,56 @@ export class Tree<T extends object, TTemplate extends ITemplateData = ITemplateD
   }
 
   /**
+   * Render `items` as a flat list at depth 0, bypassing the tree walk.
+   * Each item gets `matchMap?.get(item)` as its renderer `matchData`
+   * arg. Use for search-result display.
+   *
+   * Pass `null` to restore normal tree rendering — the previous selection +
+   * expansion set (held internally) are preserved because `setFlatItems` does
+   * NOT mutate the data source or the node cache, only the row presentation.
+   *
+   * Selection is cleared when entering and exiting flat-list mode; callers
+   * that need to restore selection MUST do so via `setSelection` after.
+   *
+   * See: asimov/changes/add-file-tree-search/specs/file-tree-widget/spec.md
+   */
+  setFlatItems(items: T[] | null, matchMap?: ReadonlyMap<T, ITreeMatchData>): void {
+    if (this.disposed) {
+      return;
+    }
+    const enteringFlat = items !== null && this._flatItems === null;
+    const exitingFlat = items === null && this._flatItems !== null;
+
+    if (enteringFlat) {
+      // Snapshot the pre-flat selection so `setFlatItems(null)` can restore
+      // it after the tree rebuild. The element reference survives because
+      // flat-list mode does NOT mutate the node cache.
+      this._preFlatSelection = this.getSelection();
+    }
+
+    this._flatItems = items;
+    this._flatMatchData = items ? (matchMap ?? null) : null;
+    // Selection / focus are cleared because the underlying List's row
+    // indices change; we re-apply selection AFTER the rebuild below for the
+    // exitingFlat case.
+    this.list.setSelection([]);
+    this.list.setFocus([]);
+    this.rebuildRows();
+
+    if (exitingFlat) {
+      const sel = this._preFlatSelection;
+      this._preFlatSelection = undefined;
+      if (sel) {
+        const index = this.indexOf(sel);
+        if (index >= 0) {
+          this.list.setSelection([index]);
+          this.list.setFocus([index]);
+        }
+      }
+    }
+  }
+
+  /**
    * Re-layout the underlying list. Wraps `List.layout(height, width)` so
    * callers don't need to reach through the public surface. In JSDOM the
    * container's bounding rect is 0x0 at construction time — tests MUST call
@@ -685,6 +761,56 @@ export class Tree<T extends object, TTemplate extends ITemplateData = ITemplateD
       return;
     }
     this.list.domFocus();
+  }
+
+  /**
+   * Move the row focus down by one. Used by search-mode keyboard navigation
+   * where the input element keeps DOM focus and arrow keys drive the list
+   * focus index via this method. Also scrolls the focused row into view.
+   * See: asimov/changes/add-file-tree-search/design.md D8.
+   */
+  focusNext(): void {
+    if (this.disposed || this.rows.length === 0) {
+      return;
+    }
+    this.list.focusNext();
+    const focused = this.list.getFocus();
+    if (focused.length > 0) {
+      this.list.reveal(focused[0]);
+    }
+  }
+
+  /** Move the row focus up by one. Counterpart to `focusNext`. */
+  focusPrevious(): void {
+    if (this.disposed || this.rows.length === 0) {
+      return;
+    }
+    this.list.focusPrevious();
+    const focused = this.list.getFocus();
+    if (focused.length > 0) {
+      this.list.reveal(focused[0]);
+    }
+  }
+
+  /**
+   * Return the currently-focused element, or `null` when nothing has row
+   * focus. Distinct from `getSelection()` — the search input keeps DOM
+   * focus while the user navigates results via arrow keys, so we use this
+   * to read the row the user wants to open with Enter.
+   */
+  getFocused(): T | null {
+    if (this.disposed) {
+      return null;
+    }
+    const indexes = this.list.getFocus();
+    if (indexes.length === 0) {
+      return null;
+    }
+    const idx = indexes[0];
+    if (idx < 0 || idx >= this.rows.length) {
+      return null;
+    }
+    return this.rows[idx].element;
   }
 
   /** Tear down the widget and clear emitters. */
@@ -797,7 +923,16 @@ export class Tree<T extends object, TTemplate extends ITemplateData = ITemplateD
       return;
     }
     const rows: FlatRow<T>[] = [];
-    if (this.root) {
+    if (this._flatItems) {
+      // Flat-list mode: bypass tree walk entirely. Emit one row per item at
+      // depth 0, attach matchData from the map (if any). Filter is NOT
+      // applied in this mode — callers are expected to have pre-filtered
+      // their input list. `hasChildren` is always false here.
+      for (const item of this._flatItems) {
+        const matchData = this._flatMatchData?.get(item);
+        rows.push({ element: item, depth: 0, expanded: false, hasChildren: false, matchData });
+      }
+    } else if (this.root) {
       if (this.hideRoot) {
         // Root is surfaced elsewhere (e.g. in the consumer's header). Skip
         // the root row itself and emit its expanded children at depth 0.
@@ -826,6 +961,11 @@ export class Tree<T extends object, TTemplate extends ITemplateData = ITemplateD
    * `element`. The root itself IS included — task 3_3 (the file-tree-only
    * scope) can hide it via a renderer-level check if needed; the generic
    * Tree<T> shows everything below `setInput`'s element.
+   *
+   * When `_filter` is installed, elements where `shouldRender` returns false
+   * are excluded — but their descendants ARE still walked (rebuildRows can
+   * filter at the leaf level even when an ancestor doesn't render). Match
+   * data, if the filter provides it, is attached to each emitted FlatRow.
    */
   private appendRows(element: T, depth: number, out: FlatRow<T>[]): void {
     const node = this.nodes.get(element);

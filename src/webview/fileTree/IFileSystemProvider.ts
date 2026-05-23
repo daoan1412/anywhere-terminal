@@ -28,6 +28,25 @@ export interface FileNode {
    * Explorer behaviour for gitignored files).
    */
   ignored?: boolean;
+  /**
+   * Set ONLY for rows produced by the in-panel search controller. Signals
+   * the renderer to switch to the search-row template (relative path
+   * label, optional match highlights, dimmed non-matches, overflow footer
+   * variant, error marker variant). Absent on every "real" file/folder.
+   *
+   * See: asimov/changes/add-file-tree-search/design.md D3 + D10.
+   */
+  searchRow?: SearchRowMeta;
+}
+
+/** Per-row search-mode metadata attached to a synthetic `FileNode`. */
+export interface SearchRowMeta {
+  /** Path relative to the active scope, forward-slash separated. Rendered as the row label. */
+  readonly relativePath: string;
+  /** Row variant — drives renderer dimming and click behaviour. */
+  readonly variant: "match" | "non-match" | "overflow-footer" | "error";
+  /** Error message text (only for `variant === 'error'`). */
+  readonly errorMessage?: string;
 }
 
 /**

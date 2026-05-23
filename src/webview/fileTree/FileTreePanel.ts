@@ -22,9 +22,12 @@
 // See: asimov/changes/port-vscode-async-data-tree/specs/file-tree-panel/spec.md
 
 import type {
+  CancelFileTreeSearchMessage,
   FileTreePosition,
+  FileTreeSearchResponseMessage,
   OpenFileMessage,
   ReadDirectoryResponseMessage,
+  RequestFileTreeSearchMessage,
   RequestReadDirectoryMessage,
   RequestSetFileTreePositionMessage,
 } from "../../types/messages";
@@ -33,13 +36,20 @@ import { FileSystemDataSource } from "./FileSystemDataSource";
 import { FileTreeSash, isHorizontalLayout } from "./FileTreeSash";
 import type { FileNode } from "./IFileSystemProvider";
 import { FILE_TREE_DRAG_MIME, ReadOnlyFileRenderer } from "./ReadOnlyFileRenderer";
+import { FileTreeSearchController, isSyntheticSearchRow } from "./search/FileTreeSearchController";
+import type { SearchMode } from "./search/matching";
 import { Tree } from "./Tree";
 
-// `postMessage` accepts both outbound types this panel can send. Kept as a
+// `postMessage` accepts all outbound types this panel can send. Kept as a
 // union (not `unknown`) so call sites get type-checking but the consumer can
 // pass through their existing webview vscode-api `postMessage` shape.
 export type FileTreePostMessage = (
-  m: RequestReadDirectoryMessage | OpenFileMessage | RequestSetFileTreePositionMessage,
+  m:
+    | RequestReadDirectoryMessage
+    | OpenFileMessage
+    | RequestSetFileTreePositionMessage
+    | RequestFileTreeSearchMessage
+    | CancelFileTreeSearchMessage,
 ) => void;
 
 /**
@@ -140,8 +150,24 @@ export class FileTreePanel {
   private headerRootRowEl: HTMLElement | null = null;
   /** Name span inside the header root row — updated whenever the workspace root changes. */
   private headerRootNameEl: HTMLElement | null = null;
+  /** Header search-toggle button — flips between `$(search)` and `$(close)` while in search mode. */
+  private headerSearchBtnEl: HTMLElement | null = null;
   /** Body container — the Tree (or empty state) mounts inside this, not into `host`. */
   private bodyEl: HTMLElement | null = null;
+  /**
+   * Whether the panel is in search-active mode. Transient — never persisted.
+   * See: asimov/changes/add-file-tree-search/design.md D9.
+   */
+  private searchActive = false;
+  /** Search controller — lazily constructed on first `enterSearch()`. */
+  private searchController: FileTreeSearchController | null = null;
+  /** Search-bar DOM (input + mode toggle). Owned by `mountHeader`. */
+  private searchBarEl: HTMLElement | null = null;
+  private searchInputEl: HTMLInputElement | null = null;
+  private searchModeFilterBtn: HTMLButtonElement | null = null;
+  private searchModeHighlightBtn: HTMLButtonElement | null = null;
+  /** Currently-resolved search scope (absolute path). Captured at entry. */
+  private currentSearchScope: string | null = null;
 
   constructor(private readonly deps: FileTreePanelDeps) {
     // Stamp the panel CSS class on the host so theme / position rules in
@@ -226,8 +252,10 @@ export class FileTreePanel {
     const revealRelativeTop = opts?.source === "autoReveal" ? 0.5 : undefined;
 
     // Out-of-current-root path or no tree mounted (empty state) → re-root.
+    // Use `isPathInside` (not raw `startsWith`) so `/work/repo2/x` doesn't
+    // get treated as inside `/work/repo`.
     const outOfRoot =
-      !this.tree || !this.rootNode || !this.workspaceRootPath || !absPath.startsWith(this.workspaceRootPath);
+      !this.tree || !this.rootNode || !this.workspaceRootPath || !isPathInside(absPath, this.workspaceRootPath);
     if (outOfRoot) {
       this.setRoot(absPath);
       // After re-root, the new rootNode IS the target. Reveal + select +
@@ -311,7 +339,7 @@ export class FileTreePanel {
   }
 
   handleActivate(node: FileNode): void {
-    if (this.disposed) {
+    if (this.disposed || isSyntheticSearchRow(node)) {
       return;
     }
     if (node.kind === "directory") {
@@ -420,6 +448,13 @@ export class FileTreePanel {
     // right value. Forgetting this was the original "tree silently empty
     // after workspace-folder change + reveal" bug.
     this.currentRootGeneration = msg.rootGeneration;
+    // Bubble the change into the search controller (cache invalidation).
+    this.searchController?.onWorkspaceRootChanged();
+    if (this.searchActive) {
+      // Exit search-active mode so the user lands on the new workspace's
+      // tree view rather than a stale search bar tied to the old scope.
+      this.exitSearch();
+    }
     // "rotate" strategy: the data source keeps its instance (which already
     // pinned the new generation via its own `handleRootChanged`) so any
     // in-flight RPC can be cancelled without leaking the cache structure.
@@ -461,6 +496,14 @@ export class FileTreePanel {
     this.resizeObserver = null;
     this.sash?.dispose();
     this.sash = null;
+    // Exit + drop the search controller BEFORE disposing the tree —
+    // the controller holds a `tree` reference captured at construction
+    // time, so leaving it cached would mean the next `enterSearch` posts
+    // results into a disposed tree (silent failure).
+    if (this.searchActive) {
+      this.exitSearch();
+    }
+    this.searchController = null;
     if (this.tree) {
       this.tree.dispose();
       this.tree = null;
@@ -526,6 +569,10 @@ export class FileTreePanel {
     if (this.disposed) {
       return;
     }
+    if (this.searchActive) {
+      this.exitSearch();
+    }
+    this.searchController = null;
     this.disposed = true;
     this.dragoverDetach?.();
     this.dragoverDetach = null;
@@ -593,48 +640,291 @@ export class FileTreePanel {
     const actions = doc.createElement("div");
     actions.className = "file-tree-header__actions";
 
-    // Close button — hides the panel. Equivalent to the toggle command
-    // running while the panel is open; reopen via the title-bar toggle
-    // command on the view.
-    const closeBtn = doc.createElement("button");
-    closeBtn.type = "button";
-    closeBtn.className = "file-tree-header__btn";
-    closeBtn.title = "Close File Tree";
-    closeBtn.setAttribute("aria-label", "Close File Tree");
-    closeBtn.innerHTML = `<svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" aria-hidden="true"><line x1="4" y1="4" x2="12" y2="12"/><line x1="12" y1="4" x2="4" y2="12"/></svg>`;
-    closeBtn.addEventListener("click", (ev) => {
-      ev.preventDefault();
-      ev.stopPropagation();
-      this.setOpen(false);
+    // Inline SVG provenance: microsoft/vscode codicon set (search / close /
+    // layout). Glyph paths copied verbatim for CSP compliance.
+    const searchBtn = makeHeaderButton(doc, {
+      label: "Search files",
+      svg: `<svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="7" cy="7" r="4.5"/><line x1="10.5" y1="10.5" x2="14" y2="14"/></svg>`,
+      onClick: () => this.toggleSearch(),
+    });
+    this.headerSearchBtnEl = searchBtn;
+
+    const closeBtn = makeHeaderButton(doc, {
+      label: "Close File Tree",
+      svg: `<svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" aria-hidden="true"><line x1="4" y1="4" x2="12" y2="12"/><line x1="12" y1="4" x2="4" y2="12"/></svg>`,
+      onClick: () => this.setOpen(false),
     });
 
-    // Move button — same flow as before: post `request-set-file-tree-position`,
-    // extension drives the QuickPick + posts `set-file-tree-position` back.
-    const moveBtn = doc.createElement("button");
-    moveBtn.type = "button";
-    moveBtn.className = "file-tree-header__btn";
-    moveBtn.title = "Move File Tree…";
-    moveBtn.setAttribute("aria-label", "Move File Tree");
-    // Layout codicon mirror — two side-by-side rectangles representing the
-    // split-pane orientation. `currentColor` picks up `--vscode-icon-foreground`.
-    moveBtn.innerHTML = `<svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.2" aria-hidden="true"><rect x="1.5" y="1.5" width="13" height="13" rx="0.5"/><line x1="6" y1="1.5" x2="6" y2="14.5"/></svg>`;
-    moveBtn.addEventListener("click", (ev) => {
-      ev.preventDefault();
-      ev.stopPropagation();
-      this.deps.postMessage({ type: "request-set-file-tree-position" });
+    const moveBtn = makeHeaderButton(doc, {
+      label: "Move File Tree",
+      title: "Move File Tree…",
+      svg: `<svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.2" aria-hidden="true"><rect x="1.5" y="1.5" width="13" height="13" rx="0.5"/><line x1="6" y1="1.5" x2="6" y2="14.5"/></svg>`,
+      onClick: () => this.deps.postMessage({ type: "request-set-file-tree-position" }),
     });
 
-    // Order: move first, then close. Close sits at the far right (matches
+    // Order: search → move → close. Close sits at the far right (matches
     // VS Code panel chrome where the "X" is always the outermost action).
+    actions.appendChild(searchBtn);
     actions.appendChild(moveBtn);
     actions.appendChild(closeBtn);
 
     header.appendChild(rootRow);
+
+    // ─── Search bar (created up-front, hidden until enterSearch) ─────
+    // Mounted as a sibling of the root row so the DOM swap is just a
+    // visibility toggle, not a re-attach. Sits BEFORE the actions cluster.
+    const searchBar = doc.createElement("div");
+    searchBar.className = "file-tree-search-bar";
+    searchBar.style.display = "none";
+
+    const input = doc.createElement("input");
+    input.type = "text";
+    input.className = "file-tree-search-input";
+    input.setAttribute("aria-label", "Search files");
+    input.spellcheck = false;
+    input.autocapitalize = "off";
+    input.autocomplete = "off";
+    searchBar.appendChild(input);
+
+    const modeToggle = doc.createElement("div");
+    modeToggle.className = "file-tree-search-mode-toggle";
+    modeToggle.setAttribute("role", "group");
+    modeToggle.setAttribute("aria-label", "Search mode");
+
+    const filterBtn = doc.createElement("button");
+    filterBtn.type = "button";
+    filterBtn.className = "file-tree-search-mode-toggle__btn";
+    filterBtn.textContent = "Filter";
+    filterBtn.title = "Filter — show only matching files";
+    filterBtn.addEventListener("click", (ev) => {
+      ev.preventDefault();
+      ev.stopPropagation();
+      this.setSearchMode("filter");
+      input.focus();
+    });
+
+    const highlightBtn = doc.createElement("button");
+    highlightBtn.type = "button";
+    highlightBtn.className = "file-tree-search-mode-toggle__btn";
+    highlightBtn.textContent = "Highlight";
+    highlightBtn.title = "Highlight — show all files, matches highlighted";
+    highlightBtn.addEventListener("click", (ev) => {
+      ev.preventDefault();
+      ev.stopPropagation();
+      this.setSearchMode("highlight");
+      input.focus();
+    });
+
+    modeToggle.appendChild(filterBtn);
+    modeToggle.appendChild(highlightBtn);
+    searchBar.appendChild(modeToggle);
+
+    header.appendChild(searchBar);
     header.appendChild(actions);
 
     this.deps.host.appendChild(header);
     this.headerRootRowEl = rootRow;
     this.headerRootNameEl = name;
+    this.searchBarEl = searchBar;
+    this.searchInputEl = input;
+    this.searchModeFilterBtn = filterBtn;
+    this.searchModeHighlightBtn = highlightBtn;
+  }
+
+  /**
+   * Toggle the panel between idle and search-active modes. Real DOM swap
+   * (root row → search bar) is mounted in 4_3 via `enterSearch()` /
+   * `exitSearch()`. This stub keeps the click handler bound during 4_2
+   * so the button is interactive from the moment it appears.
+   */
+  private toggleSearch(): void {
+    if (this.searchActive) {
+      this.exitSearch();
+    } else {
+      this.enterSearch();
+    }
+  }
+
+  /**
+   * Resolve the search scope for THIS search session.
+   *
+   * If the current Tree selection is a folder, the scope is its absolute
+   * path; otherwise the scope is the workspace root (or the current tree
+   * root when the workspace root is null, e.g. user navigated out via OSC 7).
+   * Captured once at entry and held constant for the duration of the session.
+   *
+   * See: asimov/changes/add-file-tree-search/design.md D2.
+   */
+  private resolveSearchScope(): string | null {
+    const selected = this.tree?.getSelection();
+    if (selected && selected.kind === "directory") {
+      return selected.path;
+    }
+    return this.workspaceRootPath ?? this.rootNode?.path ?? null;
+  }
+
+  /** Update the placeholder + button-pressed state to reflect current mode/scope. */
+  private syncSearchBarUI(scope: string | null): void {
+    if (!this.searchInputEl || !this.searchModeFilterBtn || !this.searchModeHighlightBtn) {
+      return;
+    }
+    const folderName = scope ? scope.split(/[\\/]/).pop() : null;
+    this.searchInputEl.placeholder =
+      folderName && scope !== this.workspaceRootPath ? `Search in ${folderName}` : "Search files";
+    const mode = this.readPersistedSearchMode();
+    this.searchModeFilterBtn.classList.toggle("is-active", mode === "filter");
+    this.searchModeFilterBtn.setAttribute("aria-pressed", mode === "filter" ? "true" : "false");
+    this.searchModeHighlightBtn.classList.toggle("is-active", mode === "highlight");
+    this.searchModeHighlightBtn.setAttribute("aria-pressed", mode === "highlight" ? "true" : "false");
+  }
+
+  /** Read `FileTreeState.searchMode` via the persisted-state callback; default 'filter'. */
+  private readPersistedSearchMode(): SearchMode {
+    const persisted = this.deps.getPersistedState?.();
+    return persisted?.searchMode ?? "filter";
+  }
+
+  /** Write back the searchMode preference (only field of search state we persist). */
+  private writePersistedSearchMode(mode: SearchMode): void {
+    const persisted = this.deps.getPersistedState?.();
+    if (!persisted) {
+      return;
+    }
+    this.deps.persistState?.({ ...persisted, searchMode: mode });
+  }
+
+  /** Click handler for the Filter/Highlight toggle. */
+  private setSearchMode(mode: SearchMode): void {
+    this.writePersistedSearchMode(mode);
+    this.syncSearchBarUI(this.currentSearchScope);
+    this.searchController?.setMode(mode);
+  }
+
+  /**
+   * Lazily construct the search controller. Idempotent — returns the cached
+   * instance after the first call.
+   */
+  private getOrCreateSearchController(): FileTreeSearchController | null {
+    if (this.searchController) {
+      return this.searchController;
+    }
+    if (!this.tree) {
+      return null;
+    }
+    this.searchController = new FileTreeSearchController({
+      tree: this.tree,
+      post: (m) => this.deps.postMessage(m),
+      getRootGeneration: () => this.currentRootGeneration,
+    });
+    return this.searchController;
+  }
+
+  /**
+   * Enter search-active mode: hide the root row, show the search bar, focus
+   * the input on the same tick, capture the scope, and start the controller.
+   */
+  private enterSearch(): void {
+    if (this.searchActive || !this.tree) {
+      return;
+    }
+    const controller = this.getOrCreateSearchController();
+    if (!controller) {
+      return;
+    }
+    const scope = this.resolveSearchScope();
+    if (!scope) {
+      return;
+    }
+    this.searchActive = true;
+    this.currentSearchScope = scope;
+
+    if (this.headerRootRowEl) {
+      this.headerRootRowEl.style.display = "none";
+    }
+    if (this.searchBarEl) {
+      this.searchBarEl.style.display = "";
+    }
+    if (this.headerSearchBtnEl) {
+      this.headerSearchBtnEl.setAttribute("aria-label", "Close search");
+      this.headerSearchBtnEl.setAttribute("title", "Close search");
+    }
+    if (this.searchInputEl) {
+      this.searchInputEl.value = "";
+      this.syncSearchBarUI(scope);
+      this.searchInputEl.focus();
+      // Wire input handlers — re-attach each entry so listener identity
+      // stays trivial (no add/remove pair across sessions).
+      this.searchInputEl.oninput = () => {
+        controller.setQuery(this.searchInputEl?.value ?? "");
+      };
+      this.searchInputEl.onkeydown = (ev) => this.onSearchKeyDown(ev);
+    }
+    controller.enter(scope, this.readPersistedSearchMode());
+  }
+
+  /** Exit search-active mode: restore the tree, drop the controller state. */
+  private exitSearch(): void {
+    if (!this.searchActive) {
+      return;
+    }
+    this.searchActive = false;
+    this.currentSearchScope = null;
+    if (this.searchInputEl) {
+      this.searchInputEl.oninput = null;
+      this.searchInputEl.onkeydown = null;
+      this.searchInputEl.value = "";
+    }
+    if (this.searchBarEl) {
+      this.searchBarEl.style.display = "none";
+    }
+    if (this.headerRootRowEl) {
+      this.headerRootRowEl.style.display = "";
+    }
+    if (this.headerSearchBtnEl) {
+      this.headerSearchBtnEl.setAttribute("aria-label", "Search files");
+      this.headerSearchBtnEl.setAttribute("title", "Search files");
+    }
+    this.searchController?.exit();
+  }
+
+  /** Keyboard handler attached to the search input. */
+  private onSearchKeyDown(ev: KeyboardEvent): void {
+    if (!this.tree) {
+      return;
+    }
+    switch (ev.key) {
+      case "ArrowDown":
+        ev.preventDefault();
+        this.tree.focusNext();
+        return;
+      case "ArrowUp":
+        ev.preventDefault();
+        this.tree.focusPrevious();
+        return;
+      case "Enter": {
+        ev.preventDefault();
+        const focused = this.tree.getFocused();
+        if (!focused) {
+          return;
+        }
+        // Route through the same activation path normal clicks use — keeps
+        // the no-active-session drop behavior consistent and skips synthetic
+        // rows via the guard inside handleActivate().
+        this.handleActivate(focused);
+        return;
+      }
+      case "Escape":
+        ev.preventDefault();
+        this.exitSearch();
+        return;
+      default:
+        return;
+    }
+  }
+
+  /** Public hook so the controller-message router can deliver responses. */
+  public handleSearchResponse(msg: FileTreeSearchResponseMessage): void {
+    this.searchController?.onResponse(msg);
   }
 
   /**
@@ -777,7 +1067,13 @@ export class FileTreePanel {
     if (!this.deps.persistState) {
       return;
     }
+    // Preserve fields owned by other writers (currently `searchMode`,
+    // written via writePersistedSearchMode) — without this read-merge a
+    // routine expand/collapse/setOpen/setPosition would clobber the
+    // user's saved search-mode preference.
+    const existing = this.deps.getPersistedState?.();
     this.deps.persistState({
+      ...(existing ?? {}),
       open: this.open,
       position: this.currentPosition,
       expandedPaths: Array.from(this.expandedPaths),
@@ -861,4 +1157,39 @@ function basename(p: string): string {
     return p;
   }
   return p.slice(lastSlash + 1) || p;
+}
+
+/**
+ * Containment check that's safe across `repo` / `repo2` siblings (a naive
+ * `startsWith(root)` matches `/work/repo2/x` against `/work/repo`). Treats
+ * `root === absPath` as containment and accepts either path separator.
+ */
+function isPathInside(absPath: string, root: string): boolean {
+  if (absPath === root) {
+    return true;
+  }
+  return absPath.startsWith(`${root}/`) || absPath.startsWith(`${root}\\`);
+}
+
+/**
+ * Build one of the header action buttons. Shared shape: 14×14 icon, single
+ * SVG payload, click handler with preventDefault + stopPropagation so the
+ * click doesn't bubble into the root-row toggle behind it.
+ */
+function makeHeaderButton(
+  doc: Document,
+  opts: { label: string; svg: string; onClick: () => void; title?: string },
+): HTMLButtonElement {
+  const btn = doc.createElement("button");
+  btn.type = "button";
+  btn.className = "file-tree-header__btn";
+  btn.title = opts.title ?? opts.label;
+  btn.setAttribute("aria-label", opts.label);
+  btn.innerHTML = opts.svg;
+  btn.addEventListener("click", (ev) => {
+    ev.preventDefault();
+    ev.stopPropagation();
+    opts.onClick();
+  });
+  return btn;
 }

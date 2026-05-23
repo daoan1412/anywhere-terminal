@@ -23,6 +23,7 @@
 
 import * as vscode from "vscode";
 import type {
+  FileTreeSearchResponseMessage,
   ReadDirectoryResponseMessage,
   RevealInFileTreeMessage,
   SetFileTreePositionMessage,
@@ -31,6 +32,7 @@ import type {
 } from "../types/messages";
 import { ActiveFileRevealer } from "./ActiveFileRevealer";
 import { handleRequestReadDirectory, type RootProvider, readEnabledExcludePatterns } from "./fileTreeRpcHandler";
+import { createDefaultSearchVscodeApi, FileTreeSearchHandler } from "./fileTreeSearchHandler";
 
 /**
  * Init-message fields the host contributes. Providers spread this into their
@@ -54,6 +56,12 @@ export interface FileTreeInitPayload {
  */
 export class FileTreeHost implements RootProvider {
   public rootGeneration = 0;
+
+  /**
+   * Stateful search handler — owns at most one in-flight enumeration.
+   * Lazily constructed on first `request-file-tree-search`.
+   */
+  private searchHandler: FileTreeSearchHandler | null = null;
 
   /** Absolute path of the first workspace folder, or null when no workspace is open. */
   get workspaceRoot(): string | null {
@@ -102,7 +110,12 @@ export class FileTreeHost implements RootProvider {
       (msg) => deps.post(msg),
     );
 
-    return vscode.Disposable.from(workspaceFolderSub, revealer);
+    return vscode.Disposable.from(workspaceFolderSub, revealer, {
+      dispose: () => {
+        this.searchHandler?.dispose();
+        this.searchHandler = null;
+      },
+    });
   }
 
   /**
@@ -118,11 +131,28 @@ export class FileTreeHost implements RootProvider {
    */
   handleMessage(
     msg: WebViewToExtensionMessage,
-    post: (m: ReadDirectoryResponseMessage | SetFileTreePositionMessage) => void,
+    post: (m: ReadDirectoryResponseMessage | SetFileTreePositionMessage | FileTreeSearchResponseMessage) => void,
   ): boolean {
     switch (msg.type) {
       case "request-read-directory":
         void handleRequestReadDirectory(msg, this, post, vscode.workspace.fs, vscode.Uri, readEnabledExcludePatterns());
+        return true;
+      case "request-file-tree-search":
+        if (!this.searchHandler) {
+          this.searchHandler = new FileTreeSearchHandler(this, createDefaultSearchVscodeApi());
+        }
+        void this.searchHandler.handle(msg).then((response) => {
+          // null response = drop (cancelled / stale-post-findFiles).
+          if (response) {
+            post(response);
+          }
+        });
+        return true;
+      case "cancel-file-tree-search":
+        // Webview signalled it no longer needs the in-flight enumeration
+        // (search bar closed / workspace root changed). Idempotent — the
+        // handler is null when nothing's in flight.
+        this.searchHandler?.cancelCurrent();
         return true;
       case "request-set-file-tree-position":
         // Drive the QuickPick locally so the response lands on THIS webview

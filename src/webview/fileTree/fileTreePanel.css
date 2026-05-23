@@ -296,6 +296,97 @@
   display: block;
 }
 
+/* ============================================================
+ * Search bar (add-file-tree-search)
+ * ============================================================ */
+
+.file-tree-search-bar {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.file-tree-search-input {
+  flex: 1 1 auto;
+  min-width: 0;
+  height: 22px;
+  padding: 0 6px;
+  background: var(--vscode-input-background);
+  color: var(--vscode-input-foreground);
+  border: 1px solid var(--vscode-input-border, transparent);
+  border-radius: 2px;
+  font-size: inherit;
+  font-family: inherit;
+  outline: none;
+}
+.file-tree-search-input::placeholder {
+  color: var(--vscode-input-placeholderForeground, var(--vscode-descriptionForeground));
+}
+.file-tree-search-input:focus {
+  outline: 1px solid var(--vscode-focusBorder);
+  outline-offset: -1px;
+}
+
+.file-tree-search-mode-toggle {
+  display: inline-flex;
+  align-items: stretch;
+  border: 1px solid var(--vscode-input-border, var(--vscode-contrastBorder, transparent));
+  border-radius: 2px;
+  overflow: hidden;
+  flex-shrink: 0;
+}
+.file-tree-search-mode-toggle__btn {
+  height: 22px;
+  padding: 0 8px;
+  background: transparent;
+  color: var(--vscode-foreground);
+  border: none;
+  cursor: pointer;
+  font-size: 11px;
+  line-height: 1;
+}
+.file-tree-search-mode-toggle__btn:hover {
+  background: var(--vscode-toolbar-hoverBackground, rgba(128, 128, 128, 0.15));
+}
+.file-tree-search-mode-toggle__btn.is-active {
+  background: var(--vscode-button-secondaryBackground, var(--vscode-list-activeSelectionBackground));
+  color: var(--vscode-button-secondaryForeground, var(--vscode-list-activeSelectionForeground));
+}
+
+/* ============================================================
+ * Search-result rows (flat-list mode)
+ * ============================================================ */
+
+.file-tree-row.is-search-row {
+  /* Override the depth-based padding from renderElement — search rows
+   * are always at the panel's left edge. */
+  padding-left: 8px;
+}
+.file-tree-row.is-search-row--non-match,
+.file-tree-row.is-search-row--non-match .name {
+  color: var(--vscode-disabledForeground, var(--vscode-descriptionForeground));
+}
+.file-tree-row.is-search-row--overflow-footer,
+.file-tree-row.is-search-row--overflow-footer .name {
+  color: var(--vscode-descriptionForeground);
+  cursor: default;
+  font-style: italic;
+}
+.file-tree-row.is-search-row--error,
+.file-tree-row.is-search-row--error .name {
+  color: var(--vscode-errorForeground, #f48771);
+  cursor: default;
+}
+
+/* Matched-character highlight span produced by renderHighlightedText. */
+.file-tree-search-match {
+  background: var(--vscode-list-filterMatchBackground, rgba(234, 92, 0, 0.33));
+  border: 1px solid var(--vscode-list-filterMatchBorder, transparent);
+  border-radius: 2px;
+}
+
 /* Body — owns the tree's list mount. Takes the remaining space and clips
  * overflow so the virtualized list controls its own scrollbar. */
 .file-tree-body {

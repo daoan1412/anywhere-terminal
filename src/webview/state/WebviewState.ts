@@ -26,6 +26,15 @@ export interface FileTreeState {
    * Drag-resize via the sash boundary writes this back.
    */
   size?: number;
+  /**
+   * In-panel file-tree search mode toggle. `filter` (default) shows only
+   * scoring matches; `highlight` shows all enumerated files with non-matches
+   * dimmed. Survives panel close/reopen. The query string itself is NOT
+   * persisted — only this mode preference.
+   *
+   * See: asimov/changes/add-file-tree-search/design.md D9.
+   */
+  searchMode?: "filter" | "highlight";
 }
 
 /** Where this webview is mounted — drives default file-tree position. */

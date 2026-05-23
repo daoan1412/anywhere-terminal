@@ -11,7 +11,9 @@
 
 import { beforeAll, describe, expect, it } from "vitest";
 import type {
+  CancelFileTreeSearchMessage,
   OpenFileMessage,
+  RequestFileTreeSearchMessage,
   RequestReadDirectoryMessage,
   RequestSetFileTreePositionMessage,
 } from "../../types/messages";
@@ -39,7 +41,12 @@ beforeAll(() => {
   }
 });
 
-type AnyMsg = RequestReadDirectoryMessage | OpenFileMessage | RequestSetFileTreePositionMessage;
+type AnyMsg =
+  | RequestReadDirectoryMessage
+  | OpenFileMessage
+  | RequestSetFileTreePositionMessage
+  | RequestFileTreeSearchMessage
+  | CancelFileTreeSearchMessage;
 
 function createHost(): HTMLElement {
   const host = document.createElement("div");
@@ -114,6 +121,31 @@ describe("FileTreePanel", () => {
       name: "main.ts",
       path: "/workspace/src/main.ts",
       kind: "file",
+    });
+
+    const openFileMsgs = posted.filter((m): m is OpenFileMessage => m.type === "openFile");
+    expect(openFileMsgs).toHaveLength(0);
+
+    panel.dispose();
+  });
+
+  it("does NOT activate synthetic search footer rows", () => {
+    const host = createHost();
+    const posted: AnyMsg[] = [];
+
+    const panel = new FileTreePanel({
+      host,
+      workspaceRoot: "/workspace",
+      rootGeneration: 5,
+      getActiveSessionId: () => "sess-A",
+      postMessage: (m) => posted.push(m),
+    });
+
+    panel.handleActivate({
+      name: "Showing first 2000 files in scope — narrow your scope to see more",
+      path: "__overflow__",
+      kind: "file",
+      searchRow: { relativePath: "__overflow__", variant: "overflow-footer" },
     });
 
     const openFileMsgs = posted.filter((m): m is OpenFileMessage => m.type === "openFile");

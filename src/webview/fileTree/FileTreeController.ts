@@ -16,6 +16,7 @@
 // See: review round-1 follow-up — Oracle #3 (cross-cutting integration).
 
 import type {
+  FileTreeSearchResponseMessage,
   ReadDirectoryResponseMessage,
   RevealInFileTreeMessage,
   SetFileTreePositionMessage,
@@ -152,6 +153,10 @@ export class FileTreeController {
 
   handleSetPosition(msg: SetFileTreePositionMessage): void {
     this.panel.setPosition(msg.position);
+  }
+
+  handleSearchResponse(msg: FileTreeSearchResponseMessage): void {
+    this.panel.handleSearchResponse(msg);
   }
 
   handleReveal(msg: RevealInFileTreeMessage): void {

@@ -30,7 +30,8 @@
 
 import { resolveSetiIcon } from "../../vendor/seti/setiIconResolver";
 import type { FileNode } from "./IFileSystemProvider";
-import type { ITemplateData, ITreeRenderer } from "./ITreeRenderer";
+import type { ITemplateData, ITreeMatchData, ITreeRenderer } from "./ITreeRenderer";
+import { renderHighlightedText } from "./search/renderHighlightedText";
 
 /** Custom MIME type that authoritatively marks a drag as originating from this file tree. */
 export const FILE_TREE_DRAG_MIME = "application/x-anywhere-terminal-file-tree-path";
@@ -99,8 +100,25 @@ export class ReadOnlyFileRenderer implements ITreeRenderer<FileNode, RowTemplate
     return template;
   }
 
-  public renderElement(element: FileNode, depth: number, template: RowTemplate): void {
+  public renderElement(element: FileNode, depth: number, template: RowTemplate, matchData?: ITreeMatchData): void {
     template.row.dataset.depth = String(depth);
+
+    // Clear all search-row class variants up front so a recycled template
+    // doesn't carry stale state from a prior render (search → normal tree).
+    template.row.classList.remove(
+      "is-search-row",
+      "is-search-row--match",
+      "is-search-row--non-match",
+      "is-search-row--overflow-footer",
+      "is-search-row--error",
+    );
+
+    if (element.searchRow) {
+      this.renderSearchRow(element, template, matchData);
+      template.currentElement = element;
+      return;
+    }
+
     // Indent step = chevron/icon (16) + flex gap (4) = 20px, so each deeper
     // level's leading glyph sits roughly under its parent's NAME first letter.
     template.row.style.paddingLeft = `${20 + depth * 20}px`;
@@ -112,6 +130,8 @@ export class ReadOnlyFileRenderer implements ITreeRenderer<FileNode, RowTemplate
     // visible glyph sits flush against the depth-padding boundary.
     template.chevron.classList.toggle("chevron-hidden", isFile);
     template.icon.classList.toggle("icon-hidden", !isFile);
+    // Tree rows are draggable; search rows are not (toggled inside `renderSearchRow`).
+    template.row.setAttribute("draggable", "true");
 
     // Dim gitignored rows. The flag flows from the extension host via
     // `FileEntry.ignored` → `FileNode.ignored`. CSS lowers opacity on this class.
@@ -129,10 +149,57 @@ export class ReadOnlyFileRenderer implements ITreeRenderer<FileNode, RowTemplate
       template.icon.style.color = "";
     }
 
+    // Plain text — restore in case the row was previously a search row.
+    template.name.replaceChildren();
     template.name.textContent = element.name;
 
     // Bind the element to the template so the dragstart listener can read it.
     template.currentElement = element;
+  }
+
+  /**
+   * Render a synthetic search row (search results / overflow footer /
+   * error marker). The flat-list layout omits the chevron + icon — the name
+   * span spans the full row at zero indent.
+   */
+  private renderSearchRow(element: FileNode, template: RowTemplate, matchData: ITreeMatchData | undefined): void {
+    const meta = element.searchRow;
+    if (!meta) {
+      return;
+    }
+    // Flat-list rows have no chevron and no icon — both slots collapse.
+    template.chevron.classList.add("chevron-hidden");
+    template.icon.classList.add("icon-hidden");
+    template.icon.classList.remove("seti-file-icon");
+    template.icon.textContent = "";
+    template.icon.style.color = "";
+    template.row.classList.remove("is-ignored");
+    template.row.classList.add("is-search-row");
+    template.row.style.paddingLeft = "8px";
+    template.row.classList.add(`is-search-row--${meta.variant}`);
+
+    // Synthetic rows (overflow footer / error marker) are NOT draggable
+    // and have no click target — the panel keyboard handler skips them.
+    if (meta.variant === "overflow-footer" || meta.variant === "error") {
+      template.row.setAttribute("draggable", "false");
+    } else {
+      template.row.setAttribute("draggable", "true");
+    }
+
+    // Clear the prior name content so we can re-build with text + spans.
+    template.name.replaceChildren();
+    if (meta.variant === "error") {
+      template.name.textContent = meta.errorMessage ?? element.name;
+      return;
+    }
+    if (meta.variant === "overflow-footer") {
+      template.name.textContent = element.name;
+      return;
+    }
+    // match / non-match — render the relativePath, highlighting matched
+    // ranges when matchData is present. Non-matched rows show the path
+    // dimmed via the `is-search-row--non-match` CSS class.
+    renderHighlightedText(template.name, meta.relativePath, matchData?.matches);
   }
 
   public disposeTemplate(template: RowTemplate): void {

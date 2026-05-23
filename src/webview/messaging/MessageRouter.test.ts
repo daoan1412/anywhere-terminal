@@ -33,6 +33,7 @@ function createMockHandlers(): MessageHandlers {
     onToggleFileTree: vi.fn(),
     onSetFileTreePosition: vi.fn(),
     onRevealInFileTree: vi.fn(),
+    onFileTreeSearchResponse: vi.fn(),
   };
 }
 

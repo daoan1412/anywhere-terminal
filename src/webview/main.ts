@@ -397,6 +397,9 @@ const routeMessage = createMessageRouter({
     }
     fileTreeController.handleReveal(msg);
   },
+  onFileTreeSearchResponse(msg) {
+    fileTreeController?.handleSearchResponse(msg);
+  },
 });
 
 // ─── Init & Bootstrap ───────────────────────────────────────────────

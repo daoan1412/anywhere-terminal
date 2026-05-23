@@ -35,13 +35,13 @@ export function readEnabledExcludePatterns(): string[] {
 }
 
 /**
- * Subset of `TerminalViewProvider` that the RPC handler needs. Defined as a
- * narrow interface so tests can construct a plain object without instantiating
- * the full provider.
+ * Subset of the provider that the file-tree RPC + search handlers need.
+ * Just the monotonic workspace-folder generation; consumers that need
+ * folder paths (e.g. the search handler historically did before policy
+ * alignment) layer that on themselves.
  */
 export interface RootProvider {
   readonly rootGeneration: number;
-  readonly workspaceRoot: string | null;
 }
 
 /**

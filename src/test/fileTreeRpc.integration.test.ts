@@ -83,8 +83,10 @@ afterAll(async () => {
 
 // ─── Helpers ────────────────────────────────────────────────────────
 
-function makeProvider(rootGeneration: number, workspaceRoot: string | null): RootProvider {
-  return { rootGeneration, workspaceRoot };
+function makeProvider(rootGeneration: number, _workspaceRoot: string | null): RootProvider {
+  // _workspaceRoot kept for caller-site backwards-compat; RootProvider only
+  // requires `rootGeneration` now (handler no longer reads workspaceRoot).
+  return { rootGeneration };
 }
 
 async function runRpc(msg: RequestReadDirectoryMessage, provider: RootProvider): Promise<ReadDirectoryResponseMessage> {

@@ -163,6 +163,50 @@ export interface OpenFileMessage {
 }
 
 /**
+ * Webview → Extension: enumerate ALL files inside a scope folder for the
+ * file-tree in-panel search. No query is included — the webview fuzzy-scores
+ * the returned enumeration client-side per keystroke, so one RPC covers the
+ * entire search session for the given (scope, rootGeneration) tuple.
+ *
+ * See: asimov/changes/add-file-tree-search/design.md D11.
+ */
+export interface RequestFileTreeSearchMessage {
+  type: "request-file-tree-search";
+  /** Correlation id — echoed in `FileTreeSearchResponseMessage.requestId`. */
+  requestId: string;
+  /** Webview's last-known workspace root generation. */
+  rootGeneration: number;
+  /** Absolute path to the scope folder to enumerate. */
+  scopePath: string;
+  /**
+   * Optional cap on returned items. Host clamps to [1, 5000]; omit to use
+   * the host default of 2000.
+   */
+  maxResults?: number;
+}
+
+/**
+ * Webview → Extension: cancel the host's current in-flight file-tree search
+ * enumeration. Sent when the user closes the search bar (Esc), exits the
+ * panel, or the workspace root changes mid-flight — so the host's
+ * `findFiles` + `git check-ignore` work doesn't run to completion just to
+ * have its response dropped on arrival.
+ */
+export interface CancelFileTreeSearchMessage {
+  type: "cancel-file-tree-search";
+}
+
+/** One file in the search-enumeration response. `relativePath` uses forward
+ * slashes on ALL platforms so client-side fuzzy ranking is path-separator
+ * agnostic. See: design.md D11. */
+export interface FileTreeSearchResult {
+  /** Absolute filesystem path (host-native separators). */
+  absolutePath: string;
+  /** Path relative to the request's `scopePath`, forward-slash separators. */
+  relativePath: string;
+}
+
+/**
  * Webview → Extension: read a directory's entries for the file-tree panel.
  * The host echoes `rootGeneration` back in the response so the webview can
  * discard responses bound to a stale workspace root (see design D10).
@@ -230,6 +274,8 @@ export type WebViewToExtensionMessage =
   | OpenFileMessage
   | RequestFilePreviewMessage
   | RequestReadDirectoryMessage
+  | RequestFileTreeSearchMessage
+  | CancelFileTreeSearchMessage
   | RequestSetFileTreePositionMessage
   | UpdateHoverPreviewSettingMessage;
 
@@ -535,6 +581,28 @@ export interface ReadDirectoryResponseMessage {
   error?: { code: string; message: string };
 }
 
+/**
+ * Extension → Webview: result of `RequestFileTreeSearchMessage`. Either
+ * `results` is set (success) or `error` is set. `truncated` is true when
+ * the enumeration hit the request's `maxResults` cap. The webview drops
+ * the response when `rootGeneration` no longer matches its current value.
+ *
+ * Error codes:
+ *   - `OUT_OF_WORKSPACE`: requested scopePath outside the active workspace.
+ *   - `STALE_ROOT`: request's `rootGeneration` no longer matches the host.
+ *   - `INTERNAL`: filesystem / findFiles error.
+ *
+ * See: asimov/changes/add-file-tree-search/design.md D11.
+ */
+export interface FileTreeSearchResponseMessage {
+  type: "file-tree-search-response";
+  requestId: string;
+  rootGeneration: number;
+  results?: FileTreeSearchResult[];
+  truncated?: boolean;
+  error?: { code: string; message: string };
+}
+
 /** Extension → Webview: show or hide the file-tree panel. */
 export interface ToggleFileTreeMessage {
   type: "toggle-file-tree";
@@ -611,6 +679,7 @@ export type ExtensionToWebViewMessage =
   | ThemeChangedMessage
   | HoverPreviewSettingsMessage
   | ReadDirectoryResponseMessage
+  | FileTreeSearchResponseMessage
   | ToggleFileTreeMessage
   | SetFileTreePositionMessage
   | WorkspaceRootChangedMessage

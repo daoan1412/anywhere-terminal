@@ -13,6 +13,7 @@ import type {
   ExitMessage,
   ExtensionToWebViewMessage,
   FilePreviewResultMessage,
+  FileTreeSearchResponseMessage,
   HoverPreviewSettingsMessage,
   InsertPathEffectMessage,
   OutputMessage,
@@ -66,6 +67,8 @@ export interface MessageHandlers {
   onToggleFileTree(msg: ToggleFileTreeMessage): void;
   onSetFileTreePosition(msg: SetFileTreePositionMessage): void;
   onRevealInFileTree(msg: RevealInFileTreeMessage): void;
+  // ── File-tree search (add-file-tree-search) ──
+  onFileTreeSearchResponse(msg: FileTreeSearchResponseMessage): void;
 }
 
 // ─── Factory ────────────────────────────────────────────────────────
@@ -154,6 +157,9 @@ export function createMessageRouter(handlers: MessageHandlers): (msg: ExtensionT
         break;
       case "reveal-in-file-tree":
         handlers.onRevealInFileTree(msg);
+        break;
+      case "file-tree-search-response":
+        handlers.onFileTreeSearchResponse(msg);
         break;
       case "init":
         // init is handled directly by main.ts — not routed
