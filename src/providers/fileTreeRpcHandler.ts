@@ -86,6 +86,17 @@ function nameMatchesAnyExclude(name: string, regexes: ReadonlyArray<RegExp>): bo
 const FILE_TYPE_FILE = 1;
 const FILE_TYPE_DIRECTORY = 2;
 
+// VS Code Explorer default sort: directories first, then files; alphabetic
+// within each group using locale-aware case-insensitive comparison so e.g.
+// `README` and `readme` sort together and `é` lands next to `e`.
+const nameCollator = new Intl.Collator(undefined, { sensitivity: "base", numeric: true });
+function compareEntries(a: FileEntry, b: FileEntry): number {
+  if (a.kind !== b.kind) {
+    return a.kind === "directory" ? -1 : 1;
+  }
+  return nameCollator.compare(a.name, b.name);
+}
+
 /**
  * Handle a `request-read-directory` message. Posts exactly one
  * `ReadDirectoryResponseMessage` per call, never throws.
@@ -186,7 +197,11 @@ export async function handleRequestReadDirectory(
     });
   }
 
-  // 6. Annotate gitignored entries. We invoke `git check-ignore --stdin` from
+  // 6. Sort: directories before files, then case-insensitive locale order
+  //    within each group (matches VS Code's default Explorer sort).
+  entries.sort(compareEntries);
+
+  // 7. Annotate gitignored entries. We invoke `git check-ignore --stdin` from
   //    the listed directory itself (`absPath`) so the matching honours the
   //    enclosing repo's .gitignore — even when the user navigated outside the
   //    workspace folder. Errors / timeout / non-git-repo collapse to an empty

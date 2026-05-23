@@ -168,6 +168,34 @@ describe("fileTreeRpcHandler integration", () => {
     expect(response.entries).toBeDefined();
   });
 
+  it("Scenario 4: directories sort before files; alphabetic, case-insensitive within each group (VS Code default)", async () => {
+    const sortDir = await fs.promises.mkdtemp(path.join(os.tmpdir(), "file-tree-rpc-sort-"));
+    try {
+      // Intentional mixed-case + interleaved kinds. OS-native order is rarely
+      // folder-first, so a passing assertion proves the handler sorts.
+      await fs.promises.writeFile(path.join(sortDir, "Zebra.md"), "");
+      await fs.promises.writeFile(path.join(sortDir, "apple.txt"), "");
+      await fs.promises.writeFile(path.join(sortDir, "banana.txt"), "");
+      await fs.promises.mkdir(path.join(sortDir, "alpha"));
+      await fs.promises.mkdir(path.join(sortDir, "Beta"));
+      await fs.promises.mkdir(path.join(sortDir, "gamma"));
+
+      const provider = makeProvider(7, sortDir);
+      const response = await runRpc(
+        { type: "request-read-directory", requestId: "req-sort", rootGeneration: 7, path: sortDir },
+        provider,
+      );
+
+      expect(response.error).toBeUndefined();
+      const names = (response.entries ?? []).map((e) => e.name);
+      // Directories first (alpha, Beta, gamma — case-insensitive), then files
+      // (apple.txt, banana.txt, Zebra.md — case-insensitive).
+      expect(names).toEqual(["alpha", "Beta", "gamma", "apple.txt", "banana.txt", "Zebra.md"]);
+    } finally {
+      await fs.promises.rm(sortDir, { recursive: true, force: true });
+    }
+  });
+
   it("workspaceRoot=null still allows reads — only STALE_ROOT and FS_ERROR remain as failure modes", async () => {
     const provider = makeProvider(7, null);
     const response = await runRpc(
