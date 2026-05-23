@@ -4,6 +4,22 @@ All notable changes to **AnyWhere Terminal** are documented in this file.
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.11.2] — 2026-05-23
+
+### Added
+
+- **Auto-reveal the active editor file in the File Tree.** Focusing an editor tab now expands ancestor folders, selects the file row, and scrolls it to the center of the tree — matching VS Code Explorer's `explorer.autoReveal`. Works across sidebar, panel, and editor file-tree hosts.
+- **`anywhereTerminal.fileTree.autoReveal`** (`boolean | "focusNoScroll"`, default `true`) — set to `false` to disable, or to `"focusNoScroll"` to highlight the active file without scrolling the tree.
+- **`anywhereTerminal.fileTree.autoRevealExclude`** (glob object, default `{ "**/node_modules": true, "**/bower_components": true }`) — paths matching any pattern (or whose ancestor folder matches) are skipped. Per-platform case sensitivity (case-insensitive on macOS/Windows, case-sensitive on Linux); invalid globs are dropped with a one-time console warning.
+
+### Changed
+
+- **Terminal vertical scrollbar is visible again and matches the file-tree style.** xterm v6's scrollbar was previously zeroed out via a 1px overview-ruler lane plus transparent slider colors. Those overrides are removed; `ThemeManager` now wires the slider to VS Code's `--vscode-scrollbarSlider-*` tokens, and `XtermFitService` stops reserving horizontal space for it — the scrollbar overlays the rightmost cells on hover/scroll instead of pushing columns inward.
+
+### Fixed
+
+- **No more background flicker when dragging a sidebar terminal wider.** `ResizeCoordinator` was re-classifying the webview as `panel` vs `sidebar` from the container's aspect ratio on every `ResizeObserver` tick and pushing that into `ThemeManager`, so once the user crossed the `width > height * 1.2` threshold the body background flipped between `--vscode-sideBar-background` and `--vscode-panel-background` (and xterm's `theme.background` followed). The real location is already baked into `data-terminal-location` at HTML-generation time, so the inference is removed entirely along with the unused `onLocationChange` callback and `WebviewShape` API.
+
 ## [0.11.1] — 2026-05-23
 
 ### Fixed
