@@ -125,4 +125,71 @@ describe("WebviewStateStore", () => {
     // Pane ID "deleted-pane" is not in the layout, so it should fall back to tabId
     expect(store.getActivePaneId("tab-1")).toBe("tab-1");
   });
+
+  // ── Typed WebviewState + fileTree persistence (port-vscode-async-data-tree task 4_5) ──
+
+  it("legacy fileTree slot is migrated into fileTreeByLocation.sidebar on first read", () => {
+    // Simulate a state blob written before per-location bucketing was added.
+    api.setState({
+      fileTree: { open: true, position: "left", expandedPaths: ["/repo", "/repo/src"] },
+    });
+
+    const restored = store.getState();
+    expect(restored.fileTree).toBeUndefined();
+    expect(restored.fileTreeByLocation).toEqual({
+      sidebar: { open: true, position: "left", expandedPaths: ["/repo", "/repo/src"] },
+    });
+    // Migration is persisted so a second read sees the new shape directly.
+    const second = store.getState();
+    expect(second.fileTree).toBeUndefined();
+    expect(second.fileTreeByLocation?.sidebar?.position).toBe("left");
+  });
+
+  it("migration preserves existing sidebar bucket (new shape wins over legacy slot)", () => {
+    // Both slots populated — the new shape takes priority; legacy is dropped.
+    api.setState({
+      fileTree: { open: true, position: "left", expandedPaths: ["/old"] },
+      fileTreeByLocation: {
+        sidebar: { open: false, position: "right", expandedPaths: ["/new"] },
+      },
+    });
+
+    const restored = store.getState();
+    expect(restored.fileTree).toBeUndefined();
+    expect(restored.fileTreeByLocation?.sidebar?.position).toBe("right");
+    expect(restored.fileTreeByLocation?.sidebar?.expandedPaths).toEqual(["/new"]);
+  });
+
+  it("getState returns {} (no throw) when persisted state lacks both fileTree slots", () => {
+    const layout = createBranch("vertical", createLeaf("s1"), createLeaf("s2"));
+    api.setState({
+      tabLayouts: { "tab-1": layout },
+      tabActivePaneIds: { "tab-1": "s2" },
+    });
+
+    const restored = store.getState();
+    expect(restored.fileTree).toBeUndefined();
+    expect(restored.fileTreeByLocation).toBeUndefined();
+    expect(restored.tabLayouts).toEqual({ "tab-1": layout });
+  });
+
+  it("updateState({fileTreeByLocation}) preserves unrelated top-level keys (additive schema)", () => {
+    const layout = createBranch("vertical", createLeaf("s1"), createLeaf("s2"));
+    store.setLayout("tab-1", layout);
+    store.persist();
+
+    store.updateState({
+      fileTreeByLocation: {
+        sidebar: { open: false, position: "bottom", expandedPaths: [] },
+      },
+    });
+
+    const restored = store.getState();
+    expect(restored.tabLayouts).toEqual({ "tab-1": layout });
+    expect(restored.fileTreeByLocation?.sidebar).toEqual({
+      open: false,
+      position: "bottom",
+      expandedPaths: [],
+    });
+  });
 });

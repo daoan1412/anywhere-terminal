@@ -18,7 +18,9 @@ import type {
   InitMessage,
   ThemeChangedMessage,
 } from "../types/messages";
+import { SETI_FONT_CSS } from "../vendor/seti/setiFontCss";
 import { DragDropHandler } from "./DragDropHandler";
+import { FileTreeController } from "./fileTree/FileTreeController";
 import { FlowControl } from "./flow/FlowControl";
 import type { HoverPreviewThemeKind } from "./links/HoverPreviewController";
 import { preloadSyntaxHighlighter } from "./links/syntaxRenderer";
@@ -31,6 +33,17 @@ import { hideRenameOverlay, repositionRenameOverlay, showRenameOverlay } from ".
 import { TerminalFactory } from "./terminal/TerminalFactory";
 import { type TerminalLocation, ThemeManager } from "./theme/ThemeManager";
 import { showBanner } from "./ui/BannerService";
+
+// Inject the vendored Seti icon-font @font-face rule (with the woff embedded
+// as a data URL) into the document. Lives in the webview bundle because
+// esbuild's `.woff: dataurl` loader is configured only for webviewConfig;
+// inlining at runtime keeps the extension bundle free of the ~50 KB font.
+(() => {
+  const styleEl = document.createElement("style");
+  styleEl.setAttribute("data-source", "seti-icon-font");
+  styleEl.textContent = SETI_FONT_CSS;
+  document.head.appendChild(styleEl);
+})();
 
 // Kick off Shiki highlighter init in the background; first hover will then
 // render synchronously. Failures fall back to plain text in the popup.
@@ -115,6 +128,12 @@ const splitRenderer = new SplitTreeRenderer({
   postMessage: (msg) => vscode.postMessage(msg),
   onTabBarUpdate: () => updateTabBar(),
 });
+
+// File-tree controller — instantiated lazily on init once we know workspaceRoot +
+// rootGeneration from the host. Owns the FileTreePanel + all router handlers
+// for the file-tree subsystem. See: webview/fileTree/FileTreeController.ts
+// and port-vscode-async-data-tree spec.
+let fileTreeController: FileTreeController | null = null;
 
 // ─── Orchestration ──────────────────────────────────────────────────
 
@@ -362,6 +381,29 @@ const routeMessage = createMessageRouter({
       controller.setDebounceMs(msg.settings.delay);
     }
   },
+  // ── File-tree (port-vscode-async-data-tree) ──
+  // All five handlers delegate to FileTreeController, which owns the panel
+  // and the lastWorkspaceRoot fallback used by reveal. See
+  // webview/fileTree/FileTreeController.ts.
+  onReadDirectoryResponse(msg) {
+    fileTreeController?.handleReadDirectoryResponse(msg);
+  },
+  onWorkspaceRootChanged(msg) {
+    fileTreeController?.handleWorkspaceRootChanged(msg);
+  },
+  onToggleFileTree() {
+    fileTreeController?.handleToggle();
+  },
+  onSetFileTreePosition(msg) {
+    fileTreeController?.handleSetPosition(msg);
+  },
+  onRevealInFileTree(msg) {
+    if (!fileTreeController) {
+      console.warn("[AnyWhere Terminal] reveal-in-file-tree: no file tree controller mounted");
+      return;
+    }
+    fileTreeController.handleReveal(msg);
+  },
 });
 
 // ─── Init & Bootstrap ───────────────────────────────────────────────
@@ -389,6 +431,31 @@ function handleInit(msg: InitMessage): void {
     resizeCoordinator.setup(containerEl);
     dragDropHandler.setup(containerEl);
   }
+
+  // File-tree controller — mount once per session. Per-location persistence,
+  // defaults, seed-vs-restore, and all five router handlers live inside the
+  // controller. See: webview/fileTree/FileTreeController.ts.
+  const fileTreeHost = document.getElementById("file-tree");
+  const layoutWrapper = document.getElementById("webview-layout");
+  if (fileTreeHost && layoutWrapper) {
+    fileTreeController = FileTreeController.mount({
+      fileTreeHost,
+      layoutWrapper,
+      init: { workspaceRoot: msg.workspaceRoot, rootGeneration: msg.rootGeneration },
+      store,
+      postMessage: (m) => vscode.postMessage(m),
+      getActiveSessionId: () => {
+        const tabId = store.activeTabId;
+        if (!tabId) {
+          return null;
+        }
+        return store.tabActivePaneIds.get(tabId) ?? tabId;
+      },
+      onLayoutChange: () => resizeCoordinator.debouncedFit(),
+      getInstanceCwd: (sessionId) => store.terminals.get(sessionId)?.cwd ?? null,
+    });
+  }
+
   store.persist();
   updateTabBar();
   showDragDropTip();

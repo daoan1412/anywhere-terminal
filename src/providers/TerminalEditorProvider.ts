@@ -3,6 +3,7 @@ import * as vscode from "vscode";
 import type { SessionManager } from "../session/SessionManager";
 import { readTerminalConfig, readTerminalSettings } from "../settings/SettingsReader";
 import type { ThemeChangedMessage, WebViewToExtensionMessage } from "../types/messages";
+import { FileTreeHost } from "./fileTreeHost";
 import { affectsHoverPreview, readHoverPreviewSettings, updateHoverPreviewSetting } from "./hoverPreviewSettings";
 import { openExternalLink } from "./openExternalLink";
 import { DEFAULT_FIND_FILES_MAX_RESULTS, openFileLink } from "./openFileLink";
@@ -72,6 +73,51 @@ export class TerminalEditorProvider {
   private _ready = false;
   /** The WebviewPanel managed by this instance. */
   private readonly _panel: vscode.WebviewPanel;
+  /**
+   * Shared file-tree wiring (rootGeneration, workspaceRoot getter,
+   * onDidChangeWorkspaceFolders subscription, message dispatch). Same
+   * companion class TerminalViewProvider uses — single point of change
+   * keeps the sidebar / panel / editor providers in lockstep.
+   * See: providers/fileTreeHost.ts; design.md D10.
+   */
+  private readonly fileTreeHost = new FileTreeHost();
+
+  /** Public accessor for `extension.ts` ctx command routing. */
+  get rootGeneration(): number {
+    return this.fileTreeHost.rootGeneration;
+  }
+
+  /** Public accessor for `extension.ts` ctx command routing. */
+  get workspaceRoot(): string | null {
+    return this.fileTreeHost.workspaceRoot;
+  }
+
+  /** Public accessor — used by `extension.ts` to route ctx commands. */
+  getViewId(): string {
+    return this._viewId;
+  }
+
+  /** Public accessor — used by `extension.ts` to post messages to this panel. */
+  get panel(): vscode.WebviewPanel {
+    return this._panel;
+  }
+
+  /**
+   * Find the editor provider whose `_viewId` matches the given session's
+   * `viewId`. Returns undefined when no editor instance owns that session
+   * (e.g. it's a sidebar/panel session).
+   */
+  static findByViewId(viewId: string): TerminalEditorProvider | undefined {
+    if (!viewId.startsWith("editor-")) {
+      return undefined;
+    }
+    for (const provider of TerminalEditorProvider._instances.values()) {
+      if (provider._viewId === viewId) {
+        return provider;
+      }
+    }
+    return undefined;
+  }
 
   /** In-flight hover-preview cancellation tokens, keyed by `sessionId`. See: design.md D9, D10 */
   private readonly _previewTokens = new Map<string, vscode.CancellationTokenSource>();
@@ -168,6 +214,15 @@ export class TerminalEditorProvider {
         if (e.webviewPanel.visible && this._ready) {
           this.safePostMessage({ type: "viewShow" });
         }
+      }),
+    );
+
+    // 3c. Workspace-folder bridge — delegated to fileTreeHost so all three
+    // providers (sidebar/panel/editor) stay in lockstep on file-tree state.
+    disposables.push(
+      this.fileTreeHost.attach({
+        isReady: () => this._ready,
+        post: (msg) => this.safePostMessage(msg),
       }),
     );
 
@@ -366,6 +421,14 @@ export class TerminalEditorProvider {
           }
           break;
 
+        case "request-read-directory":
+        case "request-set-file-tree-position":
+          // Both file-tree messages are dispatched by FileTreeHost so the
+          // sidebar / panel / editor providers share one wiring. See
+          // providers/fileTreeHost.ts.
+          this.fileTreeHost.handleMessage(message, (response) => this.safePostMessage(response));
+          break;
+
         case "openLink":
           if (typeof message.url === "string") {
             void openExternalLink(message.url);
@@ -460,6 +523,7 @@ export class TerminalEditorProvider {
         type: "init",
         tabs,
         config: readTerminalConfig(),
+        ...this.fileTreeHost.initPayload(),
       });
     } catch (err) {
       console.error("[AnyWhere Terminal] Failed to initialize editor terminal:", err);

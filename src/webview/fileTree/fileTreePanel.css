@@ -1,0 +1,483 @@
+/* src/webview/fileTree/fileTreePanel.css — Styles for the file-tree panel.
+ *
+ * Inlined into the webview <style> block at HTML-generation time by
+ * `src/providers/webviewHtml.ts` (see Wave 3 task 1_5). The vendored
+ * VS Code list-widget CSS (`.monaco-list`, `.monaco-scrollable-element`)
+ * is injected separately by webviewHtml.ts.
+ *
+ * Theme variables follow the existing VS Code variable scheme so the panel
+ * automatically adapts to dark / light / high-contrast themes. See:
+ *   - specs/file-tree-panel/spec.md#requirement-theme-integration
+ *   - design.md D8 (chevron via inline SVG)
+ *   - design.md D5 (4-side layout)
+ */
+
+/* ============================================================
+ * Row
+ * ============================================================ */
+
+.file-tree-row {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  height: 22px;
+  cursor: pointer;
+  color: var(--vscode-foreground);
+  background: transparent;
+  user-select: none;
+}
+
+/* Gitignored rows — dimmed to match VS Code's Explorer. `--vscode-list-deemphasizedForeground`
+ * is what VS Code uses for the same purpose; we fall back to a 55% opacity tint when
+ * the variable isn't defined by the active theme. */
+.file-tree-row.is-ignored,
+.file-tree-row.is-ignored .name,
+.file-tree-row.is-ignored .icon {
+  color: var(--vscode-list-deemphasizedForeground, var(--vscode-foreground));
+  opacity: 0.55;
+}
+
+/* Hover + selection backgrounds live on the OUTER `.monaco-list-row` (stamped
+ * by the vendored list widget) rather than the inner `.file-tree-row`.
+ * The outer row also carries the focus outline (`-1px` inset), so painting
+ * the background on the inner element would visually cover the outline — the
+ * outer placement keeps both visible at the same time, matching VS Code's
+ * Explorer behaviour. */
+.monaco-list-row:hover {
+  background: var(--vscode-list-hoverBackground);
+}
+
+/* Active selection — list is focused. Foreground colour cascades into the
+ * inner `.file-tree-row` and `.name` span automatically. */
+.monaco-list.element-focused .monaco-list-row.selected {
+  background: var(--vscode-list-activeSelectionBackground);
+  color: var(--vscode-list-activeSelectionForeground);
+}
+
+/* Inactive selection — list lost focus but the row stays remembered. */
+.monaco-list:not(.element-focused) .monaco-list-row.selected {
+  background: var(--vscode-list-inactiveSelectionBackground, var(--vscode-list-activeSelectionBackground));
+  color: var(--vscode-list-inactiveSelectionForeground, var(--vscode-list-activeSelectionForeground));
+}
+
+/* Chevron — rendered as a Unicode glyph in a fixed-width slot. Using a real
+ * character (vs CSS `mask`) avoids the data-URL SVG color-inheritance pitfall
+ * (`currentColor` doesn't resolve inside a standalone SVG document) and
+ * works even if `--vscode-icon-foreground` is undefined in the host theme. */
+.file-tree-row .chevron {
+  width: 16px;
+  height: 16px;
+  flex-shrink: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--vscode-icon-foreground, var(--vscode-foreground));
+  opacity: 0.8;
+  font-size: 16px;
+  line-height: 1;
+  font-weight: 600;
+  /* Center the chevron inside its 16px slot — the rotate transform pivots
+   * around the centre so collapsed↔expanded toggles in place. */
+  transform-origin: center;
+  transition: transform 0.1s ease;
+}
+
+.file-tree-row .chevron::before {
+  content: "›";
+}
+
+/* aria-expanded is stamped on the OUTER `.monaco-list-row` element (by
+ * Tree.stampAriaOnRow), not on `.file-tree-row` — so the chevron rotation
+ * selector must walk through the row container. */
+.monaco-list-row[aria-expanded="true"] .chevron,
+.file-tree-row[data-expanded="true"] .chevron,
+.file-tree-row[aria-expanded="true"] .chevron {
+  transform: rotate(90deg);
+}
+
+/* Icon slot — shared by folder + file rows; per-kind appearance comes from
+ * `.seti-file-icon` (font-based file glyph, see setiFontCss.ts) or stays
+ * hidden via `.icon-hidden` (folder rows). */
+.file-tree-row .icon {
+  width: 16px;
+  height: 16px;
+  flex-shrink: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  background-color: transparent;
+}
+
+/* `display: none` collapses the slot entirely. Per Seti convention, only
+ * one of (chevron, icon) is visible per row — folders show the chevron,
+ * files show the Seti glyph icon. The visible glyph sits flush against the
+ * row's `padding-left` so first-column alignment holds at any depth.
+ *
+ * Selector uses `.icon.icon-hidden` (two classes on the same element) to
+ * outrank the `.file-tree-row .icon { display: inline-flex }` rule above
+ * — same specificity + later in cascade would otherwise re-show the slot. */
+.file-tree-row .chevron.chevron-hidden,
+.file-tree-row .icon.icon-hidden {
+  display: none;
+}
+
+.file-tree-row .name {
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* The vendored listWidget stamps `.focused` on the row that has keyboard
+ * focus. We deliberately do NOT paint a focus outline on the row — the
+ * selection background is enough of a visual marker, and the orange focus
+ * border was intrusive for mouse-driven workflows.
+ *
+ * `listView.ts` sets `tabIndex = 0` on the `.monaco-list` element to make it
+ * keyboard-focusable. Browsers draw a default focus ring on focusable elements;
+ * the upstream list.css kills it via `.monaco-list.element-focused`, but that
+ * class is only applied AFTER a row is focused — there's a window (initial
+ * click on empty list, or via .focus() with no row trait) where the browser
+ * ring shows through. We kill the ring on the list itself + the split-leaf
+ * containers.
+ *
+ * The selectors are scoped narrowly — we deliberately do NOT use
+ * `.file-tree-panel *:focus(-visible)` because that universal descendant
+ * selector with `!important` also blanket-kills focus rings on every
+ * interactive child (e.g. the move-file-tree header button), which is a
+ * WCAG 2.4.7 regression for keyboard users. Header-button focus is restored
+ * via the explicit `.file-tree-header__btn:focus-visible` rule below. */
+.monaco-list:focus .monaco-list-row.focused,
+.monaco-list:focus,
+.monaco-list:focus-visible,
+.split-leaf:focus,
+.split-leaf:focus-visible,
+.split-leaf.active-pane {
+  outline: none !important;
+}
+
+/* ============================================================
+ * Empty state
+ * ============================================================ */
+
+.file-tree-empty {
+  padding: 12px;
+  color: var(--vscode-disabledForeground, var(--vscode-foreground));
+  font-style: italic;
+  font-size: 12px;
+  opacity: 0.8;
+}
+
+/* ============================================================
+ * Panel container — drag affordance + background
+ * ============================================================ */
+
+.file-tree-panel {
+  position: relative;
+  overflow: hidden;
+  background: var(--vscode-sideBar-background);
+  color: var(--vscode-foreground);
+  /* Drag-out is the only allowed dnd. Reject internal drops via JS — the
+   * visual "rejected" cursor comes from the dragover handler. */
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  min-width: 0;
+}
+
+.file-tree-panel.file-tree-hidden {
+  display: none;
+}
+
+/* Header strip — root row on the left (chevron + folder name), actions on
+ * the right (close + move buttons). Height matches the body row height
+ * (22px-ish) so visual rhythm with the list below stays consistent. */
+.file-tree-header {
+  flex: 0 0 24px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0 4px;
+  gap: 4px;
+  /* min-width: 0 lets the root row's name truncate cleanly when the panel
+   * shrinks rather than forcing the actions cluster off-screen. */
+  min-width: 0;
+}
+
+/* Root row — chevron + folder name. Behaves as a button (click toggles
+ * Tree.expand/collapse on the root). Uses cursor: pointer + hover bg to
+ * read as interactive. */
+.file-tree-header__root {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  flex: 1 1 auto;
+  min-width: 0;
+  height: 22px;
+  padding: 0 4px;
+  border-radius: 4px;
+  cursor: pointer;
+  user-select: none;
+  color: var(--vscode-foreground);
+  /* Slightly higher contrast than body rows — this is a heading. */
+  font-weight: 600;
+  font-size: 11px;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+}
+.file-tree-header__root:hover {
+  background: var(--vscode-list-hoverBackground);
+}
+.file-tree-header__root:focus-visible {
+  outline: 1px solid var(--vscode-focusBorder);
+  outline-offset: -1px;
+}
+
+.file-tree-header__root .chevron {
+  width: 16px;
+  height: 16px;
+  flex-shrink: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--vscode-icon-foreground, var(--vscode-foreground));
+  opacity: 0.8;
+  font-size: 16px;
+  line-height: 1;
+  font-weight: 600;
+  transition: transform 120ms ease-out;
+}
+.file-tree-header__root[aria-expanded="true"] .chevron {
+  transform: rotate(90deg);
+}
+
+.file-tree-header__root .name {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* Actions cluster — fixed-width buttons on the right. */
+.file-tree-header__actions {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  flex-shrink: 0;
+}
+
+.file-tree-header__btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  padding: 0;
+  background: transparent;
+  border: none;
+  color: var(--vscode-icon-foreground, var(--vscode-foreground));
+  cursor: pointer;
+  border-radius: 4px;
+  opacity: 0.85;
+}
+.file-tree-header__btn:hover {
+  background: var(--vscode-toolbar-hoverBackground, rgba(128, 128, 128, 0.15));
+  opacity: 1;
+}
+.file-tree-header__btn:active {
+  background: var(--vscode-toolbar-activeBackground, rgba(128, 128, 128, 0.25));
+}
+/* Keyboard focus indicator (WCAG 2.4.7). `:focus-visible` (NOT plain
+ * `:focus`) means mouse-driven workflows don't see the ring, only keyboard
+ * users do. The earlier outline-kill rule deliberately excludes this
+ * selector — restoring the ring here is the inverse of that narrowing. */
+.file-tree-header__btn:focus-visible {
+  outline: 1px solid var(--vscode-focusBorder);
+  outline-offset: -1px;
+}
+.file-tree-header__btn svg {
+  display: block;
+}
+
+/* Body — owns the tree's list mount. Takes the remaining space and clips
+ * overflow so the virtualized list controls its own scrollbar. */
+.file-tree-body {
+  flex: 1 1 auto;
+  position: relative;
+  overflow: hidden;
+  min-height: 0;
+  min-width: 0;
+}
+
+/* ============================================================
+ * 4-side layout (design D5)
+ *
+ * The wrapper `[file-tree-panel, terminal-area]` is sized via flexbox.
+ * Position class toggles flex direction + child order. The terminal area
+ * receives the remaining rectangle; the panel size is hard-coded for this
+ * change (user-resize is a future feature).
+ * ============================================================ */
+
+.webview-layout {
+  display: flex;
+  /* Inside the body flex column, this wrapper must consume remaining space
+   * after #tab-bar. min-height: 0 lets internal scroll containers behave.
+   */
+  flex: 1 1 auto;
+  min-height: 0;
+  width: 100%;
+}
+
+.terminal-area {
+  /* Owns the original #terminal-container as its only child. The original
+   * #terminal-container CSS sets `flex: 1` — for that to take effect,
+   * .terminal-area must itself be a flex container.
+   */
+  position: relative;
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 0;
+}
+
+/* The flex basis for each side comes from the `--file-tree-size` custom
+ * property which `FileTreePanel.applySize()` sets on the layout wrapper.
+ * Fallbacks differ by orientation so the panel still has a sensible default
+ * width/height before JS runs the first apply. */
+.webview-layout.file-tree--top {
+  flex-direction: column;
+}
+.webview-layout.file-tree--top .file-tree-panel {
+  order: 0;
+  flex: 0 0 var(--file-tree-size, 200px);
+}
+.webview-layout.file-tree--top .terminal-area {
+  order: 1;
+  flex: 1 1 auto;
+  min-height: 0;
+}
+
+.webview-layout.file-tree--bottom {
+  flex-direction: column;
+}
+.webview-layout.file-tree--bottom .terminal-area {
+  order: 0;
+  flex: 1 1 auto;
+  min-height: 0;
+}
+.webview-layout.file-tree--bottom .file-tree-panel {
+  order: 1;
+  flex: 0 0 var(--file-tree-size, 200px);
+}
+
+.webview-layout.file-tree--left {
+  flex-direction: row;
+}
+.webview-layout.file-tree--left .file-tree-panel {
+  order: 0;
+  flex: 0 0 var(--file-tree-size, 240px);
+}
+.webview-layout.file-tree--left .terminal-area {
+  order: 1;
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.webview-layout.file-tree--right {
+  flex-direction: row;
+}
+.webview-layout.file-tree--right .terminal-area {
+  order: 0;
+  flex: 1 1 auto;
+  min-width: 0;
+}
+.webview-layout.file-tree--right .file-tree-panel {
+  order: 1;
+  flex: 0 0 var(--file-tree-size, 240px);
+}
+
+/* ============================================================
+ * Resize sash — VS Code-style draggable boundary
+ *
+ * A 4px-wide invisible touch zone overlapping the panel's edge with a 1px
+ * visible highlight that appears on hover (after a 200 ms delay) or while
+ * the sash is actively being dragged. Sash sits on the edge that faces the
+ * terminal area; cursor switches to col-resize / row-resize depending on
+ * the panel's position.
+ * ============================================================ */
+.file-tree-panel .sash {
+  position: absolute;
+  z-index: 35;
+  touch-action: none;
+}
+
+.webview-layout.file-tree--left .file-tree-panel .sash {
+  cursor: col-resize;
+  width: 4px;
+  height: 100%;
+  right: -2px;
+  top: 0;
+}
+.webview-layout.file-tree--right .file-tree-panel .sash {
+  cursor: col-resize;
+  width: 4px;
+  height: 100%;
+  left: -2px;
+  top: 0;
+}
+.webview-layout.file-tree--top .file-tree-panel .sash {
+  cursor: row-resize;
+  height: 4px;
+  width: 100%;
+  bottom: -2px;
+  left: 0;
+}
+.webview-layout.file-tree--bottom .file-tree-panel .sash {
+  cursor: row-resize;
+  height: 4px;
+  width: 100%;
+  top: -2px;
+  left: 0;
+}
+
+/* The sash always paints a subtle 1px divider in the panel-border colour so
+ * users can SEE the boundary between terminal and explorer at all times.
+ * Hover / active brighten the line to the sash-hover colour. */
+.file-tree-panel .sash::before {
+  content: "";
+  position: absolute;
+  background: var(--vscode-panel-border, var(--vscode-sideBar-border, transparent));
+  transition: background-color 0.1s ease-out;
+  pointer-events: none;
+}
+.webview-layout.file-tree--left .file-tree-panel .sash::before,
+.webview-layout.file-tree--right .file-tree-panel .sash::before {
+  top: 0;
+  left: 50%;
+  transform: translateX(-50%);
+  width: 1px;
+  height: 100%;
+}
+.webview-layout.file-tree--top .file-tree-panel .sash::before,
+.webview-layout.file-tree--bottom .file-tree-panel .sash::before {
+  left: 0;
+  top: 50%;
+  transform: translateY(-50%);
+  height: 1px;
+  width: 100%;
+}
+.file-tree-panel .sash:hover::before,
+.file-tree-panel .sash.sash-active::before {
+  background: var(--vscode-sash-hoverBorder, var(--vscode-focusBorder));
+  transition-delay: 0.2s;
+}
+.file-tree-panel .sash.sash-active::before {
+  transition-delay: 0s;
+}
+
+/* When the file tree is closed, the terminal area takes the whole space. */
+.webview-layout.file-tree--closed .file-tree-panel {
+  display: none;
+}

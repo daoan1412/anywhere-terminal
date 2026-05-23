@@ -10,6 +10,7 @@
 // See: docs/design/message-protocol.md, research/drag-drop-terminal.md
 
 import { escapePathForShell } from "../utils/shellEscape";
+import { FILE_TREE_DRAG_MIME } from "./fileTree/ReadOnlyFileRenderer";
 
 // Re-export for backward compat with tests that import from this module
 export { escapePathForShell } from "../utils/shellEscape";
@@ -138,6 +139,16 @@ export interface DragDropHandlerDeps {
   /** Returns the active pane session ID (not the tab ID) for correct split-pane routing. */
   getActiveSessionId: () => string | null;
   getTerminalExited: () => boolean;
+  /**
+   * Resolve which pane lives under the given client-rect coordinates. Optional —
+   * when omitted, the handler falls back to a DOM walk for ancestors carrying
+   * `data-session-id` (set by SplitContainer on `.split-leaf` elements). Used
+   * by the in-webview file-tree drag-out path so a drop into a non-active pane
+   * targets the pane under the pointer rather than the active one.
+   *
+   * See: asimov/changes/port-vscode-async-data-tree/design.md D11.
+   */
+  resolveLeafAtPoint?: (x: number, y: number) => string | null;
 }
 
 /**
@@ -152,14 +163,38 @@ export class DragDropHandler {
   private readonly postMessage: (msg: unknown) => void;
   private readonly getActiveSessionId: () => string | null;
   private readonly getTerminalExited: () => boolean;
+  private readonly resolveLeafAtPoint: (x: number, y: number) => string | null;
   private dropOverlay: HTMLDivElement | null = null;
   private container: HTMLElement | null = null;
   private isSetup = false;
+  /**
+   * Sticky flag set on dragenter when the drag carries the file-tree custom
+   * MIME. Read by `updateOverlayHint` to skip the "Hold Shift" prompt and by
+   * `onDrop` to take the no-Shift branch. Cleared on dragleave/drop.
+   */
+  private fileTreeDragActive = false;
 
   constructor(deps: DragDropHandlerDeps) {
     this.postMessage = deps.postMessage;
     this.getActiveSessionId = deps.getActiveSessionId;
     this.getTerminalExited = deps.getTerminalExited;
+    this.resolveLeafAtPoint = deps.resolveLeafAtPoint ?? DragDropHandler.defaultResolveLeafAtPoint;
+  }
+
+  /**
+   * Default leaf resolver: walks ancestors of the element-at-point looking
+   * for `data-session-id`. SplitContainer stamps that attribute on every
+   * `.split-leaf` it renders, so this works without any extra wiring.
+   */
+  private static defaultResolveLeafAtPoint(x: number, y: number): string | null {
+    let el: Element | null = document.elementFromPoint(x, y);
+    while (el && el !== document.body) {
+      if (el instanceof HTMLElement && el.dataset.sessionId) {
+        return el.dataset.sessionId;
+      }
+      el = el.parentElement;
+    }
+    return null;
   }
 
   /**
@@ -188,6 +223,9 @@ export class DragDropHandler {
   // ─── Event Handlers (arrow functions for stable `this`) ─────────
 
   private onDragEnter = (e: DragEvent): void => {
+    // Sticky-mark in-webview file-tree drags so the rest of the gesture takes
+    // the no-Shift branch + skips the "Hold Shift" hint.
+    this.fileTreeDragActive = e.dataTransfer?.types.includes(FILE_TREE_DRAG_MIME) ?? false;
     this.showOverlay(e.shiftKey);
   };
 
@@ -206,24 +244,49 @@ export class DragDropHandler {
       return;
     }
     this.removeOverlay();
+    this.fileTreeDragActive = false;
   };
 
   private onDrop = (e: DragEvent): void => {
     e.preventDefault();
     this.removeOverlay();
+    const wasFileTreeDrag = this.fileTreeDragActive;
+    this.fileTreeDragActive = false;
 
-    // Guard: Shift must be held to allow drop (VS Code restores pointer-events on Shift)
-    if (!e.shiftKey) {
-      return;
-    }
-
-    // Guard: exited terminal — no-op
+    // Guard: exited terminal — no-op (applies to BOTH paths).
     if (this.getTerminalExited()) {
       return;
     }
 
     // Guard: no dataTransfer
     if (!e.dataTransfer) {
+      return;
+    }
+
+    // ── In-webview file-tree branch (design D11) ────────────────────
+    // Custom MIME present → bypass Shift, target the drop-point pane.
+    if (e.dataTransfer.types.includes(FILE_TREE_DRAG_MIME)) {
+      const path = e.dataTransfer.getData(FILE_TREE_DRAG_MIME);
+      if (!path) {
+        return;
+      }
+      const targetSessionId = this.resolveLeafAtPoint(e.clientX, e.clientY) ?? this.getActiveSessionId();
+      if (!targetSessionId) {
+        return;
+      }
+      this.postMessage({
+        type: "input",
+        tabId: targetSessionId,
+        data: `${escapePathForShell(path)} `,
+      });
+      return;
+    }
+
+    // ── OS-drag branch (legacy behavior, unchanged) ─────────────────
+    // Shift must be held to allow drop (VS Code restores pointer-events on Shift).
+    // Marked unreachable when wasFileTreeDrag because the branch above already returned.
+    void wasFileTreeDrag;
+    if (!e.shiftKey) {
       return;
     }
 
@@ -272,7 +335,9 @@ export class DragDropHandler {
     if (!this.dropOverlay) {
       return;
     }
-    if (shiftHeld) {
+    // In-webview file-tree drag never requires Shift — show the affirmative
+    // hint regardless of shiftHeld.
+    if (this.fileTreeDragActive || shiftHeld) {
       this.dropOverlay.style.backgroundColor =
         "var(--vscode-terminal-dropBackground, var(--vscode-editorGroup-dropBackground, rgba(83, 89, 93, 0.5)))";
       this.dropOverlay.style.opacity = "0.7";

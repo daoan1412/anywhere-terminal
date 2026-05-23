@@ -369,6 +369,72 @@ export class TerminalFactory {
       }
     });
 
+    // OSC 7 — shell-emitted current working directory updates. Modern shells
+    // (bash with PS1 hook, zsh with chpwd hook, fish with --print-rusage-self,
+    // VS Code shell integration scripts) emit
+    //   ESC ] 7 ; file://<hostname>/<encoded-path> BEL
+    // after every `cd`. The xterm parser strips the OSC 7 envelope and hands
+    // us the data payload. We parse out the path, decode percent-escapes,
+    // strip the host portion, and record it on the instance so the
+    // right-click "Reveal in File Explorer" command can resolve the active
+    // pane's pwd. Returning `false` lets other OSC 7 listeners (if any) see
+    // the sequence too.
+    terminal.parser.registerOscHandler(7, (data: string) => {
+      // Pre-decode DoS gate. A `%XX`-heavy payload can balloon ~3x when
+      // decoded, so cap the ENCODED form at 16 KB — comfortably above
+      // PATH_MAX (4 KB Linux, 1 KB macOS) even when every byte is
+      // percent-encoded. Anything larger is a bug or hostile.
+      if (data.length > 16384) {
+        return false;
+      }
+      // Strip optional `file://` scheme + hostname (xterm leaves the leading
+      // scheme intact). Patterns: `file://host/path`, `file:///path` (empty
+      // host), or sometimes just a bare path.
+      let raw = data;
+      const fileMatch = raw.match(/^file:\/\/([^/]*)(\/.*)$/);
+      if (fileMatch) {
+        raw = fileMatch[2];
+      }
+      let decoded: string;
+      try {
+        decoded = decodeURIComponent(raw);
+      } catch {
+        // Malformed escape — drop the OSC sequence rather than persisting a
+        // half-decoded payload that downstream consumers can't trust.
+        return false;
+      }
+      // PATH_MAX gate on the DECODED value (after percent-decode + scheme
+      // strip). 4 KB matches Linux PATH_MAX; macOS is lower (1 KB) but
+      // we accept up to PATH_MAX so non-conforming filesystems still work.
+      if (decoded.length > 4096) {
+        return false;
+      }
+      // Sanitize before writing. Same predicate as `src/pty/processCwd.ts`
+      // sanitize() — rejecting control bytes and requiring an absolute path
+      // closes a defense-in-depth gap where any process in the PTY (including
+      // remote SSH or hostile binaries) can emit `\e]7;file:///etc\x07` or
+      // arbitrary escapes. The downstream `fs.readDirectory` call is
+      // metadata-only and `path.resolve` normalizes traversal — so this is
+      // not a confidentiality boundary — but a pathological payload would
+      // otherwise sit in `instance.cwd` indefinitely.
+      // biome-ignore lint/suspicious/noControlCharactersInRegex: intentional — reject control chars from untrusted shell output.
+      if (/[\x00-\x1f\x7f]/.test(decoded)) {
+        return false;
+      }
+      if (!/^(?:\/|[A-Za-z]:[\\/])/.test(decoded)) {
+        return false;
+      }
+      // Linux /proc/<pid>/cwd appends " (deleted)" for unlinked directories.
+      // OSC 7 won't realistically emit this (it's a /proc artifact, not a
+      // shell concern) — but keeping it rejected makes the "same predicate
+      // as processCwd.ts:sanitize()" comment literally true.
+      if (decoded.endsWith(" (deleted)")) {
+        return false;
+      }
+      instance.cwd = decoded;
+      return false;
+    });
+
     // Initialize split layout for this tab (single leaf)
     if (!this.store.tabLayouts.has(id)) {
       this.store.tabLayouts.set(id, createLeaf(id));

@@ -9,6 +9,9 @@ import type { Terminal } from "@xterm/xterm";
 import type { TerminalConfig } from "../../types/messages";
 import type { SplitNode } from "../SplitModel";
 import { getAllSessionIds } from "../SplitModel";
+import type { WebviewState } from "./WebviewState";
+
+export type { WebviewState } from "./WebviewState";
 
 // ─── Types ──────────────────────────────────────────────────────────
 
@@ -27,6 +30,14 @@ export interface TerminalInstance {
   container: HTMLDivElement;
   /** Whether the PTY process has exited (terminal becomes read-only). */
   exited: boolean;
+  /**
+   * Latest current working directory reported by the shell via OSC 7
+   * (`ESC ]7;file://host/path BEL`). Modern shells emit this after every `cd`
+   * when shell integration is enabled. Drives the right-click
+   * "Reveal in File Explorer" command — without OSC 7 we fall back to the
+   * workspace root. Volatile (not persisted) — re-derived on each shell.
+   */
+  cwd?: string;
 }
 
 /** Minimal VS Code API interface for state persistence. */
@@ -125,6 +136,61 @@ export class WebviewStateStore {
   }
 
   /**
+   * Read the full typed `WebviewState` snapshot from `vscode.getState()`. Returns
+   * `{}` if no state has been written yet or if the persisted blob is malformed.
+   * Pure read — does NOT mutate any local maps; for that use `restore()`.
+   *
+   * Applies a one-shot migration: pre-bucketed `fileTree` slot is moved into
+   * `fileTreeByLocation.sidebar` (sidebar was the only location that existed
+   * before per-location bucketing was introduced). The migrated state is
+   * written back so callers never see the legacy slot again. Without this
+   * migration, callers reading the legacy slot would re-apply it indefinitely
+   * without ever persisting it under the new bucket — a "permanent ghost"
+   * read on every mount.
+   */
+  getState(): WebviewState {
+    try {
+      const raw = this.vscodeApi.getState();
+      if (!raw || typeof raw !== "object") {
+        return {};
+      }
+      const state = raw as WebviewState;
+      const legacy = state.fileTree;
+      if (legacy !== undefined) {
+        const bucketed = state.fileTreeByLocation ?? {};
+        // Only migrate if the sidebar bucket isn't already populated (the
+        // new-shape write takes precedence — legacy was never targeted at
+        // panel/editor mounts).
+        const migrated: WebviewState = {
+          ...state,
+          fileTreeByLocation: bucketed.sidebar ? bucketed : { ...bucketed, sidebar: legacy },
+          fileTree: undefined,
+        };
+        // Drop the legacy field entirely so future reads don't trip the
+        // migration check. Persist immediately — safe because setState is
+        // synchronous and idempotent.
+        this.vscodeApi.setState(migrated);
+        return migrated;
+      }
+      return state;
+    } catch {
+      return {};
+    }
+  }
+
+  /**
+   * Merge `patch` into the current persisted state and write it back. Top-level
+   * keys in `patch` REPLACE their counterparts in the existing state (matching
+   * `Object.assign` semantics) — pass an entire `fileTree` object to update
+   * any nested field, since this layer does not deep-merge.
+   */
+  updateState(patch: Partial<WebviewState>): void {
+    const current = this.getState();
+    const next: WebviewState = { ...current, ...patch };
+    this.vscodeApi.setState(next);
+  }
+
+  /**
    * Persist layout state to vscode.setState().
    * Serializes tabLayouts and tabActivePaneIds into the VS Code state store.
    */
@@ -137,8 +203,7 @@ export class WebviewStateStore {
     for (const [tabId, paneId] of this.tabActivePaneIds) {
       activePaneIds[tabId] = paneId;
     }
-    const currentState = (this.vscodeApi.getState() as Record<string, unknown>) ?? {};
-    this.vscodeApi.setState({ ...currentState, tabLayouts: layouts, tabActivePaneIds: activePaneIds });
+    this.updateState({ tabLayouts: layouts, tabActivePaneIds: activePaneIds });
   }
 
   /**

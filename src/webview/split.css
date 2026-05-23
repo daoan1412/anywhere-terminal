@@ -74,8 +74,10 @@
   cursor: row-resize;
 }
 
-/* Active pane indicator — only visible when tab has 2+ panes */
+/* Active pane indicator — only visible when tab has 2+ panes.
+ * We deliberately omit the outline: the cursor / focused input already
+ * signals which pane is active, and the orange focusBorder was intrusive
+ * (especially when clicking into the file tree column). */
 .split-leaf.active-pane {
-  outline: 1px solid var(--vscode-focusBorder, #007acc);
-  outline-offset: -1px;
+  /* no outline */
 }

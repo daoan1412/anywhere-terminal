@@ -207,3 +207,5 @@ Single atomic command — `scripts/release.sh` bumps, verifies, commits, tags, p
 ## License
 
 [MIT](LICENSE)
+
+This product incorporates third-party material. See [`THIRD_PARTY_NOTICES.md`](THIRD_PARTY_NOTICES.md) for provenance and license text.

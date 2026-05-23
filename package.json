@@ -256,8 +256,32 @@
         "title": "Split Horizontal"
       },
       {
+        "command": "anywhereTerminal.ctx.revealInFileTree",
+        "title": "Reveal in File Tree"
+      },
+      {
         "command": "anywhereTerminal.insertPath",
         "title": "Insert Path in AnyWhere Terminal"
+      },
+      {
+        "command": "anywhereTerminal.toggleFileTree",
+        "title": "AnyWhere Terminal: Toggle File Tree",
+        "icon": "$(list-tree)"
+      },
+      {
+        "command": "anywhereTerminal.toggleFileTree.sidebar",
+        "title": "AnyWhere Terminal: Toggle File Tree (Sidebar)",
+        "icon": "$(list-tree)"
+      },
+      {
+        "command": "anywhereTerminal.toggleFileTree.panel",
+        "title": "AnyWhere Terminal: Toggle File Tree (Panel)",
+        "icon": "$(list-tree)"
+      },
+      {
+        "command": "anywhereTerminal.setFileTreePosition",
+        "title": "AnyWhere Terminal: Move File Tree…",
+        "icon": "$(layout)"
       }
     ],
     "menus": {
@@ -301,6 +325,16 @@
           "command": "anywhereTerminal.killTerminal.panel",
           "when": "view == anywhereTerminal.panel",
           "group": "navigation"
+        },
+        {
+          "command": "anywhereTerminal.toggleFileTree.sidebar",
+          "when": "view == anywhereTerminal.sidebar",
+          "group": "navigation@99"
+        },
+        {
+          "command": "anywhereTerminal.toggleFileTree.panel",
+          "when": "view == anywhereTerminal.panel",
+          "group": "navigation@99"
         }
       ],
       "webview/context": [
@@ -333,6 +367,11 @@
           "command": "anywhereTerminal.ctx.splitHorizontal",
           "when": "webviewSection == 'splitPane'",
           "group": "split@3"
+        },
+        {
+          "command": "anywhereTerminal.ctx.revealInFileTree",
+          "when": "webviewSection == 'splitPane'",
+          "group": "navigation@1"
         }
       ],
       "explorer/context": [
@@ -367,6 +406,10 @@
           "when": "false"
         },
         {
+          "command": "anywhereTerminal.ctx.revealInFileTree",
+          "when": "false"
+        },
+        {
           "command": "anywhereTerminal.newTerminal.sidebar",
           "when": "false"
         },
@@ -397,6 +440,14 @@
         {
           "command": "anywhereTerminal.splitVertical.panel",
           "when": "false"
+        },
+        {
+          "command": "anywhereTerminal.toggleFileTree.sidebar",
+          "when": "false"
+        },
+        {
+          "command": "anywhereTerminal.toggleFileTree.panel",
+          "when": "false"
         }
       ]
     },
@@ -421,8 +472,9 @@
     "watch": "npm-run-all -p watch:*",
     "watch:esbuild": "node esbuild.js --watch",
     "watch:tsc": "tsc --noEmit --watch --project tsconfig.json",
-    "package": "pnpm run check-types && pnpm run lint && node esbuild.js --production && pnpm run build:check-size",
+    "package": "pnpm run check-types && pnpm run lint && pnpm run build:check-vendor && node esbuild.js --production && pnpm run build:check-size",
     "build:check-size": "node scripts/check-bundle-size.mjs",
+    "build:check-vendor": "node scripts/check-vendor-headers.mjs",
     "compile-tests": "tsc -p . --outDir out",
     "watch-tests": "tsc -p . -w --outDir out",
     "pretest": "pnpm run compile-tests && pnpm run compile && pnpm run lint",

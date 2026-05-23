@@ -15,6 +15,16 @@ import { getAllSessionIds } from "../SplitModel";
 /** Terminal location for resize-based inference. */
 type TerminalLocation = "panel" | "sidebar";
 
+/**
+ * Webview "shape" — same buckets as TerminalLocation, exposed under a more
+ * intent-revealing name for callers that don't care about terminal placement
+ * (e.g. the file-tree panel using shape to seed default position).
+ */
+export type WebviewShape = "panel" | "sidebar";
+
+/** Listener function signature for `onDidChangeShape`. */
+export type ShapeListener = (shape: WebviewShape) => void;
+
 /** Minimal terminal instance interface for fit operations. */
 interface FittableInstance {
   terminal: Terminal;
@@ -52,6 +62,14 @@ export class ResizeCoordinator {
   private fitTimeout: number | undefined;
   private splitFitTimeout: number | undefined;
   private observer: ResizeObserver | undefined;
+  /**
+   * Latest computed shape — seeded from the first ResizeObserver callback,
+   * then updated on every size change. Null until the observer has fired
+   * once.
+   */
+  private currentShapeValue: WebviewShape | null = null;
+  /** Listeners registered via `onDidChangeShape`. Fired only when shape flips. */
+  private readonly shapeListeners = new Set<ShapeListener>();
 
   private readonly fitTerminal: (instance: FittableInstance) => void;
   private readonly getState: () => ResizeState;
@@ -65,6 +83,29 @@ export class ResizeCoordinator {
     this.fitTerminal = fitTerminal;
     this.getState = getState;
     this.onLocationChange = onLocationChange;
+  }
+
+  // ─── Shape detection (added by port-vscode-async-data-tree D5) ───
+
+  /**
+   * Returns the most recently observed webview shape, or "sidebar" before the
+   * first observation (matches the historical pre-init default). File-tree
+   * default-position seeding (design D5) reads this on first reveal.
+   */
+  currentShape(): WebviewShape {
+    return this.currentShapeValue ?? "sidebar";
+  }
+
+  /**
+   * Subscribe to shape-flip events. The listener fires ONLY when the shape
+   * actually changes (panel↔sidebar) — not on every resize tick. The returned
+   * function unsubscribes.
+   */
+  onDidChangeShape(listener: ShapeListener): () => void {
+    this.shapeListeners.add(listener);
+    return () => {
+      this.shapeListeners.delete(listener);
+    };
   }
 
   /**
@@ -86,7 +127,14 @@ export class ResizeCoordinator {
           return;
         }
 
-        this.onLocationChange(ResizeCoordinator.inferLocationFromSize(width, height));
+        const shape = ResizeCoordinator.inferLocationFromSize(width, height);
+        this.onLocationChange(shape);
+        if (this.currentShapeValue !== shape) {
+          this.currentShapeValue = shape;
+          for (const l of this.shapeListeners) {
+            l(shape);
+          }
+        }
 
         this.debouncedFit();
       }

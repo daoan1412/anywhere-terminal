@@ -73,6 +73,11 @@ const extensionConfig = {
     "vscode", // Provided by VS Code runtime
     "node-pty", // Loaded dynamically from VS Code internals
   ],
+  loader: {
+    // webviewHtml.ts inlines vendored VS Code CSS strings into a <style> block.
+    // See: asimov/changes/port-vscode-async-data-tree/design.md D7
+    ".css": "text",
+  },
   sourcemap: !production,
   sourcesContent: false,
   minify: production,
@@ -88,6 +93,16 @@ const webviewConfig = {
   format: "iife",
   platform: "browser",
   target: "es2020",
+  alias: {
+    // Vendored VS Code list widget — see asimov/changes/port-vscode-async-data-tree/design.md D2
+    vs: path.resolve(__dirname, "src/vendor/vscode"),
+  },
+  loader: {
+    // Vendored Seti file-icon font — imported as a data URL so the entire
+    // font ships inside webview.js, no extra HTTP roundtrip in the webview
+    // sandbox. (~37 KB raw → ~50 KB base64.)
+    ".woff": "dataurl",
+  },
   // No externals — everything is bundled:
   //   @xterm/xterm, @xterm/addon-fit, @xterm/addon-web-links, @xterm/addon-webgl
   sourcemap: !production,

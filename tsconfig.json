@@ -3,11 +3,23 @@
     "module": "ESNext",
     "moduleResolution": "Bundler",
     "target": "ES2022",
-    "lib": ["ES2022", "DOM"],
+    "lib": ["ES2022", "DOM", "DOM.Iterable"],
     "sourceMap": true,
     "rootDir": "src",
+    "baseUrl": ".",
+    "paths": {
+      "vs/*": ["./src/vendor/vscode/*"]
+    },
     "strict": true,
-    "skipLibCheck": true
+    "skipLibCheck": true,
+    // The following two flags are required by the vendored VS Code list widget
+    // (see asimov/changes/port-vscode-async-data-tree/design.md D2). Upstream's
+    // tsconfig.base.json sets both. Flipping `useUnknownInCatchVariables` to
+    // `false` brings catch-clause typing back to `any` (TS ≤ 4.3 default); our
+    // app catch handlers are bare `catch (err)` with no explicit `: unknown`
+    // annotation, so the change is type-compatible.
+    "experimentalDecorators": true,
+    "useUnknownInCatchVariables": false
   },
   "exclude": ["vitest.config.mts"]
 }

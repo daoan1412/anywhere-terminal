@@ -2,6 +2,7 @@ import * as vscode from "vscode";
 import type { SessionManager } from "../session/SessionManager";
 import { readTerminalConfig, readTerminalSettings } from "../settings/SettingsReader";
 import type { ThemeChangedMessage, WebViewToExtensionMessage } from "../types/messages";
+import { FileTreeHost } from "./fileTreeHost";
 import { affectsHoverPreview, readHoverPreviewSettings, updateHoverPreviewSetting } from "./hoverPreviewSettings";
 import { openExternalLink } from "./openExternalLink";
 import { DEFAULT_FIND_FILES_MAX_RESULTS, openFileLink } from "./openFileLink";
@@ -65,6 +66,24 @@ export class TerminalViewProvider implements vscode.WebviewViewProvider {
    * See: asimov/changes/add-hover-file-preview/design.md D9, D10
    */
   private readonly _previewTokens = new Map<string, vscode.CancellationTokenSource>();
+
+  /**
+   * Shared file-tree wiring (rootGeneration counter, workspaceRoot getter,
+   * onDidChangeWorkspaceFolders subscription, message dispatch). Same
+   * instance lives on the editor provider; both delegate through it so the
+   * three providers never drift out of sync. See: design.md D10.
+   */
+  private readonly fileTreeHost = new FileTreeHost();
+
+  /** Public for external readers (extension.ts ctx commands). Forwarded to fileTreeHost. */
+  get rootGeneration(): number {
+    return this.fileTreeHost.rootGeneration;
+  }
+
+  /** Public for external readers. Forwarded to fileTreeHost. */
+  get workspaceRoot(): string | null {
+    return this.fileTreeHost.workspaceRoot;
+  }
 
   /** Public accessor for the current webview view. */
   get view(): vscode.WebviewView | undefined {
@@ -136,6 +155,15 @@ export class TerminalViewProvider implements vscode.WebviewViewProvider {
           type: "hoverPreviewSettings",
           settings: readHoverPreviewSettings(),
         });
+      }),
+    );
+
+    // 4a-ter. Workspace-folder bridge — delegated to fileTreeHost so the
+    // sidebar / panel / editor providers stay in lockstep.
+    disposables.push(
+      this.fileTreeHost.attach({
+        isReady: () => this._ready,
+        post: (msg) => this.safePostMessage(webviewView.webview, msg),
       }),
     );
 
@@ -467,6 +495,16 @@ export class TerminalViewProvider implements vscode.WebviewViewProvider {
           }
           break;
 
+        case "request-read-directory":
+        case "request-set-file-tree-position":
+          // Both file-tree messages are dispatched by FileTreeHost so the
+          // sidebar / panel / editor providers share one wiring. See
+          // providers/fileTreeHost.ts.
+          this.fileTreeHost.handleMessage(message, (response) =>
+            this.safePostMessage(webviewView.webview, response),
+          );
+          break;
+
         case "updateHoverPreviewSetting":
           // Webview-driven setting update (e.g. footer toggle). Persist into
           // vscode's user-scope configuration; the change fires
@@ -540,6 +578,7 @@ export class TerminalViewProvider implements vscode.WebviewViewProvider {
           type: "init",
           tabs: existingTabs,
           config: readTerminalConfig(),
+          ...this.fileTreeHost.initPayload(),
         });
 
         // Send 'restore' messages with scrollback data for each session
@@ -573,6 +612,7 @@ export class TerminalViewProvider implements vscode.WebviewViewProvider {
           type: "init",
           tabs,
           config: readTerminalConfig(),
+          ...this.fileTreeHost.initPayload(),
         });
       }
     } catch (err) {

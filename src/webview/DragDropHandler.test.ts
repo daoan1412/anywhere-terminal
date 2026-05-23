@@ -5,6 +5,7 @@
 
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { DragDropHandler, escapePathForShell, extractPathsFromDrop } from "./DragDropHandler";
+import { FILE_TREE_DRAG_MIME } from "./fileTree/ReadOnlyFileRenderer";
 
 // ─── 1. Path Escaping ───────────────────────────────────────────────
 // Port of VS Code's escapeNonWindowsPath() — default POSIX shell (bash/zsh)
@@ -313,5 +314,88 @@ describe("DragDropHandler", () => {
     const spy = vi.spyOn(event, "preventDefault");
     container.dispatchEvent(event);
     expect(spy).toHaveBeenCalled();
+  });
+
+  // ── File-tree drag-out branch (custom MIME, no-Shift) ──
+  // See: asimov/changes/port-vscode-async-data-tree/design.md D11.
+
+  it("drop with custom file-tree MIME bypasses Shift and routes to resolveLeafAtPoint", () => {
+    const customPostMessage = vi.fn();
+    const customContainer = document.createElement("div");
+    document.body.appendChild(customContainer);
+    const customHandler = new DragDropHandler({
+      postMessage: customPostMessage,
+      getActiveSessionId: () => "active-session",
+      getTerminalExited: () => false,
+      resolveLeafAtPoint: () => "leaf-under-pointer",
+    });
+    customHandler.setup(customContainer);
+
+    const dt = mockDataTransfer({
+      [FILE_TREE_DRAG_MIME]: "/repo/src/main.ts",
+      "text/plain": "/repo/src/main.ts",
+    });
+    // No Shift held — but the custom-MIME branch should still fire.
+    customContainer.dispatchEvent(makeDragEvent("drop", { dataTransfer: dt, shiftKey: false }));
+
+    expect(customPostMessage).toHaveBeenCalledTimes(1);
+    expect(customPostMessage).toHaveBeenCalledWith({
+      type: "input",
+      tabId: "leaf-under-pointer",
+      data: "'/repo/src/main.ts' ",
+    });
+    customContainer.remove();
+  });
+
+  it("drop with custom MIME falls back to active pane when resolveLeafAtPoint returns null", () => {
+    const fallbackPostMessage = vi.fn();
+    const fallbackContainer = document.createElement("div");
+    document.body.appendChild(fallbackContainer);
+    const fallbackHandler = new DragDropHandler({
+      postMessage: fallbackPostMessage,
+      getActiveSessionId: () => "active-session",
+      getTerminalExited: () => false,
+      resolveLeafAtPoint: () => null,
+    });
+    fallbackHandler.setup(fallbackContainer);
+
+    const dt = mockDataTransfer({
+      [FILE_TREE_DRAG_MIME]: "/repo/a.ts",
+      "text/plain": "/repo/a.ts",
+    });
+    fallbackContainer.dispatchEvent(makeDragEvent("drop", { dataTransfer: dt, shiftKey: false }));
+
+    expect(fallbackPostMessage).toHaveBeenCalledWith({
+      type: "input",
+      tabId: "active-session",
+      data: "'/repo/a.ts' ",
+    });
+    fallbackContainer.remove();
+  });
+
+  it("OS-drag without Shift remains a no-op (existing behavior unchanged)", () => {
+    // Standard non-custom drop without Shift → no message posted.
+    const dt = mockDataTransfer({ "text/plain": "/Users/me/file.txt" });
+    container.dispatchEvent(makeDragEvent("drop", { dataTransfer: dt, shiftKey: false }));
+    expect(postMessage).not.toHaveBeenCalled();
+  });
+
+  it("OS-drag with Shift still uses extractPathsFromDrop + active pane (existing behavior unchanged)", () => {
+    const dt = mockDataTransfer({ "text/plain": "/Users/me/file.txt" });
+    container.dispatchEvent(makeDragEvent("drop", { dataTransfer: dt, shiftKey: true }));
+    expect(postMessage).toHaveBeenCalledWith({
+      type: "input",
+      tabId: "session-1",
+      data: "'/Users/me/file.txt' ",
+    });
+  });
+
+  it("overlay text drops the 'Hold Shift' prompt during a file-tree drag", () => {
+    const dt = mockDataTransfer({
+      [FILE_TREE_DRAG_MIME]: "/repo/x.ts",
+    });
+    container.dispatchEvent(makeDragEvent("dragenter", { dataTransfer: dt, shiftKey: false }));
+    const overlay = container.querySelector(".terminal-drop-overlay");
+    expect(overlay?.textContent).toBe("Drop to insert path");
   });
 });

@@ -212,6 +212,7 @@ export const workspace: {
   onDidChangeConfiguration: (handler: (e: { affectsConfiguration: (section: string) => boolean }) => void) => {
     dispose: () => void;
   };
+  onDidChangeWorkspaceFolders: (handler: () => void) => { dispose: () => void };
   fs: { stat: (uri: { fsPath: string }) => Promise<{ type: number; ctime: number; mtime: number; size: number }> };
   findFiles: (
     include: string | RelativePattern,
@@ -222,6 +223,11 @@ export const workspace: {
 } = {
   workspaceFolders: undefined,
   getConfiguration: (section = "") => createMockConfiguration(section),
+  onDidChangeWorkspaceFolders: (_handler) => {
+    // Inert subscription — tests can drive root changes by setting `workspace.workspaceFolders`
+    // directly and calling the provider's relevant code path.
+    return { dispose: () => {} };
+  },
   onDidChangeConfiguration: (handler) => {
     _configChangeHandlers.push(handler);
     return {

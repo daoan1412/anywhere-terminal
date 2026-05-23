@@ -16,6 +16,30 @@ export interface TerminalConfig {
   fontFamily: string;
 }
 
+// ─── File-Tree RPC Types ────────────────────────────────────────────
+// See: asimov/changes/port-vscode-async-data-tree/design.md § Interfaces, D10
+
+/** A single entry returned by `readDirectory()` — see design.md § Interfaces. */
+export interface FileEntry {
+  /** Basename (no path components). */
+  name: string;
+  /** Absolute path to the entry. */
+  path: string;
+  /** Whether the entry is a file or a directory. Symlinks are followed; if they resolve to neither, the entry is omitted. */
+  kind: "file" | "directory";
+  /**
+   * True when git considers this entry ignored relative to the workspace
+   * root. Set by the extension host via `gitIgnoreChecker.getIgnoredPaths`
+   * before the response is posted to the webview. The webview applies a
+   * `.is-ignored` class so the row is rendered dimmed (mirrors VS Code's
+   * Explorer behaviour for gitignored files).
+   */
+  ignored?: boolean;
+}
+
+/** Position of the file-tree panel relative to the terminal area. */
+export type FileTreePosition = "top" | "bottom" | "left" | "right";
+
 // ─── WebView → Extension Messages ───────────────────────────────────
 
 /** Sent once when the WebView DOM is fully loaded and xterm.js is initialized. */
@@ -138,6 +162,31 @@ export interface OpenFileMessage {
   col?: number;
 }
 
+/**
+ * Webview → Extension: read a directory's entries for the file-tree panel.
+ * The host echoes `rootGeneration` back in the response so the webview can
+ * discard responses bound to a stale workspace root (see design D10).
+ */
+export interface RequestReadDirectoryMessage {
+  type: "request-read-directory";
+  /** Correlation id — echoed in `ReadDirectoryResponseMessage.requestId`. */
+  requestId: string;
+  /** Webview's last-known workspace root generation (see design D10). */
+  rootGeneration: number;
+  /** Absolute path to the directory whose children are requested. */
+  path: string;
+}
+
+/**
+ * Webview → Extension: user clicked the in-panel "Move file tree" button.
+ * The extension responds by showing a QuickPick for top/bottom/left/right and
+ * posting a `SetFileTreePositionMessage` back (same flow as the
+ * `anywhereTerminal.setFileTreePosition` command).
+ */
+export interface RequestSetFileTreePositionMessage {
+  type: "request-set-file-tree-position";
+}
+
 /** Request the extension host to read a file for the hover preview popup. */
 export interface RequestFilePreviewMessage {
   type: "requestFilePreview";
@@ -180,6 +229,8 @@ export type WebViewToExtensionMessage =
   | OpenLinkMessage
   | OpenFileMessage
   | RequestFilePreviewMessage
+  | RequestReadDirectoryMessage
+  | RequestSetFileTreePositionMessage
   | UpdateHoverPreviewSettingMessage;
 
 // ─── Extension → WebView Messages ───────────────────────────────────
@@ -200,6 +251,15 @@ export interface InitMessage {
   }>;
   /** Terminal configuration from user settings */
   config: TerminalConfig;
+  /**
+   * Monotonic workspace-root generation (see design D10). Incremented every
+   * time `vscode.workspace.onDidChangeWorkspaceFolders` fires. Webview pins
+   * this on init; file-tree RPC carries it back so stale responses can be
+   * dropped.
+   */
+  rootGeneration: number;
+  /** Absolute path of the first workspace folder, or null if no workspace open. */
+  workspaceRoot: string | null;
 }
 
 /**
@@ -454,6 +514,64 @@ export interface UpdateHoverPreviewSettingMessage {
   value: boolean | number;
 }
 
+// ─── File-Tree Extension → WebView Messages ──────────────────────────
+// See: asimov/changes/port-vscode-async-data-tree/design.md § Interfaces, D10
+
+/**
+ * Extension → Webview: result of `RequestReadDirectoryMessage`. Either `entries`
+ * is set (success) or `error` is set. `rootGeneration` echoes the host's
+ * current generation so the webview can drop responses bound to a stale root.
+ *
+ * Error codes:
+ *   - `OUT_OF_WORKSPACE`: requested path is outside the current workspace folder.
+ *   - `STALE_ROOT`: request's `rootGeneration` no longer matches the host.
+ *   - any other code: filesystem error from `vscode.workspace.fs.readDirectory`.
+ */
+export interface ReadDirectoryResponseMessage {
+  type: "read-directory-response";
+  requestId: string;
+  rootGeneration: number;
+  entries?: FileEntry[];
+  error?: { code: string; message: string };
+}
+
+/** Extension → Webview: show or hide the file-tree panel. */
+export interface ToggleFileTreeMessage {
+  type: "toggle-file-tree";
+}
+
+/** Extension → Webview: move the file-tree panel to one of four sides. */
+export interface SetFileTreePositionMessage {
+  type: "set-file-tree-position";
+  position: FileTreePosition;
+}
+
+/**
+ * Extension → Webview: workspace folder set has changed (see design D10). The
+ * webview SHALL drop pending RPC requests, clear in-memory caches, and adopt
+ * the new `rootGeneration`. `rootPath` is null when no workspace folder is open.
+ */
+export interface WorkspaceRootChangedMessage {
+  type: "workspace-root-changed";
+  rootPath: string | null;
+  rootGeneration: number;
+}
+
+/**
+ * Triggered by the `anywhereTerminal.ctx.revealInFileTree` command (terminal
+ * pane right-click). The extension resolves the pane's live cwd (querying the
+ * PTY shell process via `SessionManager.getLiveCwd` — `lsof` on macOS, `/proc/<pid>/cwd`
+ * on Linux) and posts it here. The webview then asks `FileTreePanel.revealPath`
+ * to expand ancestors + scroll the row in. `cwd` is null only when the OS
+ * query failed (e.g. Windows, permission denied) — webview falls back to the
+ * workspace root in that case.
+ */
+export interface RevealInFileTreeMessage {
+  type: "reveal-in-file-tree";
+  sessionId: string;
+  cwd: string | null;
+}
+
 /**
  * All messages that can be sent from the Extension Host to the WebView.
  * Use msg.type as the discriminant in switch/case for exhaustive handling.
@@ -478,4 +596,9 @@ export type ExtensionToWebViewMessage =
   | InsertPathEffectMessage
   | FilePreviewResultMessage
   | ThemeChangedMessage
-  | HoverPreviewSettingsMessage;
+  | HoverPreviewSettingsMessage
+  | ReadDirectoryResponseMessage
+  | ToggleFileTreeMessage
+  | SetFileTreePositionMessage
+  | WorkspaceRootChangedMessage
+  | RevealInFileTreeMessage;

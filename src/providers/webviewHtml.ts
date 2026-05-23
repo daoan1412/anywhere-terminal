@@ -2,7 +2,21 @@
 // See: docs/design/webview-provider.md#§4
 
 import * as crypto from "node:crypto";
+// Vendored VS Code list-widget CSS — see asimov/changes/port-vscode-async-data-tree/design.md D7.
+// These are inlined into the webview's <style> block at HTML-generation time so that
+// `.monaco-list`, `.monaco-scrollable-element`, etc. resolve in the webview without
+// adding a separate <link> resource. esbuild's `loader: { '.css': 'text' }` returns
+// the file contents as a string at bundle time.
+import vendoredAriaCss from "vs/base/browser/ui/aria/aria.css";
+import vendoredDndCss from "vs/base/browser/ui/dnd/dnd.css";
+import vendoredListCss from "vs/base/browser/ui/list/list.css";
+import vendoredScrollbarsCss from "vs/base/browser/ui/scrollbar/media/scrollbars.css";
 import * as vscode from "vscode";
+// Project-specific file-tree panel styles (rows + 4-side layout + theme variables).
+import fileTreePanelCss from "../webview/fileTree/fileTreePanel.css";
+
+const VENDORED_LIST_CSS = [vendoredAriaCss, vendoredDndCss, vendoredListCss, vendoredScrollbarsCss].join("\n\n");
+const FILE_TREE_CSS = fileTreePanelCss;
 
 /**
  * Generate secure HTML for a terminal webview with CSP and nonce.
@@ -36,9 +50,17 @@ export function getTerminalHtml(
         content="default-src 'none';
                  style-src ${webview.cspSource} 'unsafe-inline';
                  script-src 'nonce-${nonce}';
-                 font-src ${webview.cspSource};">
+                 font-src ${webview.cspSource} data:;">
   <link href="${styleUri}" rel="stylesheet">
   <style>
+    /* === Vendored VS Code list-widget styles (see THIRD_PARTY_NOTICES.md) === */
+    ${VENDORED_LIST_CSS}
+    /* === End vendored styles === */
+
+    /* === File-tree panel styles === */
+    ${FILE_TREE_CSS}
+    /* === End file-tree panel styles === */
+
     html, body {
       height: 100%;
       margin: 0;
@@ -534,7 +556,17 @@ export function getTerminalHtml(
 </head>
 <body data-terminal-location="${location}">
   <div id="tab-bar"></div>
-  <div id="terminal-container"></div>
+  <!-- Webview layout wrapper. File-tree panel + terminal area are siblings;
+       CSS in fileTreePanel.css drives flex direction and child order via the
+       file-tree--{top|bottom|left|right} classes set at runtime by
+       FileTreePanel.setPosition(). Default = bottom + closed; the toggle
+       command shows it. -->
+  <div id="webview-layout" class="webview-layout file-tree--bottom file-tree--closed">
+    <div class="terminal-area">
+      <div id="terminal-container"></div>
+    </div>
+    <div id="file-tree" class="file-tree-panel"></div>
+  </div>
   <div id="drag-drop-tip"></div>
   <script nonce="${nonce}" src="${scriptUri}"></script>
 </body>

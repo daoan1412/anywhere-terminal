@@ -28,6 +28,11 @@ function createMockHandlers(): MessageHandlers {
     onFilePreviewResult: vi.fn(),
     onThemeChanged: vi.fn(),
     onHoverPreviewSettings: vi.fn(),
+    onReadDirectoryResponse: vi.fn(),
+    onWorkspaceRootChanged: vi.fn(),
+    onToggleFileTree: vi.fn(),
+    onSetFileTreePosition: vi.fn(),
+    onRevealInFileTree: vi.fn(),
   };
 }
 
@@ -99,6 +104,8 @@ describe("createMessageRouter", () => {
       type: "init",
       tabs: [{ id: "t1", name: "Terminal 1", customName: null, isActive: true }],
       config: { fontSize: 14, cursorBlink: true, scrollback: 10000, fontFamily: "" },
+      rootGeneration: 0,
+      workspaceRoot: null,
     });
 
     // None of the handlers should be called

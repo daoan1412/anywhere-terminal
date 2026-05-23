@@ -16,7 +16,10 @@ import type {
   HoverPreviewSettingsMessage,
   InsertPathEffectMessage,
   OutputMessage,
+  ReadDirectoryResponseMessage,
   RestoreMessage,
+  RevealInFileTreeMessage,
+  SetFileTreePositionMessage,
   SplitPaneAtMessage,
   SplitPaneCreatedMessage,
   SplitPaneMessage,
@@ -24,6 +27,8 @@ import type {
   TabRemovedMessage,
   TabRenamedMessage,
   ThemeChangedMessage,
+  ToggleFileTreeMessage,
+  WorkspaceRootChangedMessage,
 } from "../../types/messages";
 
 // ─── Types ──────────────────────────────────────────────────────────
@@ -55,6 +60,12 @@ export interface MessageHandlers {
   onFilePreviewResult(msg: FilePreviewResultMessage): void;
   onThemeChanged(msg: ThemeChangedMessage): void;
   onHoverPreviewSettings(msg: HoverPreviewSettingsMessage): void;
+  // ── File-tree (port-vscode-async-data-tree) ──
+  onReadDirectoryResponse(msg: ReadDirectoryResponseMessage): void;
+  onWorkspaceRootChanged(msg: WorkspaceRootChangedMessage): void;
+  onToggleFileTree(msg: ToggleFileTreeMessage): void;
+  onSetFileTreePosition(msg: SetFileTreePositionMessage): void;
+  onRevealInFileTree(msg: RevealInFileTreeMessage): void;
 }
 
 // ─── Factory ────────────────────────────────────────────────────────
@@ -128,6 +139,21 @@ export function createMessageRouter(handlers: MessageHandlers): (msg: ExtensionT
         break;
       case "hoverPreviewSettings":
         handlers.onHoverPreviewSettings(msg);
+        break;
+      case "read-directory-response":
+        handlers.onReadDirectoryResponse(msg);
+        break;
+      case "workspace-root-changed":
+        handlers.onWorkspaceRootChanged(msg);
+        break;
+      case "toggle-file-tree":
+        handlers.onToggleFileTree(msg);
+        break;
+      case "set-file-tree-position":
+        handlers.onSetFileTreePosition(msg);
+        break;
+      case "reveal-in-file-tree":
+        handlers.onRevealInFileTree(msg);
         break;
       case "init":
         // init is handled directly by main.ts — not routed

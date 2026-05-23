@@ -10,9 +10,11 @@ export default defineConfig({
     include: ["src/**/*.test.ts"],
     // Exclude integration tests and build artifacts
     exclude: ["node_modules", "dist", "out", "src/test/extension.test.ts"],
-    // Resolve `vscode` module to our manual mock
+    // Resolve `vscode` module to our manual mock; `vs/*` to vendored VS Code list widget
+    // (see asimov/changes/port-vscode-async-data-tree/design.md D2)
     alias: {
       vscode: path.resolve(__dirname, "src/test/__mocks__/vscode.ts"),
+      vs: path.resolve(__dirname, "src/vendor/vscode"),
     },
     // Coverage configuration
     coverage: {
