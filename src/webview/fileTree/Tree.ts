@@ -129,6 +129,18 @@ export class Tree<T extends object, TTemplate extends ITemplateData = ITemplateD
   /** Live map of element -> the row's `.monaco-list-row` DOM container, so
    * ARIA attributes can be re-stamped synchronously on expand/collapse. */
   private readonly elementToRowDom = new Map<T, HTMLElement>();
+  /**
+   * Per-row render context for currently-materialised rows. Populated in
+   * `innerRenderer.renderElement`, evicted in `disposeElement`. Used by
+   * `rerenderRows()` to re-invoke the user renderer in place — necessary
+   * because the vendored `listView.rerender()` is a no-op when
+   * `supportDynamicHeights` is false (our setup), so we cannot lean on the
+   * built-in re-render path for in-place data mutations like git status
+   * deltas. Holds (depth, template, matchData) per visible element. */
+  private readonly elementToRenderContext = new Map<
+    T,
+    { container: HTMLElement; depth: number; template: TTemplate; matchData?: ITreeMatchData }
+  >();
 
   private readonly _onDidChangeSelection = new Emitter<T | null>();
   readonly onDidChangeSelection: Event<T | null> = this._onDidChangeSelection.event;
@@ -194,7 +206,23 @@ export class Tree<T extends object, TTemplate extends ITemplateData = ITemplateD
         // Track row-container so synchronous re-stamping (on expand/collapse,
         // or selection change) can find it without walking the DOM.
         this.elementToRowDom.set(row.element, t.container);
+        // Track full render context so `rerenderRows()` can re-invoke the
+        // user renderer in place for in-place data mutations (git status
+        // deltas mutate the cached FileNode by reference — the listView
+        // can't detect that and won't re-render on its own).
+        this.elementToRenderContext.set(row.element, {
+          container: t.container,
+          depth: row.depth,
+          template: t.user,
+          matchData: row.matchData,
+        });
         renderer.renderElement(row.element, row.depth, t.user, row.matchData);
+      },
+      disposeElement: (element: FlatRow<T>) => {
+        // listView calls this when a row scrolls out OR is removed via
+        // splice. Evict the render context so stale templates (about to be
+        // recycled to another element) don't keep getting re-rendered.
+        this.elementToRenderContext.delete(element.element);
       },
       disposeTemplate: (t: InnerTemplate<TTemplate>) => renderer.disposeTemplate(t.user),
     };
@@ -504,6 +532,7 @@ export class Tree<T extends object, TTemplate extends ITemplateData = ITemplateD
     this.nodes.clear();
     this.parents.clear();
     this.elementToRowDom.clear();
+    this.elementToRenderContext.clear();
     // The root is always considered "expanded" in our flat-row model — its
     // children form the top of the visible list — but we still call it out
     // explicitly so the cache entry is present for refresh() lookups.
@@ -574,10 +603,20 @@ export class Tree<T extends object, TTemplate extends ITemplateData = ITemplateD
    * a git status update on a cached `FileNode`) so the visible DOM reflects
    * the new state. Far cheaper than `refresh()` — no read-directory RPC,
    * no `getChildren` call, just one pass through the recycled row pool.
+   *
+   * Why not `list.rerender()`: the vendored listView's public `rerender()`
+   * only executes its body when `supportDynamicHeights` is enabled (it
+   * exists to re-probe row heights, not to re-run the renderer). Our tree
+   * uses fixed heights, so calling it is a silent no-op. We iterate the
+   * tracked render context map instead — it holds (template, depth,
+   * matchData) per currently visible row, captured during the listView's
+   * own renderElement invocations.
    */
   rerenderRows(): void {
     this.assertNotDisposed();
-    this.list.rerender();
+    for (const [element, ctx] of this.elementToRenderContext) {
+      this.renderer.renderElement(element, ctx.depth, ctx.template, ctx.matchData);
+    }
   }
 
   refresh(element?: T): void {
@@ -842,6 +881,7 @@ export class Tree<T extends object, TTemplate extends ITemplateData = ITemplateD
     this.nodes.clear();
     this.parents.clear();
     this.elementToRowDom.clear();
+    this.elementToRenderContext.clear();
     this.rows = [];
     this.root = null;
   }

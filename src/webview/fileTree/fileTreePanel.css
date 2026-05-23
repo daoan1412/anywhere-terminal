@@ -73,7 +73,10 @@
   min-width: 12px;
   text-align: center;
   margin-left: 4px;
-  margin-right: 4px;
+  /* Reserve enough gutter on the right that the vertical scrollbar
+   * (rendered inside .monaco-scrollable-element, ~10px wide on overlay)
+   * does NOT overlap the M/A/U letter when the list is scrollable. */
+  margin-right: 12px;
   font-size: 11px;
   font-weight: 600;
   line-height: 1;

@@ -673,4 +673,36 @@ describe("Tree<T>", () => {
     expect(findRowByLabel(host, "b")?.getAttribute("aria-selected")).toBe("true");
     tree.dispose();
   });
+
+  it("rerenderRows() re-invokes renderElement for every visible row (in-place mutation reflection)", async () => {
+    // Regression: the vendored listView's `rerender()` is a no-op when
+    // `supportDynamicHeights: false` (our setup). Without an explicit
+    // re-render path, git status deltas that mutate cached FileNode fields
+    // in place would never reach the DOM. This test mutates a node's
+    // `name` on the data side and asserts the DOM updates after
+    // rerenderRows().
+    const { root, a, b } = buildTree();
+    const host = makeHost();
+    const { source } = makeDataSource();
+    const tree = new Tree<Node>(host, source, makeRenderer());
+    tree.layout(400, 300);
+    tree.setInput(root);
+    await flushMicrotasks();
+
+    // Initial labels reflect the source-of-truth `.name`.
+    expect(readRowLabels(host)).toEqual(["root", "a", "b"]);
+
+    // Mutate the node objects in place. The listView has no way to detect
+    // this — same references in same positions — so a naive re-render
+    // would NOT update the DOM.
+    a.name = "a (modified)";
+    b.name = "b (deleted)";
+
+    tree.rerenderRows();
+
+    // After rerenderRows(), every visible row's renderElement was re-invoked
+    // with the (still-same) element reference, picking up the mutated name.
+    expect(readRowLabels(host)).toEqual(["root", "a (modified)", "b (deleted)"]);
+    tree.dispose();
+  });
 });

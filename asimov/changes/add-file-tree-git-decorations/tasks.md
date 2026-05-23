@@ -178,7 +178,7 @@
   - **Plan**:
     1. Run check-types, lint, unit. Build extension. Diff bundle size against `git stash; pnpm run build` of HEAD.
 
-- [ ] 7_2 Manual QA in Extension Development Host
+- [x] 7_2 Manual QA in Extension Development Host
   - **Deps**: 7_1
   - **Refs**: proposal.md § UI Impact
   - **Scope**: _(none — verification only)_
