@@ -47,3 +47,4 @@ asimov/memory.db*
 .opencode/plugins/asimov.ts
 
 .claude/worktrees
+.claude/scheduled_tasks.lock

@@ -4,6 +4,17 @@ All notable changes to **AnyWhere Terminal** are documented in this file.
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.11.3] — 2026-05-23
+
+### Added
+
+- **In-panel file-tree search.** New search icon in the file-tree header turns the header into a search input; type to fuzzy-match files inside the currently-focused folder (or the workspace root when nothing is focused). Two modes via toggle: **Filter** (only matches shown, ranked) and **Highlight** (all in-scope files, matches highlighted and sorted to top). Keyboard: `↑/↓` move between results, `Enter` opens the focused file, `Esc` exits search. Ranking uses a vendored subset of VS Code's `fuzzyScore` so results match VS Code Quick Open ordering.
+- **Search excludes hidden / build artefacts / gitignored files.** Combined `files.exclude` + `search.exclude` user-setting globs are passed to the enumeration (so `node_modules`, `.git`, `.DS_Store`, dist artefacts never enter results), then `git check-ignore` drops anything matched by `.gitignore` (silently no-ops in non-git scopes). Up to 2000 files per scope; an overflow footer surfaces when the cap is reached.
+
+### Changed
+
+- **File tree now sorts directories before files** — alphabetic, locale-aware, case-insensitive within each group (e.g. `README` and `readme` sort together, `é` lands next to `e`). Matches VS Code Explorer's default. Applied at the `read-directory` RPC boundary; search results keep their own score/alphabetic ordering.
+
 ## [0.11.2] — 2026-05-23
 
 ### Added
