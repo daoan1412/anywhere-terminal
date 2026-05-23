@@ -4,7 +4,37 @@ All notable changes to **AnyWhere Terminal** are documented in this file.
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [0.10.1] — 2026-05-22
+## [0.11.0] — 2026-05-23
+
+### Added
+
+- **Embedded File Tree panel.** Browse the workspace alongside the terminal without context-switching. Available in the sidebar, panel, and editor host — each location remembers its own open/closed state, position, and size independently. Defaults to visible on first install so the feature is discoverable.
+- **Four positions per location** — `top`, `bottom`, `left`, `right`. Drag the resize sash on the edge facing the terminal to adjust; size is persisted per location. A move button in the header rotates through positions for the active host.
+- **Toggle commands** — `AnyWhere Terminal: Toggle File Tree` (active focus) plus per-host variants `…Toggle File Tree (Sidebar)` / `…(Panel)` so commands routed from outside the webview land in the right place even when the user is focused elsewhere.
+- **Reveal in File Tree** — command on terminal context (formerly "Reveal Working Directory in File Explorer"). Resolves the target via the extension-side cwd (OS process table), webview-side OSC 7 cwd, then last-known workspace root.
+- **Drag a file row, drop on a terminal pane** — inserts the file's path at the cursor with shell-appropriate quoting. Re-uses the existing terminal drop handler.
+- **VSCode-grade virtual scrolling and keyboard handling.** Powered by a vendored `vs/base/browser/ui/list/` (listWidget) under `src/vendor/vscode/` and a thin generic `Tree<T>` wrapper. Supports expand/collapse, arrow-key navigation, type-ahead, and WAI-ARIA Tree pattern (`role="tree"`, `aria-expanded`, `treeitem`).
+- **`.gitignore` filtering** — directories and files ignored by git are hidden from the tree. Uses `git check-ignore -z --stdin` for batched NUL-delimited queries; falls back gracefully when git is unavailable.
+- **Header with root folder + actions.** The header shows the workspace root name (click to expand/collapse) with a close button on the far right and the move button next to it. Root row is hidden from the virtual list so the header doubles as the root affordance.
+- **Codicon-style chevron icons** via 2 inline SVG sprites. Codicon font is NOT vendored — bundle stays lean.
+
+### Internals
+
+- New `src/vendor/vscode/` tree mirroring upstream paths for future vendored widgets (inputbox, contextview, hover). Per-file Microsoft MIT headers preserved; full attribution in `THIRD_PARTY_NOTICES.md`.
+- New `Tree<T>` wrapper with pluggable `ITreeDataSource<T>` + `ITreeRenderer<T>` interfaces mirroring AsyncDataTree's shape, so a future swap to the upstream async tree is a drop-in replacement.
+- Extension ↔ webview RPC: `RequestReadDirectory` / `ReadDirectoryResponse` typed messages, batched per-request with `crypto.randomUUID()` IDs.
+- Identity-stable `FileNode` cache in `FileSystemDataSource` — collapse + re-expand without re-fetch, with stale-async drop semantics on workspace root change.
+- `FileTreeHost` companion object shared by the three terminal view providers (sidebar/panel/editor) — owns `rootGeneration`, workspace-folder change subscription, and the message-router fan-out.
+- `FileTreeController` encapsulates webview-side bootstrap + the 5 router handlers (`readDirectoryResponse`, `workspaceRootChanged`, `toggle`, `setPosition`, `reveal`). `main.ts` constructs one controller per webview.
+- `FileTreeSash` extracted from the panel — owns pointer capture, orientation math, and `--file-tree-size` updates.
+- One-shot WebviewState migration from the legacy `fileTree` slot to per-location `fileTreeByLocation.sidebar` — runs synchronously on first `getState()`.
+
+### Security
+
+- OSC 7 cwd capture path is hardened: 16 KB encoded cap, 4 KB decoded cap, control-byte rejection, absolute-path check, and `(deleted)` suffix rejection.
+- `git check-ignore` is invoked with `-z --stdin` (NUL-delimited stdin/stdout) — paths containing newlines or shell metacharacters cannot escape the protocol.
+
+
 
 ### Added
 
