@@ -7,6 +7,8 @@ node_modules
 # Build artifacts in media/
 media/webview.js
 media/webview.js.map
+media/webview.css
+media/webview.css.map
 media/xterm.css
 
 # Test coverage
@@ -43,3 +45,5 @@ asimov/memory.db*
 
 # asimov
 .opencode/plugins/asimov.ts
+
+.claude/worktrees
