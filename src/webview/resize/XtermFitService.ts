@@ -43,11 +43,11 @@ export function fitTerminal(terminal: Terminal, parentElement: HTMLElement): { c
   const paddingLeft = Number.parseInt(xtermStyle.getPropertyValue("padding-left"), 10) || 0;
   const paddingRight = Number.parseInt(xtermStyle.getPropertyValue("padding-right"), 10) || 0;
 
-  // Scrollbar width: same logic as FitAddon — scrollback=0 -> 0, else overviewRuler.width || 14
-  const scrollbarWidth = terminal.options.scrollback === 0 ? 0 : terminal.options.overviewRuler?.width || 14;
-
+  // Overlay scrollbar — no horizontal space reserved. xterm's scrollbar
+  // is positioned right:0 inside the scrollable element so it floats over
+  // the rightmost cells when visible (macOS overlay-scrollbar pattern).
   const availableHeight = parentRect.height - paddingTop - paddingBottom;
-  const availableWidth = parentRect.width - paddingLeft - paddingRight - scrollbarWidth;
+  const availableWidth = parentRect.width - paddingLeft - paddingRight;
 
   const cols = Math.max(2, Math.floor(availableWidth / dims.css.cell.width));
   const rows = Math.max(1, Math.floor(availableHeight / dims.css.cell.height));

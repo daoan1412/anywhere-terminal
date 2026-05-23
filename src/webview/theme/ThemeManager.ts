@@ -84,13 +84,17 @@ export class ThemeManager {
       brightCyan: get("--vscode-terminal-ansiBrightCyan"),
       brightWhite: get("--vscode-terminal-ansiBrightWhite"),
 
-      // Keep the overview ruler lane visually invisible.
+      // Hide the overview-ruler decoration strip border (the lane itself is
+      // hidden in CSS via webviewHtml.ts).
       overviewRulerBorder: "transparent",
 
-      // Hide xterm's scrollbar slider visuals (we only keep a 1px lane for FitAddon math).
-      scrollbarSliderBackground: "transparent",
-      scrollbarSliderHoverBackground: "transparent",
-      scrollbarSliderActiveBackground: "transparent",
+      // Slider colours from VS Code's CSS variables. xterm v6 inlines these
+      // into a runtime <style> tag and runs them through parseColor, which
+      // does NOT understand `var()` — so we resolve to a concrete value
+      // here via getComputedStyle.
+      scrollbarSliderBackground: get("--vscode-scrollbarSlider-background"),
+      scrollbarSliderHoverBackground: get("--vscode-scrollbarSlider-hoverBackground"),
+      scrollbarSliderActiveBackground: get("--vscode-scrollbarSlider-activeBackground"),
     };
   }
 

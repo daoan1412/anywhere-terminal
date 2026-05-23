@@ -177,8 +177,10 @@ export class TerminalFactory {
     });
     containerEl.appendChild(container);
 
-    // Create xterm.js Terminal with config
-    // overviewRuler.width=1 makes FitAddon deduct only 1px instead of the default 14px
+    // Create xterm.js Terminal with config. overviewRuler.width also drives
+    // the vertical scrollbar width in xterm v6 (Viewport._getChangeOptions)
+    // — 10px matches Monaco's default so the terminal scrollbar visually
+    // matches the file-tree list scrollbar.
     const resolvedFontFamily = config.fontFamily || this.getFontFamily();
     const terminal = new Terminal({
       scrollback: config.scrollback || 10000,
@@ -194,7 +196,7 @@ export class TerminalFactory {
       fastScrollSensitivity: 5,
       tabStopWidth: 8,
       theme: this.themeManager.getTheme(),
-      overviewRuler: { width: 1 },
+      overviewRuler: { width: 10 },
     });
 
     // Load addons

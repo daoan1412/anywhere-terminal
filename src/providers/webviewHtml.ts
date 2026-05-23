@@ -539,18 +539,15 @@ export function getTerminalHtml(
       cursor: row-resize;
     }
 
-    /* Keep xterm's 1px overview-ruler/scrollbar lane invisible.
-       We still keep overviewRuler.width=1 in JS for FitAddon sizing math. */
+    /* Hide xterm's overview-ruler lane (the colored decoration marker
+       strip on the right edge — distinct from the scrollbar). The
+       scrollbar itself uses xterm v6's Monaco-style SmoothScrollableElement
+       which auto-shows on hover/scroll and pulls its slider colours from
+       ThemeManager's --vscode-scrollbarSlider-* mapping, matching the
+       file-tree list scrollbar exactly. */
     .xterm .xterm-decoration-overview-ruler {
       opacity: 0 !important;
       pointer-events: none !important;
-    }
-
-    .xterm .xterm-scrollable-element > .scrollbar.vertical,
-    .xterm .xterm-scrollable-element > .scrollbar.vertical > .slider {
-      background: transparent !important;
-      border: 0 !important;
-      box-shadow: none !important;
     }
   </style>
 </head>
