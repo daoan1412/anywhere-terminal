@@ -163,5 +163,4 @@ describe("Tree.setFlatItems", () => {
     expect(readRowLabels(host).sort()).toEqual(["a", "b", "c", "root"]);
     expect(tree.getSelection()).toBe(b);
   });
-
 });

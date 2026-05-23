@@ -8,10 +8,7 @@
 // RPC silently lost) is exactly the kind of regression these tests guard.
 
 import { describe, expect, it, vi } from "vitest";
-import type {
-  RequestFileTreeSearchMessage,
-  WebViewToExtensionMessage,
-} from "../types/messages";
+import type { RequestFileTreeSearchMessage, WebViewToExtensionMessage } from "../types/messages";
 import { FileTreeHost } from "./fileTreeHost";
 
 describe("FileTreeHost.handleMessage", () => {
