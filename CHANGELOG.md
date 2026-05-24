@@ -4,6 +4,32 @@ All notable changes to **AnyWhere Terminal** are documented in this file.
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.12.0] — 2026-05-24
+
+### Added
+
+- **Live filesystem sync in the file tree.** Paste, rename, or delete a file from anywhere — VS Code Explorer, terminal, Finder, another editor — and the AnyWhere Terminal file tree refreshes within ~150 ms with no manual re-expand. Works for the workspace root AND for arbitrary directories the user navigates to (`/tmp/foo`, `~/projects/bar`, etc.). Built on a process-level pool of per-directory non-recursive `vscode.workspace.createFileSystemWatcher` instances shared across the sidebar, panel, and editor file-tree hosts, debounced 150 ms per path. ENOSPC/EMFILE on watcher construction is caught and logged; a soft cap warns at 500 watched directories.
+- **Window-focus rehydrate.** When you alt-tab back to VS Code (or wake the laptop), every root and currently-expanded directory in the tree re-fetches automatically so any changes made while the window was unfocused show up immediately. Mirrors VS Code's own `ExplorerService` pattern around macOS sleep/wake event drops.
+- **Search results refresh on filesystem changes.** The in-panel file-tree search controller drops its 60 s enumeration cache when an fs event lands inside its scope, so a paste-then-search workflow surfaces newly-created files without waiting for the cache to expire.
+- **Folder dirty badge picks color from the highest-severity descendant.** A folder whose descendants are all untracked now renders GREEN (matching VS Code Explorer); a folder containing a conflict renders RED; mixed contents fall back through the severity ladder `conflicted > deleted > modified > renamed > added > untracked`. Both the folder name AND the `•` dot are tinted, and the dot is bumped to 18 px so it reads clearly alongside file rows. Previously every dirty folder rendered the modified yellow regardless of what was actually dirty inside.
+- **Sub-folders show the correct color before you expand them.** The extension host now aggregates per-directory descendant dirty counts from the git provider and ships them with every directory listing, so a collapsed `docs/` folder full of untracked files lights up GREEN on first open — no manual expand required.
+
+### Fixed
+
+- **File-tree no longer blinks on every fs refresh.** Two independent blink sources eliminated: (1) `Tree.rebuildRows` previously did a wholesale `list.splice(0, oldLen, newRows)` that destroyed every DOM row on every change; replaced with a common-prefix + common-suffix diff so a single create/delete only re-splices the affected row. (2) `Tree.refresh` cleared `node.children` then re-rendered synchronously, flashing an "empty subtree" frame before the new children loaded; the intermediate render is now skipped so old rows stay in DOM until the diff-splice replaces them. Scroll position, selection, and focus are preserved across refreshes.
+- **No more focus theft when clicking a file in VS Code Explorer.** `revealPath` previously called `tree.domFocus()` unconditionally — so every time `ActiveFileRevealer` fired on an editor change (e.g. user clicked a different file in Explorer), our tree grabbed keyboard focus from whatever the user was actually interacting with. The autoReveal path now only updates selection and scrolls the matching row into view; user-initiated reveals (OSC 7 from a terminal `cd`, "Reveal in File Tree" command) still focus the tree as before.
+- **Auto-reveal no longer scrolls the viewport when the row is already visible.** Clicking through files in VS Code Explorer used to re-center the matching row on every click, even when it was already in view — jarring movement on rapid click-through. `Tree.revealElement` now bails out when the target row sits inside `[firstVisibleIndex, lastVisibleIndex]`; off-screen rows still scroll into the middle as before.
+- **Folder badge clears correctly when all dirty descendants are cleaned.** A previously-dirty folder that got staged + committed (or whose dirty files were deleted) could stay tinted dirty forever for unexpanded subtrees, because no leaf walk would ever fire to reset the bucket. The host's authoritative "clean" stamp now explicitly clears the cached bucket on the next directory listing.
+- **Watcher subscriptions no longer leak under concurrency or rapid root rotation.** Three concurrency hardening fixes: rapid `setRoot` rotations (A→B→C within ~150 ms) used to orphan host-side subscriptions because the unsubscribe carried a stale `rootGeneration`; concurrent `getChildren(samePath)` calls where one rejected used to tear down the shared subscription the surviving caller still needed; a subscriber callback disposing another mid-fanout used to still fire the disposed subscriber. Each path has dedicated regression tests.
+
+### Internals
+
+- New `src/providers/fsWatcherPool.ts` — singleton, refcounted by absolute path, injected into every `FileTreeHost` so the three concurrent hosts share OS watcher instances (`vscode.git`-style topology).
+- New `src/webview/fileTree/folderDirtyState.ts` — `dominantDirtyStatus` helper + `FolderDirtyCounts` type, used by the renderer to pick the badge color.
+- 4 new IPC message types (`request-subscribe-fs-changes`, `request-unsubscribe-fs-changes`, `fs-changes-invalidated`, `fs-rehydrate`) and a new optional `FileEntry.dirtyDescendantCountsByStatus` field.
+- `Tree.flatRowEquals` helper drives the new diff-splice — compares full FlatRow shape (element + depth + expanded + hasChildren + matchData) so expand/collapse and other shape changes still re-render correctly.
+- 4 specs landed: `fs-watcher-pool` (new), `fs-watcher-sync` (new), `folder-dirty-color` (new), `file-tree-rpc` (extended with subscribe/unsubscribe/invalidate/rehydrate requirements).
+
 ## [0.11.4] — 2026-05-23
 
 ### Added
