@@ -43,8 +43,20 @@ export interface FileNode {
    * status (modified / added / renamed / untracked / conflicted). Zero (or
    * undefined) means no dirty descendants; > 0 lights up the folder badge.
    * Mutated EXCLUSIVELY by `applyStatusTransition`. See: design.md D5, D6.
+   * This is the SUM of all `dirtyDescendantCountsByStatus` buckets and is
+   * retained for cheap "any dirty?" checks.
    */
   dirtyDescendantCount?: number;
+  /**
+   * Folders only — per-kind breakdown of descendant propagating statuses.
+   * Renderer derives the dominant status (highest severity present) to pick
+   * the badge color. `undefined` when no dirty descendants exist; otherwise
+   * a sparse map where each key maps to a count > 0. Mutated EXCLUSIVELY by
+   * `applyStatusTransition`.
+   *
+   * See: asimov/changes/add-file-tree-fs-watcher/design.md D10.
+   */
+  dirtyDescendantCountsByStatus?: import("./folderDirtyState").FolderDirtyCounts;
   /**
    * Set ONLY for rows produced by the in-panel search controller. Signals
    * the renderer to switch to the search-row template (relative path
@@ -104,4 +116,24 @@ export interface IFileSystemProvider {
    * may throw until a renderer needs it.
    */
   stat(path: string): Promise<FileStat>;
+
+  /**
+   * Ask the extension host to start watching `path` for create/delete events.
+   * Fire-and-forget: there is no response and no promise. The host posts a
+   * `fs-changes-invalidated` message back when the debounced watcher fires.
+   *
+   * Idempotent: re-subscribing to the same path is a no-op host-side. Callers
+   * SHOULD still subscribe at most once per path lifecycle so the unsubscribe
+   * side stays symmetric.
+   *
+   * See: asimov/changes/add-file-tree-fs-watcher/specs/fs-watcher-sync/spec.md
+   */
+  subscribeFsChanges(path: string): void;
+
+  /**
+   * Ask the extension host to stop watching the given paths. Fire-and-forget.
+   * Unknown paths are silently ignored host-side. The bulk shape lets callers
+   * unsubscribe an entire subtree in one round-trip on cache eviction.
+   */
+  unsubscribeFsChanges(paths: string[]): void;
 }

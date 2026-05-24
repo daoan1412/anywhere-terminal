@@ -35,6 +35,8 @@ function createMockHandlers(): MessageHandlers {
     onRevealInFileTree: vi.fn(),
     onFileTreeSearchResponse: vi.fn(),
     onGitStatusChanged: vi.fn(),
+    onFsChangesInvalidated: vi.fn(),
+    onFsRehydrate: vi.fn(),
   };
 }
 

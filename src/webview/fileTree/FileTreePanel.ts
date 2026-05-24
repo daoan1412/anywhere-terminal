@@ -31,6 +31,8 @@ import type {
   RequestFileTreeSearchMessage,
   RequestReadDirectoryMessage,
   RequestSetFileTreePositionMessage,
+  RequestSubscribeFsChangesMessage,
+  RequestUnsubscribeFsChangesMessage,
 } from "../../types/messages";
 import type { FileTreeState } from "../state/WebviewState";
 import { FileSystemDataSource } from "./FileSystemDataSource";
@@ -50,7 +52,9 @@ export type FileTreePostMessage = (
     | OpenFileMessage
     | RequestSetFileTreePositionMessage
     | RequestFileTreeSearchMessage
-    | CancelFileTreeSearchMessage,
+    | CancelFileTreeSearchMessage
+    | RequestSubscribeFsChangesMessage
+    | RequestUnsubscribeFsChangesMessage,
 ) => void;
 
 /**
@@ -251,6 +255,14 @@ export class FileTreePanel {
     // existing minimum-scroll behavior (no relativeTop) so right-click "Reveal
     // in File Tree" reveal UX is unchanged.
     const revealRelativeTop = opts?.source === "autoReveal" ? 0.5 : undefined;
+    // CRITICAL: NEVER steal focus on auto-reveal. The user is actively
+    // clicking on a file in VS Code Explorer / switching editor tabs — the
+    // expected behavior is "highlight the corresponding row in our tree";
+    // grabbing keyboard focus from whatever the user is interacting with
+    // (Explorer, editor) is jarring and was a regression report. Only
+    // user-initiated reveals (OSC 7 from a `cd`, explicit "Reveal in File
+    // Tree") may pull focus into the tree.
+    const allowFocusSteal = opts?.source !== "autoReveal";
 
     // Out-of-current-root path or no tree mounted (empty state) → re-root.
     // Use `isPathInside` (not raw `startsWith`) so `/work/repo2/x` doesn't
@@ -260,13 +272,16 @@ export class FileTreePanel {
     if (outOfRoot) {
       this.setRoot(absPath);
       // After re-root, the new rootNode IS the target. Reveal + select +
-      // focus so the user lands inside the folder they asked for.
+      // (conditionally) focus so the user lands inside the folder they asked
+      // for — but only when this was a user-initiated reveal.
       if (this.tree && this.rootNode) {
         if (!focusNoScroll) {
           this.tree.revealElement(this.rootNode, revealRelativeTop);
         }
         this.tree.setSelection(this.rootNode);
-        this.tree.domFocus();
+        if (allowFocusSteal) {
+          this.tree.domFocus();
+        }
         // Auto-expand the new root so its children are visible immediately —
         // matches the "I'm here now" expectation from a `cd` workflow.
         if (!this.tree.isExpanded(this.rootNode)) {
@@ -306,7 +321,9 @@ export class FileTreePanel {
       this.tree?.revealElement(current, revealRelativeTop);
     }
     this.tree?.setSelection(current);
-    this.tree?.domFocus();
+    if (allowFocusSteal) {
+      this.tree?.domFocus();
+    }
   }
 
   /**
@@ -592,6 +609,84 @@ export class FileTreePanel {
     // references. `rerenderRows()` re-runs the renderer for every visible
     // row without re-fetching children (cheap; no read-directory RPCs).
     this.tree?.rerenderRows();
+  }
+
+  /**
+   * Forward `fs-changes-invalidated` to the data source. The source's
+   * generation gate is the canonical filter; the data source then invokes
+   * the panel's injected `onDirectoryInvalidated` callback which routes to
+   * `refreshDirectoryByPath`.
+   */
+  handleFsChangesInvalidated(msg: { rootGeneration: number; parent: string }): void {
+    this.dataSource?.handleFsChangesInvalidated(msg);
+  }
+
+  /**
+   * Forward `fs-rehydrate` to the data source. Same dispatch pattern as
+   * `handleFsChangesInvalidated`.
+   */
+  handleFsRehydrate(msg: { rootGeneration: number }): void {
+    this.dataSource?.handleFsRehydrate(msg);
+  }
+
+  /**
+   * Resolve `absPath` to a tree node and call `Tree.refresh(node)` on it.
+   *
+   * Two paths:
+   *  1. `absPath === currentRootPath` → refresh the synthetic root node
+   *     (`Tree.setInput`-owned, NOT in `nodeCache` — see design.md D4a).
+   *  2. Else look up `dataSource.getCachedNode(absPath)`; if present and a
+   *     directory, refresh it. Otherwise no-op (path uncached / evicted /
+   *     not a directory).
+   *
+   * Wired by `FileSystemDataSource.onDirectoryInvalidated` (see mountTree).
+   */
+  refreshDirectoryByPath(absPath: string): void {
+    if (this.disposed || !this.tree) {
+      return;
+    }
+    if (absPath === this.workspaceRootPath) {
+      if (this.rootNode) {
+        this.tree.refresh(this.rootNode);
+      }
+      return;
+    }
+    const cached = this.dataSource?.getCachedNode(absPath);
+    if (cached && cached.kind === "directory") {
+      this.tree.refresh(cached);
+    }
+  }
+
+  /**
+   * Refresh the synthetic root node PLUS every currently-EXPANDED directory
+   * node. Wired by `FileSystemDataSource.onRehydrate` (window-focus rising
+   * edge from `WatcherPool`).
+   *
+   * Note: NOT every cached directory — `Tree.refresh` re-fetches children
+   * regardless of expansion state (Tree.ts:622-638), so refreshing every
+   * cached entry would fire one read-directory RPC per cached dir with no UI
+   * benefit for collapsed ones (their next expand would re-fetch fresh
+   * anyway). See: design.md D7.
+   */
+  refreshRootAndExpandedDirectories(): void {
+    if (this.disposed || !this.tree) {
+      return;
+    }
+    const visited = new Set<string>();
+    if (this.rootNode) {
+      this.tree.refresh(this.rootNode);
+      visited.add(this.rootNode.path);
+    }
+    for (const expandedPath of this.expandedPaths) {
+      if (visited.has(expandedPath)) {
+        continue;
+      }
+      const cached = this.dataSource?.getCachedNode(expandedPath);
+      if (cached && cached.kind === "directory" && this.tree.isExpanded(cached)) {
+        this.tree.refresh(cached);
+        visited.add(expandedPath);
+      }
+    }
   }
 
   dispose(): void {
@@ -993,10 +1088,27 @@ export class FileTreePanel {
   private mountTree(workspaceRoot: string, overrideRootGeneration?: number): void {
     const gen = overrideRootGeneration ?? this.deps.rootGeneration;
     // Re-use existing data source if we have one (handleRootChanged already
-    // pinned the new generation onto it). Otherwise construct fresh.
+    // pinned the new generation onto it). Otherwise construct fresh with
+    // the FS-change callbacks wired so the panel resolves invalidate /
+    // rehydrate signals to tree nodes itself (root-vs-cached distinction is
+    // load-bearing — see design.md D4a / D7). Each callback ALSO fans out
+    // to the search controller so its 60 s enumeration cache stays in sync
+    // with external paste / rename / delete (design.md D9).
     if (!this.dataSource) {
-      this.dataSource = new FileSystemDataSource({ rootGeneration: gen, workspaceRoot }, (m) =>
-        this.deps.postMessage(m),
+      this.dataSource = new FileSystemDataSource(
+        {
+          rootGeneration: gen,
+          workspaceRoot,
+          onDirectoryInvalidated: (absPath: string) => {
+            this.refreshDirectoryByPath(absPath);
+            this.searchController?.onFsInvalidated(absPath);
+          },
+          onRehydrate: () => {
+            this.refreshRootAndExpandedDirectories();
+            this.searchController?.onRehydrate();
+          },
+        },
+        (m) => this.deps.postMessage(m),
       );
     }
 

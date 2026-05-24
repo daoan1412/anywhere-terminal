@@ -87,11 +87,38 @@
   display: inline-block;
 }
 
-/* Folder dirty propagation — the badge `•` carries the dirty colour, but the
- * folder row's filename stays the default colour. This mirrors VS Code's
- * Explorer where parent folders use the badge as the only signal. */
+/* Folder dirty propagation — the badge `•` AND the folder name both carry the
+ * dirty colour, picked from the highest-severity propagating status currently
+ * present among descendants. Mirrors VS Code's Explorer (folder full of
+ * untracked files → green name + green dot; folder with a conflict → red
+ * name + red dot; etc.). The folder dot also renders larger than the per-file
+ * letter badges so it reads at a glance.
+ * See: add-file-tree-fs-watcher/design.md D10. */
 .file-tree-row.git-folder-dirty .git-badge {
+  font-size: 18px;
+  /* Pull the dot up slightly so its optical center aligns with the row text. */
+  line-height: 0.6;
+}
+.file-tree-row.git-folder-dirty-conflicted {
+  color: var(--vscode-gitDecoration-conflictingResourceForeground, var(--vscode-foreground));
+}
+.file-tree-row.git-folder-dirty-modified {
   color: var(--vscode-gitDecoration-modifiedResourceForeground, var(--vscode-foreground));
+}
+.file-tree-row.git-folder-dirty-renamed {
+  color: var(
+    --vscode-gitDecoration-renamedResourceForeground,
+    var(--vscode-gitDecoration-modifiedResourceForeground, var(--vscode-foreground))
+  );
+}
+.file-tree-row.git-folder-dirty-added {
+  color: var(
+    --vscode-gitDecoration-addedResourceForeground,
+    var(--vscode-gitDecoration-untrackedResourceForeground, var(--vscode-foreground))
+  );
+}
+.file-tree-row.git-folder-dirty-untracked {
+  color: var(--vscode-gitDecoration-untrackedResourceForeground, var(--vscode-foreground));
 }
 
 /* Hover + selection backgrounds live on the OUTER `.monaco-list-row` (stamped

@@ -4,6 +4,7 @@ import type { SessionManager } from "../session/SessionManager";
 import { readTerminalConfig, readTerminalSettings } from "../settings/SettingsReader";
 import type { ThemeChangedMessage, WebViewToExtensionMessage } from "../types/messages";
 import { FileTreeHost } from "./fileTreeHost";
+import type { WatcherPool } from "./fsWatcherPool";
 import type { GitDecorationProvider } from "./gitDecorationProvider";
 import { affectsHoverPreview, readHoverPreviewSettings, updateHoverPreviewSetting } from "./hoverPreviewSettings";
 import { openExternalLink } from "./openExternalLink";
@@ -130,10 +131,11 @@ export class TerminalEditorProvider {
     private readonly sessionManager: SessionManager,
     panel: vscode.WebviewPanel,
     gitDecorationProvider: GitDecorationProvider | null = null,
+    watcherPool: WatcherPool | null = null,
   ) {
     this._panel = panel;
     this._viewId = `editor-${crypto.randomUUID()}`;
-    this.fileTreeHost = new FileTreeHost(gitDecorationProvider);
+    this.fileTreeHost = new FileTreeHost(gitDecorationProvider, watcherPool);
     this.setupPanel();
   }
 
@@ -147,6 +149,7 @@ export class TerminalEditorProvider {
     context: vscode.ExtensionContext,
     sessionManager: SessionManager,
     gitDecorationProvider: GitDecorationProvider | null = null,
+    watcherPool: WatcherPool | null = null,
   ): vscode.Disposable {
     const panel = vscode.window.createWebviewPanel(
       TerminalEditorProvider.viewType,
@@ -159,7 +162,13 @@ export class TerminalEditorProvider {
       },
     );
 
-    const provider = new TerminalEditorProvider(context.extensionUri, sessionManager, panel, gitDecorationProvider);
+    const provider = new TerminalEditorProvider(
+      context.extensionUri,
+      sessionManager,
+      panel,
+      gitDecorationProvider,
+      watcherPool,
+    );
 
     // Track this panel for config updates + the provider instance for host-side
     // commands (rename). Disposal happens in `setupPanel`'s onDidDispose.
@@ -434,6 +443,8 @@ export class TerminalEditorProvider {
         case "request-set-file-tree-position":
         case "request-file-tree-search":
         case "cancel-file-tree-search":
+        case "request-subscribe-fs-changes":
+        case "request-unsubscribe-fs-changes":
           // File-tree messages are dispatched by FileTreeHost so the
           // sidebar / panel / editor providers share one wiring. See
           // providers/fileTreeHost.ts.

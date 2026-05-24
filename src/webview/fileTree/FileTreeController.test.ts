@@ -62,3 +62,25 @@ describe("FileTreeController.handleGitStatusChanged", () => {
     expect(handleGitStatusChanged).not.toHaveBeenCalled();
   });
 });
+
+describe("FileTreeController.handleFsChangesInvalidated + handleFsRehydrate", () => {
+  it("forwards fs-changes-invalidated to the panel verbatim", () => {
+    const handleFsChangesInvalidated = vi.fn();
+    const panel = { handleFsChangesInvalidated } as unknown as FileTreePanel;
+    const controller = makeController(panel);
+    const msg = { type: "fs-changes-invalidated", rootGeneration: 4, parent: "/abs" } as const;
+    controller.handleFsChangesInvalidated(msg);
+    expect(handleFsChangesInvalidated).toHaveBeenCalledTimes(1);
+    expect(handleFsChangesInvalidated).toHaveBeenCalledWith(msg);
+  });
+
+  it("forwards fs-rehydrate to the panel verbatim", () => {
+    const handleFsRehydrate = vi.fn();
+    const panel = { handleFsRehydrate } as unknown as FileTreePanel;
+    const controller = makeController(panel);
+    const msg = { type: "fs-rehydrate", rootGeneration: 4 } as const;
+    controller.handleFsRehydrate(msg);
+    expect(handleFsRehydrate).toHaveBeenCalledTimes(1);
+    expect(handleFsRehydrate).toHaveBeenCalledWith(msg);
+  });
+});

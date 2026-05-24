@@ -1,4 +1,5 @@
 import * as vscode from "vscode";
+import { createWatcherPool } from "./providers/fsWatcherPool";
 import { createGitDecorationProvider } from "./providers/gitDecorationProvider";
 import { resolveRenameTargetTabId } from "./providers/resolveRenameTarget";
 import { TerminalEditorProvider } from "./providers/TerminalEditorProvider";
@@ -33,12 +34,20 @@ export function activate(context: vscode.ExtensionContext) {
   const gitDecorationProvider = createGitDecorationProvider();
   context.subscriptions.push(gitDecorationProvider);
 
+  // Shared FS WatcherPool — singleton, refcounted across every FileTreeHost
+  // so we never spawn more than one `vscode.FileSystemWatcher` per directory
+  // regardless of how many webviews (sidebar / panel / editor) have it open.
+  // See: add-file-tree-fs-watcher design.md D1.
+  const fsWatcherPool = createWatcherPool();
+  context.subscriptions.push(fsWatcherPool);
+
   // Sidebar view
   const sidebarProvider = new TerminalViewProvider(
     context.extensionUri,
     sessionManager,
     "sidebar",
     gitDecorationProvider,
+    fsWatcherPool,
   );
 
   context.subscriptions.push(
@@ -48,7 +57,13 @@ export function activate(context: vscode.ExtensionContext) {
   );
 
   // Panel view
-  const panelProvider = new TerminalViewProvider(context.extensionUri, sessionManager, "panel", gitDecorationProvider);
+  const panelProvider = new TerminalViewProvider(
+    context.extensionUri,
+    sessionManager,
+    "panel",
+    gitDecorationProvider,
+    fsWatcherPool,
+  );
 
   context.subscriptions.push(
     vscode.window.registerWebviewViewProvider(TerminalViewProvider.panelViewType, panelProvider, {
@@ -59,7 +74,12 @@ export function activate(context: vscode.ExtensionContext) {
   // Editor terminal command — each invocation creates an independent editor tab terminal
   context.subscriptions.push(
     vscode.commands.registerCommand("anywhereTerminal.newTerminalInEditor", () => {
-      const panelDisposable = TerminalEditorProvider.createPanel(context, sessionManager, gitDecorationProvider);
+      const panelDisposable = TerminalEditorProvider.createPanel(
+        context,
+        sessionManager,
+        gitDecorationProvider,
+        fsWatcherPool,
+      );
       context.subscriptions.push(panelDisposable);
     }),
   );

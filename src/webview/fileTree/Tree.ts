@@ -62,6 +62,21 @@ interface FlatRow<T> {
 }
 
 /**
+ * Two FlatRows are "equal" only when EVERY field that drives rendering
+ * matches by identity / value. Used by `rebuildRows`' prefix/suffix diff
+ * to skip splicing rows whose DOM is already correct.
+ */
+function flatRowEquals<T>(a: FlatRow<T>, b: FlatRow<T>): boolean {
+  return (
+    a.element === b.element &&
+    a.depth === b.depth &&
+    a.expanded === b.expanded &&
+    a.hasChildren === b.hasChildren &&
+    a.matchData === b.matchData
+  );
+}
+
+/**
  * Cache entry keyed on REFERENCE identity of each tree element. Replacing
  * the parent (a fresh object) drops the cached children for that key — any
  * concurrent `getChildren` promise still in flight is also abandoned because
@@ -634,7 +649,13 @@ export class Tree<T extends object, TTemplate extends ITemplateData = ITemplateD
     // stale — when it resolves, loadChildren's identity check `node.childrenPromise === p`
     // is false and the result is dropped.
     node.childrenPromise = undefined;
-    this.rebuildRows();
+    // Deliberately DO NOT rebuild rows here. Doing so would render an
+    // intermediate "children-cleared" frame (the refreshed subtree would
+    // briefly vanish from the DOM) before `loadChildren` resolves and a
+    // second rebuildRows fills them back in. That two-step splice is the
+    // visible blink users see on every fs-watcher-driven refresh. Keep the
+    // existing rows in place; the diff-splice inside `rebuildRows` (called
+    // from `loadChildren`) will patch only what actually changed.
     void this.loadChildren(target);
   }
 
@@ -703,6 +724,16 @@ export class Tree<T extends object, TTemplate extends ITemplateData = ITemplateD
     for (let i = 0; i < length; i++) {
       const row = this.list.element(i);
       if (row.element === element) {
+        // If the row is ALREADY in the viewport, do not scroll. Centering or
+        // re-anchoring a visible row on every auto-reveal yanks the viewport
+        // around as the user clicks through files in VS Code Explorer — very
+        // disorienting. The visible-range check uses the listWidget's
+        // strict `firstVisibleIndex` / `lastVisibleIndex` so a row that's
+        // only partially in view (clipped at the edge) is still considered
+        // off-screen and gets scrolled in.
+        if (i >= this.list.firstVisibleIndex && i <= this.list.lastVisibleIndex) {
+          return;
+        }
         this.list.reveal(i, relativeTop);
         return;
       }
@@ -964,11 +995,18 @@ export class Tree<T extends object, TTemplate extends ITemplateData = ITemplateD
    * Recompute the flat row list from the current root + expansion + cache
    * state and splice it into the underlying List.
    *
-   * The diff is currently the simplest possible: replace the entire row
-   * range. For the v0 file-tree port this is fine — the file-tree workloads
-   * have hundreds, not tens-of-thousands, of rows. A future optimisation
-   * could compute a minimal splice using LCS, but that's out of scope for
-   * 2_2 (and would belong inside listWidget rather than here).
+   * Uses a common-prefix + common-suffix diff (O(N), identity-keyed) so a
+   * single create/delete from the fs watcher only re-splices the affected
+   * row range instead of wholesale-replacing every DOM row — which would
+   * cause a visible blink, scroll-jump, and selection loss. Rows whose
+   * FlatRow shape (element identity + depth + expanded + hasChildren +
+   * matchData) is unchanged keep their existing DOM untouched.
+   *
+   * For pathological inputs (interleaved changes across many indices) the
+   * algorithm falls back to splicing the full middle range — equivalent to
+   * the prior wholesale splice. LCS could shave that further but isn't
+   * needed for typical file-tree workloads (hundreds, not thousands, of
+   * visible rows; common edit is 1 added or 1 removed).
    */
   private rebuildRows(): void {
     if (this.disposed) {
@@ -999,13 +1037,33 @@ export class Tree<T extends object, TTemplate extends ITemplateData = ITemplateD
         this.appendRows(this.root, 0, rows);
       }
     }
+    const oldRows = this.rows;
     this.rows = rows;
-    // List.splice(0, oldLen, newRows) replaces all rows in one event-buffered
-    // call. The eventBufferer inside List ensures the focus/selection traits
-    // are reconciled in a single tick, so consumers don't see intermediate
-    // states.
-    const oldLen = this.list.length;
-    this.list.splice(0, oldLen, rows);
+
+    // Common-prefix + common-suffix diff. Equality requires the FULL FlatRow
+    // shape to match — otherwise a row whose expanded/hasChildren toggled
+    // (e.g. directory expanded) would slip through unchanged and render
+    // stale chevron/aria state.
+    const oldLen = oldRows.length;
+    const newLen = rows.length;
+    const commonMax = Math.min(oldLen, newLen);
+    let start = 0;
+    while (start < commonMax && flatRowEquals(oldRows[start], rows[start])) {
+      start++;
+    }
+    let oldEnd = oldLen;
+    let newEnd = newLen;
+    while (oldEnd > start && newEnd > start && flatRowEquals(oldRows[oldEnd - 1], rows[newEnd - 1])) {
+      oldEnd--;
+      newEnd--;
+    }
+    if (oldEnd === start && newEnd === start) {
+      // Nothing changed; skip the splice entirely so the listWidget never
+      // even fires a buffered event. This is the steady-state path for
+      // refresh() calls where the listing came back identical.
+      return;
+    }
+    this.list.splice(start, oldEnd - start, rows.slice(start, newEnd));
   }
 
   /**

@@ -24,6 +24,8 @@
 import * as vscode from "vscode";
 import type {
   FileTreeSearchResponseMessage,
+  FsChangesInvalidatedMessage,
+  FsRehydrateMessage,
   GitStatusChangedMessage,
   ReadDirectoryResponseMessage,
   RevealInFileTreeMessage,
@@ -34,6 +36,7 @@ import type {
 import { ActiveFileRevealer } from "./ActiveFileRevealer";
 import { handleRequestReadDirectory, type RootProvider, readEnabledExcludePatterns } from "./fileTreeRpcHandler";
 import { createDefaultSearchVscodeApi, FileTreeSearchHandler } from "./fileTreeSearchHandler";
+import type { WatcherPool } from "./fsWatcherPool";
 import type { GitDecorationProvider } from "./gitDecorationProvider";
 
 /**
@@ -66,12 +69,46 @@ export class FileTreeHost implements RootProvider {
   private searchHandler: FileTreeSearchHandler | null = null;
 
   /**
+   * Per-host map of subscribed paths → pool Disposable. One entry per
+   * `request-subscribe-fs-changes` for THIS host. Disposed on
+   * `request-unsubscribe-fs-changes` (per-path), on `attach()`-returned
+   * cleanup, and on a re-subscribe to the same path (idempotent — see
+   * `handleMessage`).
+   */
+  private readonly fsSubscriptions = new Map<string, vscode.Disposable>();
+
+  /**
+   * Stable per-webview post channel captured from `attach()`. Used for
+   * asynchronous host→webview messages (`fs-changes-invalidated`) whose
+   * lifecycle is decoupled from any single inbound RPC. Null between
+   * construction and the first `attach()` call.
+   */
+  private attachPost:
+    | ((
+        msg:
+          | WorkspaceRootChangedMessage
+          | RevealInFileTreeMessage
+          | GitStatusChangedMessage
+          | FsChangesInvalidatedMessage
+          | FsRehydrateMessage,
+      ) => void)
+    | null = null;
+  private attachReady: (() => boolean) | null = null;
+
+  /**
    * Optional git decoration provider. When provided, the host stamps every
    * `FileEntry` it ships back via `request-read-directory` with the current
    * `gitStatus` + `gitRevision`. When `null` (e.g. in unit tests that don't
    * exercise git decorations), entries omit those fields.
+   *
+   * `watcherPool` is the shared process-level FS watcher pool from
+   * `extension.ts`. When `null` (e.g. legacy unit tests), all subscribe /
+   * unsubscribe / rehydrate dispatch is a silent no-op.
    */
-  constructor(private readonly gitDecorationProvider: GitDecorationProvider | null = null) {}
+  constructor(
+    private readonly gitDecorationProvider: GitDecorationProvider | null = null,
+    private readonly watcherPool: WatcherPool | null = null,
+  ) {}
 
   /** Absolute path of the first workspace folder, or null when no workspace is open. */
   get workspaceRoot(): string | null {
@@ -101,8 +138,17 @@ export class FileTreeHost implements RootProvider {
    */
   attach(deps: {
     isReady: () => boolean;
-    post: (msg: WorkspaceRootChangedMessage | RevealInFileTreeMessage | GitStatusChangedMessage) => void;
+    post: (
+      msg:
+        | WorkspaceRootChangedMessage
+        | RevealInFileTreeMessage
+        | GitStatusChangedMessage
+        | FsChangesInvalidatedMessage
+        | FsRehydrateMessage,
+    ) => void;
   }): vscode.Disposable {
+    this.attachPost = deps.post;
+    this.attachReady = deps.isReady;
     const workspaceFolderSub = vscode.workspace.onDidChangeWorkspaceFolders(() => {
       // The GitDecorationProvider owns its own workspace-folder reset (O-W3
       // — without this, every FileTreeHost would call reset() once on a
@@ -142,10 +188,31 @@ export class FileTreeHost implements RootProvider {
       (msg) => deps.post(msg),
     );
 
-    return vscode.Disposable.from(workspaceFolderSub, gitDeltaSub, revealer, {
+    // Forward the pool's rising-edge focus rehydrate signal to THIS webview
+    // as `fs-rehydrate`. The webview refreshes root + currently-expanded
+    // directories (see design.md D7). Gated on `isReady` because the pool
+    // may fire before the webview boots (the user could refocus during
+    // initial activation).
+    const rehydrateSub = this.watcherPool?.onDidRequestRehydrate(() => {
+      if (!deps.isReady()) {
+        return;
+      }
+      deps.post({
+        type: "fs-rehydrate",
+        rootGeneration: this.rootGeneration,
+      });
+    }) ?? { dispose: () => {} };
+
+    return vscode.Disposable.from(workspaceFolderSub, gitDeltaSub, rehydrateSub, revealer, {
       dispose: () => {
         this.searchHandler?.dispose();
         this.searchHandler = null;
+        for (const sub of this.fsSubscriptions.values()) {
+          sub.dispose();
+        }
+        this.fsSubscriptions.clear();
+        this.attachPost = null;
+        this.attachReady = null;
       },
     });
   }
@@ -177,6 +244,60 @@ export class FileTreeHost implements RootProvider {
           this.gitDecorationProvider,
         );
         return true;
+      case "request-subscribe-fs-changes": {
+        // Drop messages tagged with a stale rootGeneration — the webview was
+        // referring to a now-superseded workspace state. Matches the existing
+        // rootGeneration gate on every other RPC.
+        if (msg.rootGeneration !== this.rootGeneration) {
+          return true;
+        }
+        if (!this.watcherPool) {
+          return true;
+        }
+        // Idempotent: a re-subscribe to the same path is a silent no-op so
+        // the data source can freely re-emit on cache lifecycle without
+        // tracking which paths it has already subscribed.
+        if (this.fsSubscriptions.has(msg.path)) {
+          return true;
+        }
+        const path = msg.path;
+        const sub = this.watcherPool.subscribe(path, () => {
+          // The closure deliberately reads `this.rootGeneration` LIVE so
+          // events arriving after a workspace folder change carry the
+          // CURRENT generation, which the webview then drops via its own
+          // gate — preferable to firing under a stale generation that the
+          // webview would also drop. Uses the stable per-webview channel
+          // captured in `attach()` so async events outlive any single
+          // inbound RPC's post-closure.
+          if (!this.attachPost || !this.attachReady?.()) {
+            return;
+          }
+          this.attachPost({
+            type: "fs-changes-invalidated",
+            rootGeneration: this.rootGeneration,
+            parent: path,
+          });
+        });
+        this.fsSubscriptions.set(path, sub);
+        return true;
+      }
+      case "request-unsubscribe-fs-changes": {
+        // Intentionally bypass the rootGeneration gate (review round-1 W1):
+        // a rapid root rotation A→B→C posts the bulk unsubscribe for B's
+        // paths under generation B, but the host may already be at C by the
+        // time the message arrives — gating would drop the unsubscribe and
+        // leak the host-side subscription entry. The map is path-keyed and
+        // every entry belongs to THIS webview, so disposing requested paths
+        // is always safe regardless of generation.
+        for (const p of msg.paths) {
+          const sub = this.fsSubscriptions.get(p);
+          if (sub) {
+            sub.dispose();
+            this.fsSubscriptions.delete(p);
+          }
+        }
+        return true;
+      }
       case "request-file-tree-search":
         if (!this.searchHandler) {
           this.searchHandler = new FileTreeSearchHandler(this, createDefaultSearchVscodeApi());

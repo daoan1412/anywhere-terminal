@@ -403,6 +403,12 @@ const routeMessage = createMessageRouter({
   onGitStatusChanged(msg) {
     fileTreeController?.handleGitStatusChanged(msg);
   },
+  onFsChangesInvalidated(msg) {
+    fileTreeController?.handleFsChangesInvalidated(msg);
+  },
+  onFsRehydrate(msg) {
+    fileTreeController?.handleFsRehydrate(msg);
+  },
 });
 
 // ─── Init & Bootstrap ───────────────────────────────────────────────

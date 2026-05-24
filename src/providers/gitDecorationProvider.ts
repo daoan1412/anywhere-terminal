@@ -60,6 +60,20 @@ export interface GitDecorationProvider {
   /** Current status + revision for an absolute path. status === undefined when not decorated. */
   getStatus(absPath: string): { status: GitStatus | undefined; revision: number };
 
+  /**
+   * Aggregate descendant dirty counts for a folder — every dirty path the
+   * provider currently knows about that falls under `folderAbsPath`, grouped
+   * by propagating status. `deleted` and `ignored` are excluded (they don't
+   * propagate per design D6). Returns `undefined` when there are no dirty
+   * descendants.
+   *
+   * Used by the host to pre-stamp directory FileEntry rows so the webview
+   * can render the correct folder badge color BEFORE the user expands the
+   * directory — matches VS Code Explorer behaviour. See:
+   * asimov/changes/add-file-tree-fs-watcher/design.md D11.
+   */
+  getDescendantBuckets(folderAbsPath: string): Partial<Record<GitStatus, number>> | undefined;
+
   /** Current global revision (used by the host when stamping snapshot entries that have no status). */
   currentRevision(): number;
 
@@ -587,6 +601,42 @@ export function createGitDecorationProvider(options: CreateGitDecorationProvider
       const status = computeMergedStatus(absPath);
       const rev = revisions.get(absPath) ?? revision;
       return { status, revision: rev };
+    },
+    getDescendantBuckets(folderAbsPath: string) {
+      flushPendingEmit();
+      // Pre-compute the path-containment boundary once per call. Each
+      // repoMap is then a flat O(M) iteration so total cost is O(N) where
+      // N = sum of dirty paths across all repos.
+      const isWin = isWindowsAbsPath(folderAbsPath);
+      const normalisedRoot = normalizePathForCompare(folderAbsPath);
+      const sep = isWin ? "\\" : "/";
+      const boundary = normalisedRoot.endsWith(sep) ? normalisedRoot : normalisedRoot + sep;
+      // Per-path merge across repos so a path that appears in two overlapping
+      // worktrees uses the higher-severity status (matches `getStatus`).
+      const merged = new Map<string, GitStatus>();
+      for (const m of repoMaps.values()) {
+        for (const [p, s] of m) {
+          const np = normalizePathForCompare(p);
+          if (np !== normalisedRoot && !np.startsWith(boundary)) {
+            continue;
+          }
+          const existing = merged.get(p);
+          merged.set(p, existing === undefined ? s : pickHigherSeverity(existing, s));
+        }
+      }
+      let counts: Partial<Record<GitStatus, number>> | undefined;
+      for (const status of merged.values()) {
+        // Mirrors the webview's `isDirtyForPropagation`: `deleted` and
+        // `ignored` are excluded so the badge doesn't light up for them.
+        if (status === "deleted" || status === "ignored") {
+          continue;
+        }
+        if (!counts) {
+          counts = {};
+        }
+        counts[status] = (counts[status] ?? 0) + 1;
+      }
+      return counts;
     },
     currentRevision() {
       flushPendingEmit();

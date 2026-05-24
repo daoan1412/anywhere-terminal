@@ -58,6 +58,15 @@ export interface FileEntry {
    * asimov/changes/add-file-tree-git-decorations/design.md D10.
    */
   gitRevision?: number;
+  /**
+   * Directory entries ONLY: per-status count of dirty descendants the git
+   * provider currently tracks under this folder (any depth). Lets the
+   * webview render the correct folder badge color BEFORE the user expands
+   * the directory. Absent for file entries and for directories with no
+   * dirty descendants. See:
+   * asimov/changes/add-file-tree-fs-watcher/design.md D11.
+   */
+  dirtyDescendantCountsByStatus?: Partial<Record<GitStatus, number>>;
 }
 
 /** Position of the file-tree panel relative to the terminal area. */
@@ -254,6 +263,38 @@ export interface RequestSetFileTreePositionMessage {
   type: "request-set-file-tree-position";
 }
 
+/**
+ * Webview → Extension: ask the host to start watching `path` for create/delete
+ * events. Fire-and-forget — no response is sent on success. The host:
+ *   - validates `rootGeneration` matches its current value (drops on mismatch);
+ *   - subscribes the path in the shared `WatcherPool` (refcounted across hosts);
+ *   - posts `FsChangesInvalidatedMessage` when the path's debounced watcher fires.
+ *
+ * Re-subscribing the same path from the same webview is idempotent (host
+ * dedupes by path in its per-host subscription map). See:
+ * asimov/changes/add-file-tree-fs-watcher/specs/file-tree-rpc/spec.md.
+ */
+export interface RequestSubscribeFsChangesMessage {
+  type: "request-subscribe-fs-changes";
+  /** Webview's last-known workspace root generation. */
+  rootGeneration: number;
+  /** Absolute path of the directory to watch. */
+  path: string;
+}
+
+/**
+ * Webview → Extension: ask the host to stop watching the given paths.
+ * Fire-and-forget. Bulk shape so eviction of a subtree only takes one
+ * round-trip. Unknown paths in the array are silently ignored.
+ */
+export interface RequestUnsubscribeFsChangesMessage {
+  type: "request-unsubscribe-fs-changes";
+  /** Webview's last-known workspace root generation. */
+  rootGeneration: number;
+  /** Absolute paths to stop watching. */
+  paths: string[];
+}
+
 /** Request the extension host to read a file for the hover preview popup. */
 export interface RequestFilePreviewMessage {
   type: "requestFilePreview";
@@ -300,6 +341,8 @@ export type WebViewToExtensionMessage =
   | RequestFileTreeSearchMessage
   | CancelFileTreeSearchMessage
   | RequestSetFileTreePositionMessage
+  | RequestSubscribeFsChangesMessage
+  | RequestUnsubscribeFsChangesMessage
   | UpdateHoverPreviewSettingMessage;
 
 // ─── Extension → WebView Messages ───────────────────────────────────
@@ -663,6 +706,32 @@ export interface GitStatusChangedMessage {
 }
 
 /**
+ * Extension → Webview: a watched directory had a create/delete event. The
+ * webview re-runs `request-read-directory` for `parent` so the new entries
+ * are stamped with fresh git status via the existing read pipeline. The
+ * webview SHALL drop the message when `rootGeneration` no longer matches its
+ * current value. See: asimov/changes/add-file-tree-fs-watcher/design.md D4.
+ */
+export interface FsChangesInvalidatedMessage {
+  type: "fs-changes-invalidated";
+  rootGeneration: number;
+  /** Absolute path of the directory whose direct children changed. */
+  parent: string;
+}
+
+/**
+ * Extension → Webview: window-focus rising edge or other coarse-grained
+ * resync signal. The webview SHALL refresh the synthetic root node and every
+ * currently-expanded directory node (NOT every cached directory — see
+ * asimov/changes/add-file-tree-fs-watcher/design.md D7). The webview SHALL
+ * drop the message on `rootGeneration` mismatch.
+ */
+export interface FsRehydrateMessage {
+  type: "fs-rehydrate";
+  rootGeneration: number;
+}
+
+/**
  * Two valid shapes:
  *
  * 1. OSC 7 path (`source: 'osc7'` or omitted): set `sessionId` + `cwd`.
@@ -721,4 +790,6 @@ export type ExtensionToWebViewMessage =
   | SetFileTreePositionMessage
   | WorkspaceRootChangedMessage
   | GitStatusChangedMessage
+  | FsChangesInvalidatedMessage
+  | FsRehydrateMessage
   | RevealInFileTreeMessage;

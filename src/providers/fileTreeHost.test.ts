@@ -20,6 +20,7 @@ import type {
   WebViewToExtensionMessage,
 } from "../types/messages";
 import { FileTreeHost } from "./fileTreeHost";
+import type { WatcherPool } from "./fsWatcherPool";
 import type { GitDecorationProvider } from "./gitDecorationProvider";
 
 describe("FileTreeHost.handleMessage", () => {
@@ -104,6 +105,7 @@ describe("FileTreeHost — git decoration stamping on read-directory", () => {
         return { status, revision };
       },
       currentRevision: () => revision,
+      getDescendantBuckets: () => undefined,
       onDidChange: () => ({ dispose: () => {} }),
       reset: () => {},
       dispose: () => {},
@@ -151,6 +153,7 @@ describe("FileTreeHost — git decoration stamping on read-directory", () => {
     const provider: GitDecorationProvider = {
       getStatus: (p) => ({ status: currentTable.get(p), revision: currentRev }),
       currentRevision: () => currentRev,
+      getDescendantBuckets: () => undefined,
       onDidChange: () => ({ dispose: () => {} }),
       reset: () => {},
       dispose: () => {},
@@ -173,6 +176,7 @@ describe("FileTreeHost.attach — git delta forwarding", () => {
     const provider: GitDecorationProvider = {
       getStatus: () => ({ status: undefined, revision: 0 }),
       currentRevision: () => 0,
+      getDescendantBuckets: () => undefined,
       onDidChange: (listener) => {
         onDelta = listener;
         return { dispose: () => {} };
@@ -207,6 +211,7 @@ describe("FileTreeHost.attach — git delta forwarding", () => {
     const provider: GitDecorationProvider = {
       getStatus: () => ({ status: undefined, revision: 0 }),
       currentRevision: () => 0,
+      getDescendantBuckets: () => undefined,
       onDidChange: (listener) => {
         onDelta = listener;
         return { dispose: () => {} };
@@ -231,6 +236,39 @@ describe("FileTreeHost.attach — git delta forwarding", () => {
     sub.dispose();
   });
 
+  it("forwards pool's onDidRequestRehydrate as fs-rehydrate with current rootGeneration (only when ready)", () => {
+    let onRehydrate: (() => void) | null = null;
+    const pool: WatcherPool = {
+      subscribe: () => ({ dispose: () => {} }),
+      onDidRequestRehydrate: (listener) => {
+        onRehydrate = listener;
+        return { dispose: () => {} };
+      },
+      dispose: () => {},
+    };
+    const host = new FileTreeHost(null, pool);
+    const posted: Array<{ type: string; rootGeneration?: number }> = [];
+    let ready = false;
+    const sub = host.attach({
+      isReady: () => ready,
+      post: (m) => posted.push(m as { type: string; rootGeneration?: number }),
+    });
+    expect(onRehydrate).not.toBeNull();
+
+    // Not ready yet — drop.
+    onRehydrate!();
+    expect(posted).toHaveLength(0);
+
+    ready = true;
+    host.rootGeneration = 5;
+    onRehydrate!();
+    expect(posted).toHaveLength(1);
+    expect(posted[0].type).toBe("fs-rehydrate");
+    expect(posted[0].rootGeneration).toBe(5);
+
+    sub.dispose();
+  });
+
   it("bumps rootGeneration on workspace folder change WITHOUT calling provider.reset() (O-W3)", () => {
     // The provider now owns its own workspace-folder reset (subscribes once
     // inside `createGitDecorationProvider`). FileTreeHost must NOT call
@@ -240,6 +278,7 @@ describe("FileTreeHost.attach — git delta forwarding", () => {
     const provider: GitDecorationProvider = {
       getStatus: () => ({ status: undefined, revision: 0 }),
       currentRevision: () => 0,
+      getDescendantBuckets: () => undefined,
       onDidChange: () => ({ dispose: () => {} }),
       reset: resetSpy,
       dispose: () => {},
@@ -263,5 +302,208 @@ describe("FileTreeHost.attach — git delta forwarding", () => {
     } finally {
       (vscode.workspace as { onDidChangeWorkspaceFolders: unknown }).onDidChangeWorkspaceFolders = original;
     }
+  });
+});
+
+describe("FileTreeHost — FS subscribe/unsubscribe/rehydrate dispatch", () => {
+  function makeFakePool(): {
+    pool: WatcherPool;
+    subscribeCalls: Array<{ path: string; cb: () => void; dispose: ReturnType<typeof vi.fn> }>;
+    fireRehydrate: () => void;
+  } {
+    const subscribeCalls: Array<{ path: string; cb: () => void; dispose: ReturnType<typeof vi.fn> }> = [];
+    let rehydrateListener: (() => void) | null = null;
+    const pool: WatcherPool = {
+      subscribe: (path: string, cb: () => void) => {
+        const dispose = vi.fn();
+        subscribeCalls.push({ path, cb, dispose });
+        return { dispose };
+      },
+      onDidRequestRehydrate: (l) => {
+        rehydrateListener = l;
+        return { dispose: () => {} };
+      },
+      dispose: () => {},
+    };
+    return {
+      pool,
+      subscribeCalls,
+      fireRehydrate: () => rehydrateListener?.(),
+    };
+  }
+
+  function attachHost(host: FileTreeHost): {
+    posted: Array<{ type: string; rootGeneration?: number; parent?: string }>;
+    sub: vscode.Disposable;
+  } {
+    const posted: Array<{ type: string; rootGeneration?: number; parent?: string }> = [];
+    const sub = host.attach({
+      isReady: () => true,
+      post: (m) => posted.push(m as { type: string; rootGeneration?: number; parent?: string }),
+    });
+    return { posted, sub };
+  }
+
+  it("(a) request-subscribe-fs-changes calls pool.subscribe once; firing the callback posts fs-changes-invalidated", () => {
+    const { pool, subscribeCalls } = makeFakePool();
+    const host = new FileTreeHost(null, pool);
+    const { posted, sub } = attachHost(host);
+
+    host.handleMessage({ type: "request-subscribe-fs-changes", rootGeneration: 0, path: "/foo" }, () => {});
+    expect(subscribeCalls.length).toBe(1);
+    expect(subscribeCalls[0].path).toBe("/foo");
+
+    // Invoke the captured callback — the host should post the invalidate.
+    subscribeCalls[0].cb();
+    expect(posted).toHaveLength(1);
+    expect(posted[0].type).toBe("fs-changes-invalidated");
+    expect(posted[0].parent).toBe("/foo");
+    expect(posted[0].rootGeneration).toBe(0);
+
+    sub.dispose();
+  });
+
+  it("(b) idempotent — second subscribe to the same path is a no-op", () => {
+    const { pool, subscribeCalls } = makeFakePool();
+    const host = new FileTreeHost(null, pool);
+    const { sub } = attachHost(host);
+
+    host.handleMessage({ type: "request-subscribe-fs-changes", rootGeneration: 0, path: "/foo" }, () => {});
+    host.handleMessage({ type: "request-subscribe-fs-changes", rootGeneration: 0, path: "/foo" }, () => {});
+    expect(subscribeCalls.length).toBe(1);
+
+    sub.dispose();
+  });
+
+  it("(c) stale rootGeneration: subscribe dropped, no pool.subscribe call, no post", () => {
+    const { pool, subscribeCalls } = makeFakePool();
+    const host = new FileTreeHost(null, pool);
+    const { posted, sub } = attachHost(host);
+    host.rootGeneration = 7;
+
+    host.handleMessage({ type: "request-subscribe-fs-changes", rootGeneration: 6, path: "/foo" }, () => {});
+    expect(subscribeCalls.length).toBe(0);
+    expect(posted).toHaveLength(0);
+
+    sub.dispose();
+  });
+
+  it("(d) request-unsubscribe-fs-changes disposes each matching map entry; ignores unknown", () => {
+    const { pool, subscribeCalls } = makeFakePool();
+    const host = new FileTreeHost(null, pool);
+    const { sub } = attachHost(host);
+
+    host.handleMessage({ type: "request-subscribe-fs-changes", rootGeneration: 0, path: "/a" }, () => {});
+    host.handleMessage({ type: "request-subscribe-fs-changes", rootGeneration: 0, path: "/b" }, () => {});
+    expect(subscribeCalls.length).toBe(2);
+
+    host.handleMessage(
+      { type: "request-unsubscribe-fs-changes", rootGeneration: 0, paths: ["/a", "/missing"] },
+      () => {},
+    );
+    expect(subscribeCalls[0].dispose).toHaveBeenCalledTimes(1);
+    expect(subscribeCalls[1].dispose).not.toHaveBeenCalled();
+
+    // Re-subscribe after unsubscribe creates a NEW pool subscription
+    // (idempotency check applies only to active entries).
+    host.handleMessage({ type: "request-subscribe-fs-changes", rootGeneration: 0, path: "/a" }, () => {});
+    expect(subscribeCalls.length).toBe(3);
+
+    sub.dispose();
+  });
+
+  it("(d2) request-unsubscribe-fs-changes bypasses rootGeneration gate (review W1)", () => {
+    // After a rapid root rotation A→B→C, the webview posts the bulk
+    // unsubscribe for B under generation B, but the host is already at
+    // generation C. The unsubscribe MUST still dispose the matching map
+    // entry — otherwise the host leaks the subscription forever.
+    const { pool, subscribeCalls } = makeFakePool();
+    const host = new FileTreeHost(null, pool);
+    const { sub } = attachHost(host);
+
+    host.handleMessage({ type: "request-subscribe-fs-changes", rootGeneration: 0, path: "/a" }, () => {});
+    expect(subscribeCalls.length).toBe(1);
+
+    // Rotate the host's generation past the message's tag.
+    host.rootGeneration = 5;
+    host.handleMessage({ type: "request-unsubscribe-fs-changes", rootGeneration: 2, paths: ["/a"] }, () => {});
+    expect(subscribeCalls[0].dispose).toHaveBeenCalledTimes(1);
+
+    sub.dispose();
+  });
+
+  it("(e) callback closes over LIVE rootGeneration — bump between subscribe and event fire is reflected", () => {
+    const { pool, subscribeCalls } = makeFakePool();
+    const host = new FileTreeHost(null, pool);
+    const { posted, sub } = attachHost(host);
+
+    host.handleMessage({ type: "request-subscribe-fs-changes", rootGeneration: 0, path: "/foo" }, () => {});
+    host.rootGeneration = 9;
+    subscribeCalls[0].cb();
+
+    expect(posted).toHaveLength(1);
+    expect(posted[0].rootGeneration).toBe(9);
+
+    sub.dispose();
+  });
+
+  it("(f) rehydrate posts fs-rehydrate only when isReady() is true", () => {
+    const { pool, fireRehydrate } = makeFakePool();
+    const host = new FileTreeHost(null, pool);
+    const posted: Array<{ type: string }> = [];
+    let ready = false;
+    const sub = host.attach({
+      isReady: () => ready,
+      post: (m) => posted.push(m as { type: string }),
+    });
+
+    fireRehydrate();
+    expect(posted).toHaveLength(0);
+
+    ready = true;
+    fireRehydrate();
+    expect(posted).toHaveLength(1);
+    expect(posted[0].type).toBe("fs-rehydrate");
+
+    sub.dispose();
+  });
+
+  it("(g) attach() cleanup Disposable disposes every subscription + the rehydrate sub", () => {
+    const { pool, subscribeCalls } = makeFakePool();
+    const host = new FileTreeHost(null, pool);
+    const { sub } = attachHost(host);
+
+    host.handleMessage({ type: "request-subscribe-fs-changes", rootGeneration: 0, path: "/a" }, () => {});
+    host.handleMessage({ type: "request-subscribe-fs-changes", rootGeneration: 0, path: "/b" }, () => {});
+
+    sub.dispose();
+    expect(subscribeCalls[0].dispose).toHaveBeenCalledTimes(1);
+    expect(subscribeCalls[1].dispose).toHaveBeenCalledTimes(1);
+
+    // After cleanup, the per-host map is empty — re-attach can re-subscribe.
+    const { sub: sub2 } = attachHost(host);
+    host.handleMessage({ type: "request-subscribe-fs-changes", rootGeneration: 0, path: "/a" }, () => {});
+    expect(subscribeCalls.length).toBe(3);
+    sub2.dispose();
+  });
+
+  it("(h) when watcherPool is null, subscribe/unsubscribe messages are silently ignored", () => {
+    const host = new FileTreeHost(null, null);
+    const posted: unknown[] = [];
+    const sub = host.attach({ isReady: () => true, post: (m) => posted.push(m) });
+
+    const subResult = host.handleMessage(
+      { type: "request-subscribe-fs-changes", rootGeneration: 0, path: "/foo" },
+      () => {},
+    );
+    const unsubResult = host.handleMessage(
+      { type: "request-unsubscribe-fs-changes", rootGeneration: 0, paths: ["/foo"] },
+      () => {},
+    );
+    expect(subResult).toBe(true);
+    expect(unsubResult).toBe(true);
+    expect(posted).toHaveLength(0);
+
+    sub.dispose();
   });
 });

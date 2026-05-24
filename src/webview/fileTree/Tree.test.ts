@@ -326,6 +326,185 @@ describe("Tree<T>", () => {
     tree.dispose();
   });
 
+  it("incremental refresh preserves DOM identity for unchanged rows when one child is added", async () => {
+    // Regression test for the rebuildRows wholesale-splice that caused
+    // visible blink on fs-watcher refresh: only the affected row range
+    // should be spliced, NOT the entire list. Verified by tagging row DOM
+    // elements with a unique marker before refresh and checking the marker
+    // survives on rows whose FlatRow shape (element + depth + expanded +
+    // hasChildren + matchData) is unchanged.
+    const { root, a } = buildTree();
+    const host = makeHost();
+    const { source } = makeDataSource();
+    const tree = new Tree<Node>(host, source, makeRenderer());
+    tree.layout(400, 300);
+
+    tree.setInput(root);
+    await flushMicrotasks();
+    tree.expand(a);
+    await flushMicrotasks();
+
+    const tagBefore = (label: string): HTMLElement => {
+      const row = findRowByLabel(host, label);
+      if (!row) {
+        throw new Error(`Test setup: row for "${label}" not found`);
+      }
+      row.dataset.testMarker = `marked-${label}`;
+      return row;
+    };
+    const a1Row = tagBefore("a1");
+    const a2Row = tagBefore("a2");
+    const bRow = tagBefore("b");
+
+    // Add a new sibling to `a`, then refresh.
+    const a3: Node = { id: "a3", name: "a3" };
+    a.children = [...(a.children ?? []), a3];
+    tree.refresh(a);
+    await flushMicrotasks();
+
+    // Pre-existing rows in `a`'s prefix and the global suffix (b) MUST keep
+    // their tagged DOM — proves the splice didn't recreate them.
+    expect(a1Row.dataset.testMarker).toBe("marked-a1");
+    expect(a2Row.dataset.testMarker).toBe("marked-a2");
+    expect(bRow.dataset.testMarker).toBe("marked-b");
+    // And the new row landed.
+    expect(readRowLabels(host)).toContain("a3");
+
+    tree.dispose();
+  });
+
+  it("incremental refresh preserves DOM identity for unchanged rows when one child is removed", async () => {
+    const { root, a, a1 } = buildTree();
+    const host = makeHost();
+    const { source } = makeDataSource();
+    const tree = new Tree<Node>(host, source, makeRenderer());
+    tree.layout(400, 300);
+
+    tree.setInput(root);
+    await flushMicrotasks();
+    tree.expand(a);
+    await flushMicrotasks();
+
+    const a2Row = findRowByLabel(host, "a2");
+    const bRow = findRowByLabel(host, "b");
+    if (!a2Row || !bRow) {
+      throw new Error("Test setup: expected rows not found");
+    }
+    a2Row.dataset.testMarker = "marked-a2";
+    bRow.dataset.testMarker = "marked-b";
+
+    // Remove a1 (the FIRST child of a), then refresh.
+    a.children = (a.children ?? []).filter((n) => n !== a1);
+    tree.refresh(a);
+    await flushMicrotasks();
+
+    // a2 and b are in the unchanged suffix — markers must survive.
+    expect(a2Row.dataset.testMarker).toBe("marked-a2");
+    expect(bRow.dataset.testMarker).toBe("marked-b");
+    expect(readRowLabels(host)).not.toContain("a1");
+
+    tree.dispose();
+  });
+
+  it("no-op refresh skips the splice entirely when nothing changed", async () => {
+    // Refresh that returns identical children should not even touch the
+    // underlying list — the eventBufferer otherwise still fires a buffered
+    // splice event that listeners might react to.
+    const { root, a } = buildTree();
+    const host = makeHost();
+    const { source } = makeDataSource();
+    const tree = new Tree<Node>(host, source, makeRenderer());
+    tree.layout(400, 300);
+
+    tree.setInput(root);
+    await flushMicrotasks();
+    tree.expand(a);
+    await flushMicrotasks();
+
+    // Snapshot DOM rows by reference.
+    const rowsBefore = Array.from(host.querySelectorAll(".monaco-list-row"));
+    rowsBefore.forEach((row, i) => {
+      (row as HTMLElement).dataset.snapshotIdx = String(i);
+    });
+
+    // Refresh with no underlying change.
+    tree.refresh(a);
+    await flushMicrotasks();
+
+    const rowsAfter = Array.from(host.querySelectorAll(".monaco-list-row"));
+    expect(rowsAfter.length).toBe(rowsBefore.length);
+    rowsAfter.forEach((row, i) => {
+      // Every row's snapshotIdx must survive — confirms no row was destroyed.
+      expect((row as HTMLElement).dataset.snapshotIdx).toBe(String(i));
+    });
+
+    tree.dispose();
+  });
+
+  it("revealElement is a no-op when the row is already in the viewport", async () => {
+    // Regression: clicking through files in VS Code Explorer fires autoReveal
+    // for each one. If the matching row is already visible (common case in
+    // a short tree), centering it in the viewport jerks the scroll and is
+    // jarring. Confirms revealElement bails out when the index sits within
+    // [firstVisibleIndex, lastVisibleIndex] of the listWidget.
+    const { root, a } = buildTree();
+    const host = makeHost();
+    const { source } = makeDataSource();
+    const tree = new Tree<Node>(host, source, makeRenderer());
+    // Use a tall viewport so every row in the small test tree is in view.
+    tree.layout(400, 800);
+
+    tree.setInput(root);
+    await flushMicrotasks();
+    tree.expand(a);
+    await flushMicrotasks();
+
+    // Reach into the underlying List to spy on `reveal`. Private access is
+    // tolerable here — Tree<T> wraps List directly and there's no public
+    // hook to observe scroll calls otherwise.
+    const list = (tree as unknown as { list: { reveal: (i: number, t?: number) => void } }).list;
+    const revealSpy = vi.spyOn(list, "reveal");
+
+    // `a` (and a1, a2, b) are all rendered in the tall viewport.
+    tree.revealElement(a, 0.5);
+    expect(revealSpy).not.toHaveBeenCalled();
+
+    tree.dispose();
+  });
+
+  it("revealElement DOES scroll when the row is currently off-screen", async () => {
+    // Sanity: when the row is genuinely not visible (tiny viewport that only
+    // shows a couple of rows), reveal must still scroll. Verifies the bail
+    // gate doesn't accidentally suppress every reveal.
+    const { root, a, a1, a2 } = buildTree();
+    // Manually pad the tree with extra siblings so the target sits below the
+    // viewport. Reuse the same Node interface; tag with id for clarity.
+    const padding: Node[] = [];
+    for (let i = 0; i < 30; i++) {
+      padding.push({ id: `pad-${i}`, name: `pad-${i}` });
+    }
+    root.children = [a, ...padding];
+    a.children = [a1, a2];
+
+    const host = makeHost();
+    const { source } = makeDataSource();
+    const tree = new Tree<Node>(host, source, makeRenderer());
+    // Short viewport — only a handful of rows fit.
+    tree.layout(400, 80);
+
+    tree.setInput(root);
+    await flushMicrotasks();
+
+    const list = (tree as unknown as { list: { reveal: (i: number, t?: number) => void } }).list;
+    const revealSpy = vi.spyOn(list, "reveal");
+
+    // Target the last padding row — guaranteed below the visible window.
+    tree.revealElement(padding[padding.length - 1], 0.5);
+    expect(revealSpy).toHaveBeenCalledTimes(1);
+
+    tree.dispose();
+  });
+
   it("stale-async: expand then collapse before resolve drops the resolved value", async () => {
     const { root, a, a1, a2 } = buildTree();
     const host = makeHost();

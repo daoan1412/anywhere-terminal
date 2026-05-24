@@ -214,6 +214,59 @@ export class FileTreeSearchController {
   }
 
   /**
+   * Drop the cached enumeration when an external FS change touched the
+   * controller's currently-pinned scope. Wired by `FileTreePanel` into the
+   * same callback that drives tree refresh on `fs-changes-invalidated` so
+   * search results no longer go stale within the 60 s TTL window after a
+   * paste / rename / delete done in VS Code Explorer or any shell.
+   *
+   *   - `absPath === scope` OR `absPath` is a descendant of scope → drop
+   *     cache; if search is currently active, reschedule the enumeration so
+   *     the user sees fresh results on the next render tick.
+   *   - Otherwise → no-op (the change is outside the scope we enumerate).
+   *
+   * See: asimov/changes/add-file-tree-fs-watcher/design.md D9.
+   */
+  onFsInvalidated(absPath: string): void {
+    if (!this.cache) {
+      return;
+    }
+    const scope = this.cache.scope;
+    // Handle BOTH `/` (POSIX) and `\` (Windows) — `absPath` arrives in
+    // host-native format. Browser-bundle constraint forbids `node:path`.
+    if (absPath === scope) {
+      this.invalidateCache();
+      return;
+    }
+    const sep = scope.includes("\\") && !scope.includes("/") ? "\\" : "/";
+    const boundary = scope.endsWith(sep) ? scope : scope + sep;
+    if (absPath.startsWith(boundary)) {
+      this.invalidateCache();
+    }
+  }
+
+  /**
+   * Drop the cached enumeration unconditionally (window-focus rising edge
+   * from `WatcherPool`). When search is active, reschedule the enumeration
+   * so results refresh on the next render tick.
+   *
+   * See: asimov/changes/add-file-tree-fs-watcher/design.md D7, D9.
+   */
+  onRehydrate(): void {
+    if (!this.cache) {
+      return;
+    }
+    this.invalidateCache();
+  }
+
+  private invalidateCache(): void {
+    this.cache = null;
+    if (this.isActive()) {
+      this.scheduleEnumeration();
+    }
+  }
+
+  /**
    * Notify the controller that the workspace root changed. Invalidates the
    * cache and drops any in-flight requestId. Also tells the host to cancel
    * any in-flight enumeration that would otherwise run to completion before

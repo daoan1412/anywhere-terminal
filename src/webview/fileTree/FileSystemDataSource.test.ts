@@ -11,14 +11,23 @@ import { FileSystemDataSource } from "./FileSystemDataSource";
 
 // ─── Helpers ────────────────────────────────────────────────────────
 
+type AnyPostedMessage =
+  | RequestReadDirectoryMessage
+  | import("../../types/messages").RequestSubscribeFsChangesMessage
+  | import("../../types/messages").RequestUnsubscribeFsChangesMessage;
+
 interface Harness {
   ds: FileSystemDataSource;
+  /** Only read-directory posts — narrowed for ergonomic .requestId/.path access. */
   posted: RequestReadDirectoryMessage[];
+  /** Every posted message including subscribe / unsubscribe. */
+  allPosted: AnyPostedMessage[];
   warnSpy: ReturnType<typeof vi.spyOn>;
 }
 
 function makeHarness(opts?: { rootGeneration?: number; workspaceRoot?: string | null }): Harness {
   const posted: RequestReadDirectoryMessage[] = [];
+  const allPosted: AnyPostedMessage[] = [];
   const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
   // `??` swaps `null` for the default — but `null` is a meaningful value for
   // `workspaceRoot` (no workspace open). Detect "key absent" via `in` to keep
@@ -29,9 +38,14 @@ function makeHarness(opts?: { rootGeneration?: number; workspaceRoot?: string | 
       rootGeneration: opts?.rootGeneration ?? 1,
       workspaceRoot,
     },
-    (m) => posted.push(m),
+    (m) => {
+      allPosted.push(m);
+      if (m.type === "request-read-directory") {
+        posted.push(m);
+      }
+    },
   );
-  return { ds, posted, warnSpy };
+  return { ds, posted, allPosted, warnSpy };
 }
 
 function entry(name: string, kind: "file" | "directory" = "file"): FileEntry {
@@ -499,6 +513,107 @@ describe("FileSystemDataSource — applyGitStatusDelta", () => {
   });
 });
 
+describe("FileSystemDataSource — per-status dirty bucket map (D10)", () => {
+  let h: Harness;
+  beforeEach(() => {
+    h = makeHarness({ workspaceRoot: "/root" });
+  });
+
+  it("populates a single bucket when only one kind of descendant is dirty", async () => {
+    const top = await loadChildren(h, null, [gitEntry("src", "directory", "/root", undefined, 1)]);
+    const srcNode = top[0];
+    await loadChildren(h, srcNode, [
+      gitEntry("a.md", "file", "/root/src", "untracked", 2),
+      gitEntry("b.md", "file", "/root/src", "untracked", 2),
+      gitEntry("c.md", "file", "/root/src", "untracked", 2),
+    ]);
+    expect(srcNode.dirtyDescendantCount).toBe(3);
+    expect(srcNode.dirtyDescendantCountsByStatus).toEqual({ untracked: 3 });
+  });
+
+  it("tracks counts per kind when descendants have mixed statuses", async () => {
+    const top = await loadChildren(h, null, [gitEntry("src", "directory", "/root", undefined, 1)]);
+    const srcNode = top[0];
+    await loadChildren(h, srcNode, [
+      gitEntry("u1.md", "file", "/root/src", "untracked", 2),
+      gitEntry("u2.md", "file", "/root/src", "untracked", 2),
+      gitEntry("m1.ts", "file", "/root/src", "modified", 2),
+      gitEntry("c1.ts", "file", "/root/src", "conflicted", 2),
+    ]);
+    expect(srcNode.dirtyDescendantCount).toBe(4);
+    expect(srcNode.dirtyDescendantCountsByStatus).toEqual({
+      untracked: 2,
+      modified: 1,
+      conflicted: 1,
+    });
+  });
+
+  it("removes a bucket key when its count drops to zero (downgrade case)", async () => {
+    const top = await loadChildren(h, null, [gitEntry("src", "directory", "/root", undefined, 1)]);
+    const srcNode = top[0];
+    await loadChildren(h, srcNode, [
+      gitEntry("a.ts", "file", "/root/src", "modified", 2),
+      gitEntry("b.md", "file", "/root/src", "untracked", 2),
+    ]);
+    expect(srcNode.dirtyDescendantCountsByStatus).toEqual({ modified: 1, untracked: 1 });
+    h.ds.applyGitStatusDelta(3, [{ path: "/root/src/a.ts", status: "untracked" }]);
+    expect(srcNode.dirtyDescendantCountsByStatus).toEqual({ untracked: 2 });
+    expect(srcNode.dirtyDescendantCount).toBe(2);
+  });
+
+  it("clears a directory's stale snapshot bucket when the host re-stamps it as clean (round-3 oracle)", async () => {
+    // Regression: when an unexpanded folder's last dirty descendant is
+    // cleaned (or its containing files deleted) and the host re-stamps the
+    // folder entry with NO `dirtyDescendantCountsByStatus`, the cached node
+    // must drop its prior bucket — otherwise the folder stays tinted dirty
+    // forever (no leaf walks would ever fire for the never-loaded subtree).
+    const top = await loadChildren(h, null, [
+      { name: "docs", path: "/root/docs", kind: "directory", gitRevision: 5, dirtyDescendantCountsByStatus: { untracked: 3 } },
+    ]);
+    const docs = top[0];
+    expect(docs.dirtyDescendantCountsByStatus).toEqual({ untracked: 3 });
+    expect(docs.dirtyDescendantCount).toBe(3);
+
+    // Re-list /root — host now reports docs/ has no dirty descendants
+    // (everything inside got staged + committed, or the dirty files were
+    // deleted). `gitRevision` is still present so this is authoritative.
+    await loadChildren(h, null, [
+      { name: "docs", path: "/root/docs", kind: "directory", gitRevision: 6 },
+    ]);
+    expect(docs.dirtyDescendantCountsByStatus).toBeUndefined();
+    expect(docs.dirtyDescendantCount).toBeUndefined();
+  });
+
+  it("LEAVES the prior bucket intact when no gitRevision is present (no provider wired)", async () => {
+    // Defends against false-positive clears when running against a host
+    // that has no git provider (tests / non-git folders). Without
+    // `gitRevision`, the host hasn't made an authoritative statement and
+    // the prior value (if any) should persist.
+    const top = await loadChildren(h, null, [
+      { name: "docs", path: "/root/docs", kind: "directory", gitRevision: 5, dirtyDescendantCountsByStatus: { modified: 1 } },
+    ]);
+    const docs = top[0];
+    expect(docs.dirtyDescendantCountsByStatus).toEqual({ modified: 1 });
+
+    await loadChildren(h, null, [
+      // No gitRevision, no bucket — host has no provider.
+      { name: "docs", path: "/root/docs", kind: "directory" },
+    ]);
+    expect(docs.dirtyDescendantCountsByStatus).toEqual({ modified: 1 });
+  });
+
+  it("resets the bucket map to undefined when every descendant has been evicted", async () => {
+    const top = await loadChildren(h, null, [gitEntry("src", "directory", "/root", undefined, 1)]);
+    const srcNode = top[0];
+    await loadChildren(h, srcNode, [gitEntry("foo.ts", "file", "/root/src", "modified", 5)]);
+    expect(srcNode.dirtyDescendantCountsByStatus).toEqual({ modified: 1 });
+    // Re-load /root/src empty — evictSubtree drains the bucket via prev→undefined transition.
+    await loadChildren(h, srcNode, []);
+    expect(srcNode.dirtyDescendantCount).toBe(0);
+    expect(srcNode.dirtyDescendantCountsByStatus).toBeUndefined();
+  });
+});
+
 describe("FileSystemDataSource — pendingStatuses revision guard (O-W1)", () => {
   let h: Harness;
   beforeEach(() => {
@@ -582,5 +697,248 @@ describe("FileSystemDataSource — nodeCache eviction (O-W2)", () => {
     // Now /root/src lists without utils — utils + foo.ts get evicted.
     await loadChildren(h, srcNode, []);
     expect(srcNode.dirtyDescendantCount).toBe(0);
+  });
+});
+
+describe("FileSystemDataSource — fs-changes subscription lifecycle", () => {
+  let h: Harness;
+  beforeEach(() => {
+    h = makeHarness({ workspaceRoot: "/root" });
+  });
+
+  function entries(parentPath: string, ...rows: Array<[name: string, kind: "file" | "directory"]>): FileEntry[] {
+    return rows.map(([name, kind]) => ({ name, path: `${parentPath}/${name}`, kind }));
+  }
+
+  function subscribePaths(): string[] {
+    return h.allPosted
+      .filter((m) => m.type === "request-subscribe-fs-changes")
+      .map((m) => (m as { path: string }).path);
+  }
+
+  function unsubscribePosts(): string[][] {
+    return h.allPosted
+      .filter((m) => m.type === "request-unsubscribe-fs-changes")
+      .map((m) => (m as { paths: string[] }).paths);
+  }
+
+  it("subscribes the workspace root on first getChildren(null) read; idempotent on re-read", async () => {
+    await loadChildren(h, null, entries("/root", ["a.ts", "file"]));
+    expect(subscribePaths()).toEqual(["/root"]);
+    await loadChildren(h, null, entries("/root", ["a.ts", "file"]));
+    expect(subscribePaths()).toEqual(["/root"]); // still one
+  });
+
+  it("subscribes every freshly-cached directory; files are NOT subscribed", async () => {
+    const top = await loadChildren(h, null, entries("/root", ["src", "directory"], ["readme.md", "file"]));
+    expect(subscribePaths()).toEqual(["/root", "/root/src"]);
+    // Re-read /root — directory child already cached, no new subscribe.
+    await loadChildren(h, null, entries("/root", ["src", "directory"], ["readme.md", "file"]));
+    expect(subscribePaths()).toEqual(["/root", "/root/src"]);
+    // Load /root/src — subscribes /root/src again? It IS already in
+    // subscribedPaths from the freshly-cached branch above, so no — the
+    // ensureSubscribed gate dedupes.
+    const srcNode = top.find((n) => n.path === "/root/src");
+    if (!srcNode) {
+      throw new Error("expected /root/src node");
+    }
+    await loadChildren(h, srcNode, entries("/root/src", ["lib.ts", "file"]));
+    expect(subscribePaths()).toEqual(["/root", "/root/src"]);
+  });
+
+  it("evictSubtree posts a single bulk unsubscribe for every evicted directory", async () => {
+    const top = await loadChildren(h, null, entries("/root", ["a", "directory"], ["b", "directory"]));
+    const aNode = top.find((n) => n.path === "/root/a");
+    if (!aNode) {
+      throw new Error("expected /root/a node");
+    }
+    await loadChildren(h, aNode, entries("/root/a", ["nested", "directory"]));
+    // /root subscribed + /root/a + /root/b + /root/a/nested = 4 paths
+    expect(subscribePaths()).toEqual(["/root", "/root/a", "/root/b", "/root/a/nested"]);
+    // Re-load /root without `a` — evicts /root/a and its subtree (/root/a/nested).
+    await loadChildren(h, null, entries("/root", ["b", "directory"]));
+    const unsubs = unsubscribePosts();
+    expect(unsubs).toHaveLength(1);
+    expect(unsubs[0].sort()).toEqual(["/root/a", "/root/a/nested"]);
+  });
+
+  it("handleRootChanged unsubscribes every previously-subscribed path before clearing cache", async () => {
+    const top = await loadChildren(h, null, entries("/root", ["a", "directory"], ["b.ts", "file"]));
+    const aNode = top.find((n) => n.path === "/root/a");
+    if (!aNode) {
+      throw new Error("expected /root/a node");
+    }
+    await loadChildren(h, aNode, entries("/root/a", ["c", "directory"]));
+    expect(subscribePaths()).toEqual(["/root", "/root/a", "/root/a/c"]);
+    h.ds.handleRootChanged({ rootPath: "/new", rootGeneration: 99 });
+    const unsubs = unsubscribePosts();
+    expect(unsubs).toHaveLength(1);
+    expect(unsubs[0].sort()).toEqual(["/root", "/root/a", "/root/a/c"]);
+  });
+
+  it("dispose posts one bulk unsubscribe for every subscribed path", async () => {
+    await loadChildren(h, null, entries("/root", ["a", "directory"]));
+    expect(subscribePaths()).toEqual(["/root", "/root/a"]);
+    h.ds.dispose();
+    const unsubs = unsubscribePosts();
+    expect(unsubs).toHaveLength(1);
+    expect(unsubs[0].sort()).toEqual(["/root", "/root/a"]);
+  });
+
+  it("dispose with no subscriptions does NOT post an empty-paths message", () => {
+    const h2 = makeHarness({ workspaceRoot: "/root" });
+    h2.ds.dispose();
+    expect(unsubscribePosts()).toHaveLength(0);
+  });
+
+  it("rolls back the subscription when readDirectory rejects (review W2)", async () => {
+    // First call subscribes /root, then rejects → subscription must be
+    // removed and a matching bulk unsubscribe posted before the rejection
+    // propagates. Otherwise the host watches a path the data source never
+    // cached and that eviction can never reach.
+    const promise = h.ds.getChildren(null);
+    const requestId = h.posted[h.posted.length - 1].requestId;
+    h.ds.handleResponse({
+      type: "read-directory-response",
+      requestId,
+      rootGeneration: h.ds.getRootGeneration(),
+      error: { code: "EACCES", message: "permission denied" },
+    });
+    await expect(promise).rejects.toThrow(/EACCES/);
+    // The rolling-back subscription posts a single bulk unsubscribe for /root.
+    const unsubs = unsubscribePosts();
+    expect(unsubs).toEqual([["/root"]]);
+    // A subsequent successful read re-subscribes — the path is no longer in
+    // the data source's subscribed set so ensureSubscribed adds it back.
+    await loadChildren(h, null, entries("/root", ["ok.txt", "file"]));
+    const subs = subscribePaths();
+    expect(subs).toEqual(["/root", "/root"]);
+  });
+
+  it("does NOT tear down the subscription when one of two concurrent reads rejects (round-2 oracle)", async () => {
+    // Two concurrent getChildren("/root") calls — one rejects, one succeeds
+    // (the order doesn't matter). The single shared subscription on /root
+    // must survive because the surviving caller still depends on the watcher.
+    const p1 = h.ds.getChildren(null);
+    const r1 = h.posted[h.posted.length - 1].requestId;
+    const p2 = h.ds.getChildren(null);
+    const r2 = h.posted[h.posted.length - 1].requestId;
+
+    // Reject the FIRST call (it was the one that created the subscription).
+    h.ds.handleResponse({
+      type: "read-directory-response",
+      requestId: r1,
+      rootGeneration: h.ds.getRootGeneration(),
+      error: { code: "ECONNRESET", message: "transient blip" },
+    });
+    await expect(p1).rejects.toThrow(/ECONNRESET/);
+    // The second call still resolves successfully — subscription must remain.
+    h.ds.handleResponse({
+      type: "read-directory-response",
+      requestId: r2,
+      rootGeneration: h.ds.getRootGeneration(),
+      entries: entries("/root", ["ok.txt", "file"]),
+    });
+    await expect(p2).resolves.toHaveLength(1);
+    // No unsubscribe message should have been posted at all.
+    expect(unsubscribePosts()).toHaveLength(0);
+  });
+
+  it("tears down the subscription only after the LAST concurrent read rejects (round-2 oracle)", async () => {
+    // Both calls reject — only after the second (last) rejection does the
+    // rollback fire, because remaining count drops to zero and no listing
+    // ever landed.
+    const p1 = h.ds.getChildren(null);
+    const r1 = h.posted[h.posted.length - 1].requestId;
+    const p2 = h.ds.getChildren(null);
+    const r2 = h.posted[h.posted.length - 1].requestId;
+
+    h.ds.handleResponse({
+      type: "read-directory-response",
+      requestId: r1,
+      rootGeneration: h.ds.getRootGeneration(),
+      error: { code: "EACCES", message: "denied 1" },
+    });
+    await expect(p1).rejects.toThrow(/EACCES/);
+    // After first rejection: subscription still alive (counter at 1).
+    expect(unsubscribePosts()).toHaveLength(0);
+
+    h.ds.handleResponse({
+      type: "read-directory-response",
+      requestId: r2,
+      rootGeneration: h.ds.getRootGeneration(),
+      error: { code: "EACCES", message: "denied 2" },
+    });
+    await expect(p2).rejects.toThrow(/EACCES/);
+    // Now subscription rolled back — counter at 0, no listing landed.
+    expect(unsubscribePosts()).toEqual([["/root"]]);
+  });
+
+  it("does NOT roll back a subscription that pre-existed when readDirectory rejects (review W2)", async () => {
+    // First successful read subscribes /root.
+    await loadChildren(h, null, entries("/root", ["a.ts", "file"]));
+    const beforeUnsubs = unsubscribePosts().length;
+    // Second call's read fails. /root was already subscribed, so the rollback
+    // gate must SKIP the unsubscribe — the surviving subscription is still
+    // backed by a valid cache state for the prior listing.
+    const promise = h.ds.getChildren(null);
+    const requestId = h.posted[h.posted.length - 1].requestId;
+    h.ds.handleResponse({
+      type: "read-directory-response",
+      requestId,
+      rootGeneration: h.ds.getRootGeneration(),
+      error: { code: "ETIMEDOUT", message: "read timed out" },
+    });
+    await expect(promise).rejects.toThrow(/ETIMEDOUT/);
+    expect(unsubscribePosts().length).toBe(beforeUnsubs);
+  });
+});
+
+describe("FileSystemDataSource — handleFsChangesInvalidated + handleFsRehydrate", () => {
+  function makeWithCallbacks(opts: { rootGeneration?: number }): {
+    ds: FileSystemDataSource;
+    onInvalidate: ReturnType<typeof vi.fn>;
+    onRehydrate: ReturnType<typeof vi.fn>;
+  } {
+    const onInvalidate = vi.fn();
+    const onRehydrate = vi.fn();
+    const ds = new FileSystemDataSource(
+      {
+        rootGeneration: opts.rootGeneration ?? 1,
+        workspaceRoot: "/root",
+        onDirectoryInvalidated: onInvalidate,
+        onRehydrate,
+      },
+      () => {},
+    );
+    return { ds, onInvalidate, onRehydrate };
+  }
+
+  it("(a) generation mismatch silently no-ops on both message types", () => {
+    const { ds, onInvalidate, onRehydrate } = makeWithCallbacks({ rootGeneration: 5 });
+    ds.handleFsChangesInvalidated({ rootGeneration: 4, parent: "/root/sub" });
+    ds.handleFsRehydrate({ rootGeneration: 4 });
+    expect(onInvalidate).not.toHaveBeenCalled();
+    expect(onRehydrate).not.toHaveBeenCalled();
+  });
+
+  it("(b) generation-match fs-changes-invalidated always invokes onDirectoryInvalidated with parent (even for uncached paths)", () => {
+    const { ds, onInvalidate } = makeWithCallbacks({ rootGeneration: 7 });
+    ds.handleFsChangesInvalidated({ rootGeneration: 7, parent: "/never/cached" });
+    expect(onInvalidate).toHaveBeenCalledTimes(1);
+    expect(onInvalidate).toHaveBeenCalledWith("/never/cached");
+  });
+
+  it("(c) generation-match fs-rehydrate invokes onRehydrate exactly once", () => {
+    const { ds, onRehydrate } = makeWithCallbacks({ rootGeneration: 7 });
+    ds.handleFsRehydrate({ rootGeneration: 7 });
+    expect(onRehydrate).toHaveBeenCalledTimes(1);
+  });
+
+  it("(d) getCachedNode returns the cached node when present, undefined otherwise", async () => {
+    const h = makeHarness({ workspaceRoot: "/root" });
+    expect(h.ds.getCachedNode("/root/x")).toBeUndefined();
+    const children = await loadChildren(h, null, [{ name: "x", path: "/root/x", kind: "file" }]);
+    expect(h.ds.getCachedNode("/root/x")).toBe(children[0]);
   });
 });

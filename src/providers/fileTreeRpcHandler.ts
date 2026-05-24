@@ -242,6 +242,17 @@ export async function handleRequestReadDirectory(
         e.gitStatus = "ignored";
       }
       e.gitRevision = revision;
+      // Directories don't have their own git status (git tracks files,
+      // not folders), so we additionally aggregate descendant counts from
+      // the provider's full known-status set. This lets the webview paint
+      // the folder badge correctly on FIRST load — before the user expands
+      // the sub-folder. See: add-file-tree-fs-watcher/design.md D11.
+      if (e.kind === "directory") {
+        const buckets = gitDecorationProvider.getDescendantBuckets(e.path);
+        if (buckets !== undefined) {
+          e.dirtyDescendantCountsByStatus = buckets;
+        }
+      }
     }
   }
 

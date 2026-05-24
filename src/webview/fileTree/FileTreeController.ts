@@ -17,6 +17,8 @@
 
 import type {
   FileTreeSearchResponseMessage,
+  FsChangesInvalidatedMessage,
+  FsRehydrateMessage,
   GitStatusChangedMessage,
   ReadDirectoryResponseMessage,
   RevealInFileTreeMessage,
@@ -174,6 +176,24 @@ export class FileTreeController {
 
   handleSearchResponse(msg: FileTreeSearchResponseMessage): void {
     this.panel.handleSearchResponse(msg);
+  }
+
+  /**
+   * Drop an `fs-changes-invalidated` from the host. Generation-gated inside
+   * the data source; this method just delegates so the controller stays the
+   * single integration surface for `main.ts`. See:
+   * asimov/changes/add-file-tree-fs-watcher/design.md D4.
+   */
+  handleFsChangesInvalidated(msg: FsChangesInvalidatedMessage): void {
+    this.panel.handleFsChangesInvalidated(msg);
+  }
+
+  /**
+   * Drop an `fs-rehydrate` from the host. Generation-gated inside the data
+   * source. See: asimov/changes/add-file-tree-fs-watcher/design.md D7.
+   */
+  handleFsRehydrate(msg: FsRehydrateMessage): void {
+    this.panel.handleFsRehydrate(msg);
   }
 
   handleReveal(msg: RevealInFileTreeMessage): void {

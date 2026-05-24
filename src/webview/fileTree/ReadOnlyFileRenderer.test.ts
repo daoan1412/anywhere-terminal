@@ -200,12 +200,13 @@ describe("ReadOnlyFileRenderer — git decorations", () => {
     expectLetter(undefined, "");
   });
 
-  it("renders a folder dirty badge `•` and applies git-folder-dirty when dirtyDescendantCount > 0", () => {
+  it("renders a folder dirty badge `•` and applies git-folder-dirty when any descendant is propagating", () => {
     const folder: FileNode = {
       name: "src",
       path: "/repo/src",
       kind: "directory",
       dirtyDescendantCount: 3,
+      dirtyDescendantCountsByStatus: { untracked: 3 },
     };
     const { template } = mountRow(folder, 0);
     expect(template.row.classList.contains("git-folder-dirty")).toBe(true);
@@ -213,15 +214,103 @@ describe("ReadOnlyFileRenderer — git decorations", () => {
     expect(template.gitBadge.classList.contains("is-visible")).toBe(true);
   });
 
-  it("clears the folder dirty badge when dirtyDescendantCount drops to 0", () => {
+  it("clears the folder dirty badge when the bucket map becomes undefined", () => {
     const renderer = new ReadOnlyFileRenderer();
     const container = document.createElement("div");
     const template = renderer.renderTemplate(container);
-    renderer.renderElement({ name: "src", path: "/repo/src", kind: "directory", dirtyDescendantCount: 2 }, 0, template);
+    renderer.renderElement(
+      {
+        name: "src",
+        path: "/repo/src",
+        kind: "directory",
+        dirtyDescendantCount: 2,
+        dirtyDescendantCountsByStatus: { modified: 2 },
+      },
+      0,
+      template,
+    );
     expect(template.row.classList.contains("git-folder-dirty")).toBe(true);
-    renderer.renderElement({ name: "src", path: "/repo/src", kind: "directory", dirtyDescendantCount: 0 }, 0, template);
+    renderer.renderElement({ name: "src", path: "/repo/src", kind: "directory" }, 0, template);
     expect(template.row.classList.contains("git-folder-dirty")).toBe(false);
     expect(template.gitBadge.classList.contains("is-visible")).toBe(false);
+  });
+
+  it("stamps git-folder-dirty-untracked when descendants are only untracked (D10)", () => {
+    const { template } = mountRow(
+      {
+        name: "docs",
+        path: "/repo/docs",
+        kind: "directory",
+        dirtyDescendantCount: 3,
+        dirtyDescendantCountsByStatus: { untracked: 3 },
+      },
+      0,
+    );
+    expect(template.row.classList.contains("git-folder-dirty-untracked")).toBe(true);
+    expect(template.row.classList.contains("git-folder-dirty-modified")).toBe(false);
+    expect(template.row.classList.contains("git-folder-dirty-conflicted")).toBe(false);
+  });
+
+  it("picks the highest-severity per-kind class when descendants have mixed statuses (D10)", () => {
+    const { template } = mountRow(
+      {
+        name: "src",
+        path: "/repo/src",
+        kind: "directory",
+        dirtyDescendantCount: 8,
+        dirtyDescendantCountsByStatus: { untracked: 5, modified: 2, conflicted: 1 },
+      },
+      0,
+    );
+    expect(template.row.classList.contains("git-folder-dirty-conflicted")).toBe(true);
+    expect(template.row.classList.contains("git-folder-dirty-modified")).toBe(false);
+    expect(template.row.classList.contains("git-folder-dirty-untracked")).toBe(false);
+  });
+
+  it("strips stale per-kind classes when a recycled row's dominant status changes (D10)", () => {
+    const renderer = new ReadOnlyFileRenderer();
+    const container = document.createElement("div");
+    const template = renderer.renderTemplate(container);
+    renderer.renderElement(
+      {
+        name: "src",
+        path: "/repo/src",
+        kind: "directory",
+        dirtyDescendantCount: 1,
+        dirtyDescendantCountsByStatus: { modified: 1 },
+      },
+      0,
+      template,
+    );
+    expect(template.row.classList.contains("git-folder-dirty-modified")).toBe(true);
+    renderer.renderElement(
+      {
+        name: "src",
+        path: "/repo/src",
+        kind: "directory",
+        dirtyDescendantCount: 1,
+        dirtyDescendantCountsByStatus: { untracked: 1 },
+      },
+      0,
+      template,
+    );
+    expect(template.row.classList.contains("git-folder-dirty-modified")).toBe(false);
+    expect(template.row.classList.contains("git-folder-dirty-untracked")).toBe(true);
+  });
+
+  it("stamps neither generic nor per-kind class when the bucket map is undefined (D10)", () => {
+    const { template } = mountRow(
+      {
+        name: "src",
+        path: "/repo/src",
+        kind: "directory",
+      },
+      0,
+    );
+    expect(template.row.classList.contains("git-folder-dirty")).toBe(false);
+    for (const cls of template.row.classList) {
+      expect(cls.startsWith("git-folder-dirty-")).toBe(false);
+    }
   });
 
   it("does NOT apply the deprecated `.is-ignored` class anywhere", () => {

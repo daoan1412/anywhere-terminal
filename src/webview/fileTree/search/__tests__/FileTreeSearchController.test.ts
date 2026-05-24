@@ -293,3 +293,102 @@ describe("FileTreeSearchController", () => {
     expect(items[0].searchRow?.errorMessage).toBe("boom");
   });
 });
+
+describe("FileTreeSearchController.onFsInvalidated + onRehydrate", () => {
+  const ROOT_GEN = 0;
+  let posts: AnyPost[];
+
+  beforeEach(() => {
+    posts = [];
+    vi.useFakeTimers();
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  function makeController() {
+    const tree = makeTreeSpy();
+    let id = 0;
+    const controller = new FileTreeSearchController({
+      tree,
+      post: (m) => posts.push(m),
+      getRootGeneration: () => ROOT_GEN,
+      nextRequestId: () => `req-${++id}`,
+    });
+    return { controller, tree };
+  }
+
+  function searchPosts(): RequestFileTreeSearchMessage[] {
+    return posts.filter((m): m is RequestFileTreeSearchMessage => m.type === "request-file-tree-search");
+  }
+
+  function populateCache(controller: FileTreeSearchController, scope: string): void {
+    controller.enter(scope);
+    vi.advanceTimersByTime(ENUMERATION_DEBOUNCE_MS);
+    controller.onResponse({
+      type: "file-tree-search-response",
+      requestId: searchPosts()[0].requestId,
+      rootGeneration: ROOT_GEN,
+      results: [{ absolutePath: `${scope}/x.ts`, relativePath: "x.ts" }],
+      truncated: false,
+    });
+  }
+
+  it("(a) onFsInvalidated(scope) with fresh cache → cache cleared + enumeration scheduled while active", () => {
+    const { controller } = makeController();
+    populateCache(controller, "/repo/src");
+    const beforeCount = searchPosts().length;
+    controller.onFsInvalidated("/repo/src");
+    // Cache cleared but enumeration is debounced — no post yet.
+    expect(searchPosts().length).toBe(beforeCount);
+    vi.advanceTimersByTime(ENUMERATION_DEBOUNCE_MS);
+    const after = searchPosts();
+    expect(after.length).toBe(beforeCount + 1);
+    expect(after[after.length - 1].scopePath).toBe("/repo/src");
+  });
+
+  it("(b) onFsInvalidated(child path under scope) → cache cleared + enumeration scheduled", () => {
+    const { controller } = makeController();
+    populateCache(controller, "/repo/src");
+    const beforeCount = searchPosts().length;
+    controller.onFsInvalidated("/repo/src/sub/file.md");
+    vi.advanceTimersByTime(ENUMERATION_DEBOUNCE_MS);
+    expect(searchPosts().length).toBe(beforeCount + 1);
+  });
+
+  it("(c) onFsInvalidated(unrelated path) → cache untouched, no enumeration scheduled, no new post", () => {
+    const { controller } = makeController();
+    populateCache(controller, "/repo/src");
+    const beforeCount = searchPosts().length;
+    controller.onFsInvalidated("/unrelated/elsewhere/file.md");
+    vi.advanceTimersByTime(ENUMERATION_DEBOUNCE_MS * 2);
+    expect(searchPosts().length).toBe(beforeCount);
+  });
+
+  it("(d) onFsInvalidated(scope) while search inactive → cache cleared but NO enumeration scheduled", () => {
+    const { controller } = makeController();
+    populateCache(controller, "/repo/src");
+    controller.exit(); // search bar closed; cache retained per exit() contract
+    const beforeCount = searchPosts().length;
+    controller.onFsInvalidated("/repo/src");
+    vi.advanceTimersByTime(ENUMERATION_DEBOUNCE_MS * 2);
+    expect(searchPosts().length).toBe(beforeCount);
+    // Re-entry re-enumerates via cacheIsFresh()=false gate
+    controller.enter("/repo/src");
+    vi.advanceTimersByTime(ENUMERATION_DEBOUNCE_MS);
+    expect(searchPosts().length).toBe(beforeCount + 1);
+  });
+
+  it("(e) onRehydrate clears cache + schedules enumeration when active; silent no-op when no cache", () => {
+    const { controller } = makeController();
+    // No cache → no-op
+    controller.onRehydrate();
+    expect(searchPosts()).toHaveLength(0);
+    populateCache(controller, "/repo/src");
+    const beforeCount = searchPosts().length;
+    controller.onRehydrate();
+    vi.advanceTimersByTime(ENUMERATION_DEBOUNCE_MS);
+    expect(searchPosts().length).toBe(beforeCount + 1);
+  });
+});

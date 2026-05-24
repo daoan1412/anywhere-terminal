@@ -14,6 +14,8 @@ import type {
   ExtensionToWebViewMessage,
   FilePreviewResultMessage,
   FileTreeSearchResponseMessage,
+  FsChangesInvalidatedMessage,
+  FsRehydrateMessage,
   GitStatusChangedMessage,
   HoverPreviewSettingsMessage,
   InsertPathEffectMessage,
@@ -72,6 +74,9 @@ export interface MessageHandlers {
   onFileTreeSearchResponse(msg: FileTreeSearchResponseMessage): void;
   // ── File-tree git decorations (add-file-tree-git-decorations) ──
   onGitStatusChanged(msg: GitStatusChangedMessage): void;
+  // ── File-tree FS watcher (add-file-tree-fs-watcher) ──
+  onFsChangesInvalidated(msg: FsChangesInvalidatedMessage): void;
+  onFsRehydrate(msg: FsRehydrateMessage): void;
 }
 
 // ─── Factory ────────────────────────────────────────────────────────
@@ -166,6 +171,12 @@ export function createMessageRouter(handlers: MessageHandlers): (msg: ExtensionT
         break;
       case "git-status-changed":
         handlers.onGitStatusChanged(msg);
+        break;
+      case "fs-changes-invalidated":
+        handlers.onFsChangesInvalidated(msg);
+        break;
+      case "fs-rehydrate":
+        handlers.onFsRehydrate(msg);
         break;
       case "init":
         // init is handled directly by main.ts — not routed

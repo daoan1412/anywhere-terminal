@@ -3,6 +3,7 @@ import type { SessionManager } from "../session/SessionManager";
 import { readTerminalConfig, readTerminalSettings } from "../settings/SettingsReader";
 import type { ThemeChangedMessage, WebViewToExtensionMessage } from "../types/messages";
 import { FileTreeHost } from "./fileTreeHost";
+import type { WatcherPool } from "./fsWatcherPool";
 import type { GitDecorationProvider } from "./gitDecorationProvider";
 import { affectsHoverPreview, readHoverPreviewSettings, updateHoverPreviewSetting } from "./hoverPreviewSettings";
 import { openExternalLink } from "./openExternalLink";
@@ -104,8 +105,9 @@ export class TerminalViewProvider implements vscode.WebviewViewProvider {
     private readonly sessionManager: SessionManager,
     private readonly location: "sidebar" | "panel" = "sidebar",
     gitDecorationProvider: GitDecorationProvider | null = null,
+    watcherPool: WatcherPool | null = null,
   ) {
-    this.fileTreeHost = new FileTreeHost(gitDecorationProvider);
+    this.fileTreeHost = new FileTreeHost(gitDecorationProvider, watcherPool);
   }
 
   resolveWebviewView(
@@ -506,6 +508,8 @@ export class TerminalViewProvider implements vscode.WebviewViewProvider {
         case "request-set-file-tree-position":
         case "request-file-tree-search":
         case "cancel-file-tree-search":
+        case "request-subscribe-fs-changes":
+        case "request-unsubscribe-fs-changes":
           // File-tree messages are dispatched by FileTreeHost so the
           // sidebar / panel / editor providers share one wiring. See
           // providers/fileTreeHost.ts.

@@ -29,7 +29,10 @@ import type {
   GitStatus,
   ReadDirectoryResponseMessage,
   RequestReadDirectoryMessage,
+  RequestSubscribeFsChangesMessage,
+  RequestUnsubscribeFsChangesMessage,
 } from "../../types/messages";
+import type { FolderDirtyCounts } from "./folderDirtyState";
 import type { FileNode, FileStat, IFileSystemProvider } from "./IFileSystemProvider";
 import type { ITreeDataSource } from "./ITreeDataSource";
 
@@ -65,6 +68,42 @@ function isDirtyForPropagation(status: GitStatus | undefined): boolean {
 }
 
 /**
+ * Apply a single (prev → next) propagating-status transition to one ancestor
+ * folder: per-kind bucket adjustments + legacy sum maintenance. When `prev`
+ * is set the bucket is decremented (and the key deleted at zero); when `next`
+ * is set the bucket is incremented. When the bucket map becomes empty the
+ * field is reset to `undefined`. The legacy sum tracks the net `(next?1:0) -
+ * (prev?1:0)` and clamps at zero.
+ */
+function adjustAncestorBuckets(node: FileNode, prev: GitStatus | undefined, next: GitStatus | undefined): void {
+  let buckets: FolderDirtyCounts | undefined = node.dirtyDescendantCountsByStatus;
+  if (prev !== undefined && buckets !== undefined) {
+    const after = (buckets[prev] ?? 0) - 1;
+    if (after > 0) {
+      buckets[prev] = after;
+    } else {
+      delete buckets[prev];
+    }
+  }
+  if (next !== undefined) {
+    if (buckets === undefined) {
+      buckets = {};
+      node.dirtyDescendantCountsByStatus = buckets;
+    }
+    buckets[next] = (buckets[next] ?? 0) + 1;
+  }
+  if (buckets !== undefined && Object.keys(buckets).length === 0) {
+    node.dirtyDescendantCountsByStatus = undefined;
+  }
+
+  const sumDelta = (next !== undefined ? 1 : 0) - (prev !== undefined ? 1 : 0);
+  if (sumDelta !== 0) {
+    const sum = (node.dirtyDescendantCount ?? 0) + sumDelta;
+    node.dirtyDescendantCount = sum < 0 ? 0 : sum;
+  }
+}
+
+/**
  * Local cancellation marker. Kept tiny so we don't drag in the vendored
  * `vs/base/common/errors` module for a single sentinel. The `name` field is
  * what call-sites usually pattern-match on.
@@ -89,6 +128,24 @@ interface PendingRequest {
 export interface FileSystemDataSourceInit {
   rootGeneration: number;
   workspaceRoot: string | null;
+  /**
+   * Optional panel-injected callback fired on every generation-matched
+   * `fs-changes-invalidated`. Receives the parent absolute path; the panel
+   * resolves it to a tree node (with the special case where `absPath ===
+   * currentRootPath` → refresh the synthetic root held by `Tree.setInput`).
+   * Default is a no-op so tests / hosts that don't wire the watcher pool
+   * are unaffected.
+   *
+   * See: asimov/changes/add-file-tree-fs-watcher/design.md D4, D4a.
+   */
+  onDirectoryInvalidated?: (absPath: string) => void;
+  /**
+   * Optional panel-injected callback fired on every generation-matched
+   * `fs-rehydrate`. The panel refreshes the synthetic root plus every
+   * currently-EXPANDED directory (not every cached directory — D7).
+   * Default is a no-op.
+   */
+  onRehydrate?: () => void;
 }
 
 export class FileSystemDataSource implements IFileSystemProvider, ITreeDataSource<FileNode> {
@@ -153,13 +210,47 @@ export class FileSystemDataSource implements IFileSystemProvider, ITreeDataSourc
    * forever — a memory leak bounded by workspace size but unbounded by time.
    */
   private readonly childrenByParent = new Map<string, Set<string>>();
+  /**
+   * Set of absolute directory paths currently subscribed via
+   * `subscribeFsChanges`. Tracks the root path separately from `nodeCache`
+   * because the root is held by `Tree.setInput` (not `getChildren` —
+   * see asimov/changes/add-file-tree-fs-watcher/design.md D4a) and so it
+   * never appears in `nodeCache`. Used to (i) idempotency-gate root +
+   * directory subscribes so re-encounter doesn't double-post and (ii)
+   * compose the bulk unsubscribe list on root change / dispose.
+   */
+  private readonly subscribedPaths = new Set<string>();
+
+  /**
+   * Per-path in-flight `getChildren` read counter. Used by the W2 rollback
+   * gate (round-2 oracle) to ONLY tear down a subscription when the rejected
+   * read is the LAST in-flight call AND no successful listing landed first.
+   * Concurrent `getChildren(samePath)` calls share the same subscription, so
+   * one call's rejection must not strip a watcher another call still needs.
+   */
+  private readonly inflightReadsByPath = new Map<string, number>();
+
+  /**
+   * Callback fired on every generation-matched `fs-changes-invalidated`.
+   * See `FileSystemDataSourceInit.onDirectoryInvalidated`.
+   */
+  private readonly onDirectoryInvalidatedCb: (absPath: string) => void;
+  /**
+   * Callback fired on every generation-matched `fs-rehydrate`. See
+   * `FileSystemDataSourceInit.onRehydrate`.
+   */
+  private readonly onRehydrateCb: () => void;
 
   constructor(
     init: FileSystemDataSourceInit,
-    private readonly postMessage: (m: RequestReadDirectoryMessage) => void,
+    private readonly postMessage: (
+      m: RequestReadDirectoryMessage | RequestSubscribeFsChangesMessage | RequestUnsubscribeFsChangesMessage,
+    ) => void,
   ) {
     this.currentRootGeneration = init.rootGeneration;
     this.workspaceRoot = init.workspaceRoot;
+    this.onDirectoryInvalidatedCb = init.onDirectoryInvalidated ?? (() => {});
+    this.onRehydrateCb = init.onRehydrate ?? (() => {});
     // crypto.randomUUID returns a 36-char string with enough entropy that
     // collision across two coexisting sources is impossible in practice.
     // The `typeof crypto?.randomUUID === "function"` form covers older
@@ -185,7 +276,37 @@ export class FileSystemDataSource implements IFileSystemProvider, ITreeDataSourc
     if (!path) {
       return [];
     }
-    const entries = await this.readDirectory(path);
+    // Subscribe the read path itself once. This covers both (a) the root —
+    // which is not in `nodeCache` because `Tree.setInput` owns it (D4a) — and
+    // (b) any directory whose children are being listed for the first time.
+    // The directory's own cache entry (set by the parent's `getChildren` in
+    // the freshly-cached branch below) also subscribes; the membership Set
+    // dedupes so the host never sees a duplicate subscribe.
+    // Subscribe BEFORE the read so a watcher fire that races the listing is
+    // not lost. On read failure (round-1 W2) we roll the subscription back
+    // — but ONLY when no concurrent reads remain AND no successful listing
+    // exists (round-2 oracle). `subscribedPaths` only grows via
+    // `ensureSubscribed` from `getChildren`, and `evictSubtree`/`handleRootChanged`
+    // clear it in lockstep with `childrenByParent`, so the absence of
+    // `childrenByParent[path]` here means every prior subscribe attempt for
+    // this path also failed without caching — safe to tear down.
+    this.ensureSubscribed(path);
+    this.inflightReadsByPath.set(path, (this.inflightReadsByPath.get(path) ?? 0) + 1);
+    let entries: FileEntry[];
+    try {
+      entries = await this.readDirectory(path);
+    } catch (err) {
+      const remaining = this.decrementInflightRead(path);
+      if (
+        remaining === 0 &&
+        !this.childrenByParent.has(path) &&
+        this.subscribedPaths.delete(path)
+      ) {
+        this.unsubscribeFsChanges([path]);
+      }
+      throw err;
+    }
+    this.decrementInflightRead(path);
     // Identity-stable: same path → same FileNode object across calls. Tree's
     // identity-keyed cache (Tree.nodes Map) requires this contract; without
     // it, re-expansion would always cache-miss and leak entries (B1).
@@ -213,12 +334,49 @@ export class FileSystemDataSource implements IFileSystemProvider, ITreeDataSourc
         };
         this.nodeCache.set(e.path, node);
         isFreshlyCached = true;
+        if (e.kind === "directory") {
+          // Subscribe every newly-cached directory so a paste / rename /
+          // delete inside it is reflected in the tree without manual
+          // re-expand. Mirrors `nodeCache` lifecycle (D6 — subscribe on
+          // cache insert, unsubscribe on eviction).
+          this.ensureSubscribed(e.path);
+        }
       }
       // Stamp git status through the single transition function. When the
       // entry carries no revision (e.g. tests / hosts without a provider),
       // skip — there's no version to compare against.
       if (e.gitRevision !== undefined) {
         this.applyStatusTransition(node, e.gitStatus, e.gitRevision);
+      }
+      // Directory entries carry a host-aggregated descendant bucket so the
+      // folder badge paints correctly BEFORE its children are loaded
+      // (D11). On every directory listing (fresh OR re-stamp) we adopt the
+      // snapshot as the authoritative bucket — it counts everything the
+      // git provider knows at all depths, which is more accurate than
+      // the leaf-walk for unexpanded subtrees. Note: subsequent leaf
+      // walks (from `applyStatusTransition`) MAY double-count this bucket
+      // for the directory's own direct children once it's expanded, but
+      // `dominantDirtyStatus` only checks `> 0` per key — so the badge
+      // colour stays correct even when counts inflate.
+      if (e.kind === "directory") {
+        if (e.dirtyDescendantCountsByStatus !== undefined) {
+          node.dirtyDescendantCountsByStatus = { ...e.dirtyDescendantCountsByStatus };
+          let sum = 0;
+          for (const v of Object.values(node.dirtyDescendantCountsByStatus)) {
+            sum += v ?? 0;
+          }
+          node.dirtyDescendantCount = sum;
+        } else if (e.gitRevision !== undefined) {
+          // Host stamped this entry (gitRevision present) but reported no
+          // dirty descendants — that's authoritative "all clean", not
+          // "unknown". Clear any prior bucket/sum so an unexpanded folder
+          // doesn't stay tinted after its last dirty descendant was
+          // cleaned/deleted. (Round-3 oracle finding.)
+          node.dirtyDescendantCountsByStatus = undefined;
+          node.dirtyDescendantCount = undefined;
+        }
+        // No gitRevision → host has no git provider wired (tests / fallback);
+        // leave whatever the prior cached value was.
       }
       // Drain any pending status that arrived before this directory loaded.
       // The transition function's own revision guard decides whether the
@@ -282,16 +440,82 @@ export class FileSystemDataSource implements IFileSystemProvider, ITreeDataSourc
     for (const p of subtree) {
       const node = this.nodeCache.get(p);
       if (node && isDirtyForPropagation(node.gitStatus)) {
-        this.walkAncestorsAndAdjust(p, -1);
+        this.walkAncestorsAndAdjust(p, node.gitStatus, undefined);
       }
     }
     // Phase 2: actually delete the cache + per-path state.
+    const unsubPaths: string[] = [];
     for (const p of subtree) {
       this.nodeCache.delete(p);
       this.revisionByPath.delete(p);
       this.pendingStatuses.delete(p);
       this.childrenByParent.delete(p);
+      if (this.subscribedPaths.delete(p)) {
+        unsubPaths.push(p);
+      }
     }
+    if (unsubPaths.length > 0) {
+      this.unsubscribeFsChanges(unsubPaths);
+    }
+  }
+
+  /**
+   * Idempotently subscribe `absPath` once. Centralised so the per-host
+   * Set never falls out of sync with the host-side subscription map.
+   */
+  private ensureSubscribed(absPath: string): void {
+    if (this.subscribedPaths.has(absPath)) {
+      return;
+    }
+    this.subscribedPaths.add(absPath);
+    this.subscribeFsChanges(absPath);
+  }
+
+  /**
+   * Decrement the in-flight read counter for `path`. Returns the remaining
+   * count (0 when this was the last). Cleans up the map entry at zero so the
+   * map doesn't grow unboundedly across the lifetime of the data source.
+   */
+  private decrementInflightRead(path: string): number {
+    const remaining = (this.inflightReadsByPath.get(path) ?? 1) - 1;
+    if (remaining <= 0) {
+      this.inflightReadsByPath.delete(path);
+      return 0;
+    }
+    this.inflightReadsByPath.set(path, remaining);
+    return remaining;
+  }
+
+  /**
+   * Generation-gated dispatch for `fs-changes-invalidated`. Delegates to the
+   * panel-injected `onDirectoryInvalidated` callback WITHOUT pre-filtering on
+   * `nodeCache` — the panel resolves `parent` to a tree node, including the
+   * special case where `parent === currentRootPath` (the root is held by
+   * `Tree.setInput`, not in `nodeCache` — see design.md D4a).
+   */
+  handleFsChangesInvalidated(msg: { rootGeneration: number; parent: string }): void {
+    if (this.disposed) {
+      return;
+    }
+    if (msg.rootGeneration !== this.currentRootGeneration) {
+      return;
+    }
+    this.onDirectoryInvalidatedCb(msg.parent);
+  }
+
+  /**
+   * Generation-gated dispatch for `fs-rehydrate`. The panel callback refreshes
+   * root + currently-expanded directory nodes (not every cached one — see
+   * design.md D7).
+   */
+  handleFsRehydrate(msg: { rootGeneration: number }): void {
+    if (this.disposed) {
+      return;
+    }
+    if (msg.rootGeneration !== this.currentRootGeneration) {
+      return;
+    }
+    this.onRehydrateCb();
   }
 
   /**
@@ -359,32 +583,32 @@ export class FileSystemDataSource implements IFileSystemProvider, ITreeDataSourc
       // No state change beyond bumping the revision watermark.
       return false;
     }
-    const prevDirty = isDirtyForPropagation(prevStatus);
-    const nextDirty = isDirtyForPropagation(next);
     node.gitStatus = next;
-    if (prevDirty === nextDirty) {
-      return true;
+    const prevPropagating = isDirtyForPropagation(prevStatus) ? prevStatus : undefined;
+    const nextPropagating = isDirtyForPropagation(next) ? next : undefined;
+    if (prevPropagating !== nextPropagating) {
+      this.walkAncestorsAndAdjust(node.path, prevPropagating, nextPropagating);
     }
-    const delta = nextDirty ? 1 : -1;
-    this.walkAncestorsAndAdjust(node.path, delta);
     return true;
   }
 
   /**
-   * Walk every cached ancestor of `absPath` and add `delta` to its
-   * `dirtyDescendantCount`. Stops as soon as a cache miss is hit — uncached
-   * paths cannot render badges anyway, so we save the work. Clamps at zero
-   * to defend against any one-off underflow (refcount drift symptom).
+   * Walk every cached ancestor of `absPath` and update its
+   * `dirtyDescendantCountsByStatus` buckets (per-kind) plus
+   * `dirtyDescendantCount` (legacy sum). When `prev` is set, decrement that
+   * bucket; when `next` is set, increment that bucket. The sum tracks the
+   * net change (`-1`/`0`/`+1`). Stops at the first cache miss — uncached
+   * ancestors cannot render badges. Clamps at zero to defend against any
+   * single-event drift (refcount-drift symptom).
    */
-  private walkAncestorsAndAdjust(absPath: string, delta: number): void {
+  private walkAncestorsAndAdjust(absPath: string, prev: GitStatus | undefined, next: GitStatus | undefined): void {
     let current = dirname(absPath);
     while (current && current !== absPath) {
       const ancestor = this.nodeCache.get(current);
       if (!ancestor) {
         break;
       }
-      const next = (ancestor.dirtyDescendantCount ?? 0) + delta;
-      ancestor.dirtyDescendantCount = next < 0 ? 0 : next;
+      adjustAncestorBuckets(ancestor, prev, next);
       const parent = dirname(current);
       if (!parent || parent === current) {
         break;
@@ -414,6 +638,43 @@ export class FileSystemDataSource implements IFileSystemProvider, ITreeDataSourc
   async stat(path: string): Promise<FileStat> {
     // Reserved for a future change — make it loud if a renderer reaches here.
     throw new Error(`FileSystemDataSource.stat not implemented for ${path}`);
+  }
+
+  /**
+   * Request the extension host to start watching `path` for create/delete
+   * events. Fire-and-forget — host posts `fs-changes-invalidated` back
+   * asynchronously when the debounced watcher fires.
+   *
+   * See: asimov/changes/add-file-tree-fs-watcher/specs/file-tree-rpc/spec.md.
+   */
+  subscribeFsChanges(path: string): void {
+    if (this.disposed) {
+      return;
+    }
+    this.postMessage({
+      type: "request-subscribe-fs-changes",
+      rootGeneration: this.currentRootGeneration,
+      path,
+    });
+  }
+
+  /**
+   * Request the extension host to stop watching the given paths. Fire-and-
+   * forget; unknown paths are silently ignored host-side. The bulk shape
+   * keeps eviction of a subtree to one round-trip.
+   */
+  unsubscribeFsChanges(paths: string[]): void {
+    if (this.disposed) {
+      return;
+    }
+    if (paths.length === 0) {
+      return;
+    }
+    this.postMessage({
+      type: "request-unsubscribe-fs-changes",
+      rootGeneration: this.currentRootGeneration,
+      paths,
+    });
   }
 
   // ─── Response intake ──────────────────────────────────────────────
@@ -465,6 +726,20 @@ export class FileSystemDataSource implements IFileSystemProvider, ITreeDataSourc
     if (this.disposed) {
       return;
     }
+    // Bulk-unsubscribe every previously-subscribed path BEFORE clearing local
+    // state. The host-side per-host subscription map is keyed by absolute
+    // path; on the new generation, those entries would otherwise leak until
+    // the host's own attach()-cleanup fires (e.g. on webview disposal).
+    if (this.subscribedPaths.size > 0) {
+      const paths = [...this.subscribedPaths];
+      this.subscribedPaths.clear();
+      // Use the bumped generation so the host gates the unsubscribe under
+      // the new value — symmetric with how subsequent subscribes will be
+      // posted. (The host's per-host map is path-keyed and tolerates either
+      // generation, but staying consistent simplifies log auditing.)
+      this.currentRootGeneration = msg.rootGeneration;
+      this.unsubscribeFsChanges(paths);
+    }
     this.workspaceRoot = msg.rootPath;
     this.currentRootGeneration = msg.rootGeneration;
     const err = new CancellationError("Workspace root changed");
@@ -506,6 +781,14 @@ export class FileSystemDataSource implements IFileSystemProvider, ITreeDataSourc
   dispose(): void {
     if (this.disposed) {
       return;
+    }
+    // Bulk-unsubscribe BEFORE marking disposed so `unsubscribeFsChanges`'s
+    // own `disposed` guard doesn't swallow the send. Order matters because
+    // unsubscribe posts a message, and `disposed` short-circuits that path.
+    if (this.subscribedPaths.size > 0) {
+      const paths = [...this.subscribedPaths];
+      this.subscribedPaths.clear();
+      this.unsubscribeFsChanges(paths);
     }
     this.disposed = true;
     const err = new CancellationError("FileSystemDataSource disposed");

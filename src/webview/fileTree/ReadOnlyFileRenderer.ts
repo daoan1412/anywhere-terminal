@@ -30,6 +30,7 @@
 
 import type { GitStatus } from "../../types/messages";
 import { resolveSetiIcon } from "../../vendor/seti/setiIconResolver";
+import { dominantDirtyStatus, type FolderDirtyCounts } from "./folderDirtyState";
 import type { FileNode } from "./IFileSystemProvider";
 import type { ITemplateData, ITreeMatchData, ITreeRenderer } from "./ITreeRenderer";
 import { renderHighlightedText } from "./search/renderHighlightedText";
@@ -64,6 +65,36 @@ function applyGitClass(row: HTMLElement, status: GitStatus | undefined): void {
   if (status) {
     row.classList.add(`git-${status}`);
   }
+}
+
+/** Every per-kind folder-dirty class — iterated to strip stale ones on recycled rows. */
+const FOLDER_DIRTY_KIND_CLASSES = [
+  "git-folder-dirty-conflicted",
+  "git-folder-dirty-modified",
+  "git-folder-dirty-renamed",
+  "git-folder-dirty-added",
+  "git-folder-dirty-untracked",
+] as const;
+
+/**
+ * Stamp the folder-dirty class set based on the highest-severity propagating
+ * status currently present among descendants. Strips every prior variant
+ * before stamping so recycled rows don't carry a stale color. Pass
+ * `undefined` for file rows / non-dirty folders to clear everything.
+ *
+ * See: add-file-tree-fs-watcher/design.md D10.
+ */
+function applyFolderDirty(row: HTMLElement, counts: FolderDirtyCounts | undefined): void {
+  for (const cls of FOLDER_DIRTY_KIND_CLASSES) {
+    row.classList.remove(cls);
+  }
+  const dominant = dominantDirtyStatus(counts);
+  if (dominant === undefined) {
+    row.classList.remove("git-folder-dirty");
+    return;
+  }
+  row.classList.add("git-folder-dirty");
+  row.classList.add(`git-folder-dirty-${dominant}`);
 }
 
 /** Custom MIME type that authoritatively marks a drag as originating from this file tree. */
@@ -216,10 +247,12 @@ export class ReadOnlyFileRenderer implements ITreeRenderer<FileNode, RowTemplate
     template.name.textContent = element.name;
 
     // Git status: single `git-{status}` row class + badge letter. Folders
-    // additionally light up `git-folder-dirty` + `•` badge when any
-    // descendant is dirty (refcount maintained by FileSystemDataSource).
+    // additionally light up `git-folder-dirty` + a per-kind class
+    // `git-folder-dirty-{status}` so the badge picks its color from the
+    // highest-severity descendant status (refcount maintained by
+    // FileSystemDataSource). See: add-file-tree-fs-watcher/design.md D10.
     applyGitClass(template.row, element.gitStatus);
-    template.row.classList.toggle("git-folder-dirty", !isFile && (element.dirtyDescendantCount ?? 0) > 0);
+    applyFolderDirty(template.row, isFile ? undefined : element.dirtyDescendantCountsByStatus);
     this.applyBadge(template, element, isFile);
 
     // Bind the element to the template so the dragstart listener can read it.
@@ -235,7 +268,7 @@ export class ReadOnlyFileRenderer implements ITreeRenderer<FileNode, RowTemplate
     let text = "";
     if (isFile && element.gitStatus) {
       text = STATUS_BADGE[element.gitStatus];
-    } else if (!isFile && (element.dirtyDescendantCount ?? 0) > 0) {
+    } else if (!isFile && dominantDirtyStatus(element.dirtyDescendantCountsByStatus) !== undefined) {
       text = "•";
     }
     template.gitBadge.textContent = text;
@@ -262,7 +295,7 @@ export class ReadOnlyFileRenderer implements ITreeRenderer<FileNode, RowTemplate
     template.row.style.paddingLeft = "8px";
     template.row.classList.add(`is-search-row--${meta.variant}`);
     // Folder-dirty propagation is meaningless in flat-list mode — clear it.
-    template.row.classList.remove("git-folder-dirty");
+    applyFolderDirty(template.row, undefined);
 
     // Synthetic rows (overflow footer / error marker) are NOT draggable
     // and have no click target — the panel keyboard handler skips them.

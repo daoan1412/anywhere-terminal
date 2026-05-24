@@ -54,6 +54,8 @@ describe("Integration: ack routing through FlowControl + MessageRouter", () => {
       onRevealInFileTree: vi.fn(),
       onFileTreeSearchResponse: vi.fn(),
       onGitStatusChanged: vi.fn(),
+      onFsChangesInvalidated: vi.fn(),
+      onFsRehydrate: vi.fn(),
     };
 
     const dispatch = createMessageRouter(handlers);
