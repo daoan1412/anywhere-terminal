@@ -382,9 +382,7 @@ describe("FileTreePanel — refreshDirectoryByPath + refreshRootAndExpandedDirec
     // unconditionally called tree.domFocus() which stole keyboard focus
     // from whatever the user was actually interacting with.
     const { panel, posted, respond } = setupPanel();
-    respond(readDirectoryPosts(posted)[0].requestId, [
-      { name: "a.ts", path: "/workspace/a.ts", kind: "file" },
-    ]);
+    respond(readDirectoryPosts(posted)[0].requestId, [{ name: "a.ts", path: "/workspace/a.ts", kind: "file" }]);
     await Promise.resolve();
     await Promise.resolve();
 
@@ -405,9 +403,7 @@ describe("FileTreePanel — refreshDirectoryByPath + refreshRootAndExpandedDirec
     // Tree" command) intentionally pull focus into the tree. Verifies the
     // autoReveal carve-out hasn't broken the user-driven path.
     const { panel, posted, respond } = setupPanel();
-    respond(readDirectoryPosts(posted)[0].requestId, [
-      { name: "a.ts", path: "/workspace/a.ts", kind: "file" },
-    ]);
+    respond(readDirectoryPosts(posted)[0].requestId, [{ name: "a.ts", path: "/workspace/a.ts", kind: "file" }]);
     await Promise.resolve();
     await Promise.resolve();
 

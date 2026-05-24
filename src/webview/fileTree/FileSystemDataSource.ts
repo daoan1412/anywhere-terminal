@@ -297,11 +297,7 @@ export class FileSystemDataSource implements IFileSystemProvider, ITreeDataSourc
       entries = await this.readDirectory(path);
     } catch (err) {
       const remaining = this.decrementInflightRead(path);
-      if (
-        remaining === 0 &&
-        !this.childrenByParent.has(path) &&
-        this.subscribedPaths.delete(path)
-      ) {
+      if (remaining === 0 && !this.childrenByParent.has(path) && this.subscribedPaths.delete(path)) {
         this.unsubscribeFsChanges([path]);
       }
       throw err;

@@ -568,7 +568,13 @@ describe("FileSystemDataSource — per-status dirty bucket map (D10)", () => {
     // must drop its prior bucket — otherwise the folder stays tinted dirty
     // forever (no leaf walks would ever fire for the never-loaded subtree).
     const top = await loadChildren(h, null, [
-      { name: "docs", path: "/root/docs", kind: "directory", gitRevision: 5, dirtyDescendantCountsByStatus: { untracked: 3 } },
+      {
+        name: "docs",
+        path: "/root/docs",
+        kind: "directory",
+        gitRevision: 5,
+        dirtyDescendantCountsByStatus: { untracked: 3 },
+      },
     ]);
     const docs = top[0];
     expect(docs.dirtyDescendantCountsByStatus).toEqual({ untracked: 3 });
@@ -577,9 +583,7 @@ describe("FileSystemDataSource — per-status dirty bucket map (D10)", () => {
     // Re-list /root — host now reports docs/ has no dirty descendants
     // (everything inside got staged + committed, or the dirty files were
     // deleted). `gitRevision` is still present so this is authoritative.
-    await loadChildren(h, null, [
-      { name: "docs", path: "/root/docs", kind: "directory", gitRevision: 6 },
-    ]);
+    await loadChildren(h, null, [{ name: "docs", path: "/root/docs", kind: "directory", gitRevision: 6 }]);
     expect(docs.dirtyDescendantCountsByStatus).toBeUndefined();
     expect(docs.dirtyDescendantCount).toBeUndefined();
   });
@@ -590,7 +594,13 @@ describe("FileSystemDataSource — per-status dirty bucket map (D10)", () => {
     // `gitRevision`, the host hasn't made an authoritative statement and
     // the prior value (if any) should persist.
     const top = await loadChildren(h, null, [
-      { name: "docs", path: "/root/docs", kind: "directory", gitRevision: 5, dirtyDescendantCountsByStatus: { modified: 1 } },
+      {
+        name: "docs",
+        path: "/root/docs",
+        kind: "directory",
+        gitRevision: 5,
+        dirtyDescendantCountsByStatus: { modified: 1 },
+      },
     ]);
     const docs = top[0];
     expect(docs.dirtyDescendantCountsByStatus).toEqual({ modified: 1 });
