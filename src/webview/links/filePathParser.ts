@@ -29,6 +29,10 @@ const MAX_RESULTS = 10;
 // remain handled by xterm's built-in `WebLinksAddon`.
 const URL_SCHEME_REGEX = /^(?:https?|ftp|ssh|git|mailto):/i;
 const TRAIL_PUNCT_REGEX = /[.,;:!?]+$/;
+// Path-extension shape used to gate `@`-mention acceptance. 1-8 alphanumeric
+// chars after a final `.`, anchored to end-of-string. Matches the tail check
+// inside `looksLikeFile` so the two stay in sync.
+const HAS_EXT_REGEX = /\.[A-Za-z0-9]{1,8}$/;
 
 function parseIntOpt(s: string | undefined): number | undefined {
   if (s === undefined) {
@@ -190,6 +194,28 @@ function pushCandidate(
       finalPath = trimmed;
       finalText = finalText.slice(0, finalText.length - lost);
     }
+  }
+  // AI-tool `@filepath` mention prefix — strip for resolution, keep in
+  // underlined text. Convention shared by Claude Code (`@docs/foo.md`),
+  // OpenAI Codex (`@`-fuzzy file picker), OpenCode, Cursor, Cline
+  // (`@/path/to/file`), Zed (`@` → `file://` link). The `@` is a UI affordance
+  // that introduces a file reference; the resolver should see the bare path.
+  //
+  // Gate: require BOTH a path separator AND a recognizable extension on the
+  // stripped path. Without this, npm scoped names (`@scope/pkg`) and social
+  // mentions (`@username`) would slip past `looksLikeFile`'s `/` check or its
+  // extension check alone and become clickable underlines that resolve to
+  // nothing. Boundary precedes the `@` already (suffixed/bare regex enforces
+  // `^|[\s'"<({\[]` before the path), so mid-token `@` like `user@host.com`
+  // never starts a match and is unaffected.
+  if (finalPath.startsWith("@") && finalPath.length > 1) {
+    const stripped = finalPath.slice(1);
+    if (!/[/\\]/.test(stripped) || !HAS_EXT_REGEX.test(stripped)) {
+      return;
+    }
+    finalPath = stripped;
+    // finalText keeps the leading `@` so the on-screen underline covers the
+    // full mention as the user typed it.
   }
   if (!looksLikeFile(finalPath)) {
     return;

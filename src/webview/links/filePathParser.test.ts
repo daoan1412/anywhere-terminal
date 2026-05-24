@@ -396,6 +396,78 @@ describe("detectFilePathLinks: dedup on overlap", () => {
   });
 });
 
+describe("detectFilePathLinks: AI-tool @mention prefix", () => {
+  // Claude Code / Codex / OpenCode / Cursor / Cline convention: `@filepath`
+  // introduces a file reference. The `@` is stripped from the resolved path
+  // (so the resolver sees `docs/foo.md`, not `@docs/foo.md`) but stays in the
+  // visible link text so the underline covers what the user typed.
+  it("strips leading @ from relative path; text keeps the @", () => {
+    const r = detectFilePathLinks("read @docs/external-research/fig-style.md please", "posix");
+    expect(r).toHaveLength(1);
+    expect(r[0].path).toBe("docs/external-research/fig-style.md");
+    expect(r[0].text).toBe("@docs/external-research/fig-style.md");
+  });
+
+  it("strips @ in suffixed form, preserves line number", () => {
+    const r = detectFilePathLinks("see @src/foo.ts:42 here", "posix");
+    expect(r).toHaveLength(1);
+    expect(r[0]).toMatchObject({
+      path: "src/foo.ts",
+      line: 42,
+      text: "@src/foo.ts:42",
+    });
+  });
+
+  it("strips @ on Cline-style absolute mention `@/abs/path.md`", () => {
+    const r = detectFilePathLinks("open @/Users/me/notes/x.md now", "posix");
+    expect(r).toHaveLength(1);
+    expect(r[0].path).toBe("/Users/me/notes/x.md");
+    expect(r[0].text).toBe("@/Users/me/notes/x.md");
+  });
+
+  it("rejects @scope/pkg npm-style mention (no extension)", () => {
+    // `npm install @types/node` should not produce a clickable underline that
+    // resolves to a non-existent `types/node` path.
+    expect(detectFilePathLinks("npm install @types/node", "posix")).toEqual([]);
+    expect(detectFilePathLinks("install @scope/package here", "posix")).toEqual([]);
+  });
+
+  it("rejects bare @username social mention (no separator, no extension)", () => {
+    expect(detectFilePathLinks("ping @huybuidac on slack", "posix")).toEqual([]);
+  });
+
+  it("does not treat mid-token @ as mention (email `user@example.com` unchanged)", () => {
+    // Boundary regex requires `@` to follow whitespace/start/quote/paren, so
+    // `user@example.com` starts the match at `u`, not at `@`. The strip path
+    // only runs when finalPath starts with `@`, which it doesn't here.
+    // Email has no `/` and `.com` looks like an extension; `looksLikeFile`
+    // accepts it as a bare-extension file but that's pre-existing behavior we
+    // aren't changing — only assert the @-strip isn't triggered.
+    const r = detectFilePathLinks("contact user@example.com today", "posix");
+    expect(r.every((x) => !x.path.startsWith("@"))).toBe(true);
+  });
+
+  it("@ inside path token (npm scope inside real path) is preserved", () => {
+    // `node_modules/@types/node/index.d.ts` — `@types` is mid-token, not at
+    // the start. Strip logic must not touch it.
+    const r = detectFilePathLinks("see node_modules/@types/node/index.d.ts here", "posix");
+    expect(r).toHaveLength(1);
+    expect(r[0].path).toBe("node_modules/@types/node/index.d.ts");
+    expect(r[0].text).toBe("node_modules/@types/node/index.d.ts");
+  });
+
+  it("@ inside parens is stripped (Claude tool-call narration `(@foo.md)`)", () => {
+    const r = detectFilePathLinks("note (@docs/foo.md) here", "posix");
+    expect(r).toHaveLength(1);
+    expect(r[0].path).toBe("docs/foo.md");
+    expect(r[0].text).toBe("@docs/foo.md");
+  });
+
+  it("lone `@` produces no match", () => {
+    expect(detectFilePathLinks("just @ a symbol", "posix")).toEqual([]);
+  });
+});
+
 describe("detectFilePathLinks: shape contract", () => {
   it("each result has text, index, path, optional line/col", () => {
     const r = detectFilePathLinks("at src/foo.ts:42:7 in", "posix");
