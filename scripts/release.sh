@@ -70,9 +70,15 @@ pnpm check-types
 pnpm test:unit
 pnpm package
 
-# 6. Commit the bumped package.json + CHANGELOG together.
+# 6. Commit the bumped package.json + CHANGELOG together. Idempotent: if
+#    the user pre-committed both files (or a previous run made the commit
+#    before failing later), skip the commit and tag the current HEAD.
 git add package.json CHANGELOG.md
-git commit -m "chore: release v$VERSION"
+if git diff --cached --quiet; then
+  echo "info: package.json + CHANGELOG already committed — tagging current HEAD"
+else
+  git commit -m "chore: release v$VERSION"
+fi
 git tag "v$VERSION"
 
 # 7. Package the VSIX.
