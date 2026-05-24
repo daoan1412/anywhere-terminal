@@ -61,6 +61,19 @@ describe("single leaf rendering", () => {
     expect(leaf.style.overflow).toBe("hidden");
     expect(leaf.style.position).toBe("relative");
   });
+
+  it("sets inline flex:1 on a lone root leaf so it fills its parent after a split is collapsed", () => {
+    // Regression: when a 2-pane split is closed back to a single leaf, the leaf
+    // must fill the tabContainer. Previously this relied on a CSS class rule that
+    // was never loaded — see deleted src/webview/split.css.
+    const callbacks = createMockCallbacks();
+    renderSplitTree(createLeaf("abc"), parent, callbacks);
+
+    const leaf = parent.querySelector(".split-leaf") as HTMLDivElement;
+    expect(Number.parseFloat(leaf.style.flex)).toBe(1);
+    expect(leaf.style.minWidth).toBe("0px");
+    expect(leaf.style.minHeight).toBe("0px");
+  });
 });
 
 // ─── Branch with Two Leaves ─────────────────────────────────────────

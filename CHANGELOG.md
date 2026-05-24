@@ -4,6 +4,12 @@ All notable changes to **AnyWhere Terminal** are documented in this file.
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.12.1] — 2026-05-24
+
+### Fixed
+
+- **Closing one of two split panes now lets the survivor fill the full width again.** After closing one side of a 2-pane split (e.g. close right pane of a side-by-side layout), the surviving pane stayed clamped at ~50% width — window-resize couldn't grow it back. Root cause: the `.split-leaf { flex: 1 }` rule lived in `src/webview/split.css`, but that file was never imported into the webview HTML. So a lone leaf at the root of `tabContainer` fell back to `flex: 0 1 auto` and sized itself to the xterm canvas's stale half-width intrinsic size. Branch children were unaffected because the renderer writes inline flex ratios per child. The layout invariant (`flex: 1`, `min-width/height: 0`) now lives inline in `SplitContainer.ts` so it can't drift, and the dead `split.css` is removed.
+
 ## [0.12.0] — 2026-05-24
 
 ### Added

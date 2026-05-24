@@ -53,6 +53,12 @@ export function renderSplitTree(
     });
     leafEl.style.overflow = "hidden";
     leafEl.style.position = "relative";
+    // Default flex sizing for a lone leaf (e.g. after closing a split pane).
+    // When this leaf is a branch child, the caller overrides style.flex with the ratio.
+    // min-width/min-height: 0 lets the leaf shrink below content min-content (terminal text).
+    leafEl.style.flex = "1";
+    leafEl.style.minWidth = "0";
+    leafEl.style.minHeight = "0";
     parent.appendChild(leafEl);
     callbacks.onLeafMounted(node.sessionId, leafEl);
     return leafEl;
