@@ -48,3 +48,6 @@ asimov/memory.db*
 
 .claude/worktrees
 .claude/scheduled_tasks.lock
+
+# Vendored third-party clones used for local research only — not built or shipped.
+third_party/
