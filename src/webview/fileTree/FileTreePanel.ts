@@ -238,10 +238,21 @@ export class FileTreePanel {
     if (this.disposed) {
       return;
     }
-    // Auto-reveal panel-hidden gate: don't auto-open the tree just because the
-    // user switched editor tabs. The OSC 7 path (no source, or source 'osc7')
-    // still opens the panel below.
-    if (opts?.source === "autoReveal" && !this.open) {
+    const rootCollapsed =
+      !!this.tree && !!this.rootNode && !this.tree.isExpanded(this.rootNode);
+    // Auto-reveal: never disturb a hidden or collapsed panel — the user is
+    // interacting with VS Code's editor / explorer, not us.
+    if (opts?.source === "autoReveal" && (!this.open || rootCollapsed)) {
+      return;
+    }
+    // Root-collapsed + osc7: keep the tree's root in sync with shell PWD if
+    // the cd left the current root, but preserve the collapsed visual state.
+    // No expand / focus / scroll — user explicitly minimized the panel.
+    if (rootCollapsed) {
+      const wsRoot = this.workspaceRootPath as string;
+      if (!isPathInside(absPath, wsRoot)) {
+        this.setRoot(absPath, { mountCollapsed: true });
+      }
       return;
     }
     // Make sure the panel is visible before we try to scroll the row.
@@ -337,7 +348,7 @@ export class FileTreePanel {
    * workspace folder reported by VS Code is unchanged — this only affects
    * what the file-tree widget renders.
    */
-  setRoot(absPath: string): void {
+  setRoot(absPath: string, opts?: { mountCollapsed?: boolean }): void {
     if (this.disposed) {
       return;
     }
@@ -353,6 +364,7 @@ export class FileTreePanel {
       rootPath: absPath,
       dataSourceStrategy: "recreate",
       rootGeneration: this.currentRootGeneration,
+      mountCollapsed: opts?.mountCollapsed,
     });
   }
 
@@ -466,6 +478,11 @@ export class FileTreePanel {
     // right value. Forgetting this was the original "tree silently empty
     // after workspace-folder change + reveal" bug.
     this.currentRootGeneration = msg.rootGeneration;
+    // Snapshot the user's "minimized" intent BEFORE teardown so the new
+    // workspace root opens collapsed if the previous one was. Otherwise a
+    // workspace folder change silently un-minimizes the panel.
+    const wasCollapsed =
+      !!this.tree && !!this.rootNode && !this.tree.isExpanded(this.rootNode);
     // Bubble the change into the search controller (cache invalidation).
     this.searchController?.onWorkspaceRootChanged();
     if (this.searchActive) {
@@ -480,6 +497,7 @@ export class FileTreePanel {
       rootPath: msg.rootPath,
       dataSourceStrategy: "rotate",
       rotateMsg: msg,
+      mountCollapsed: wasCollapsed,
     });
   }
 
@@ -506,6 +524,14 @@ export class FileTreePanel {
      * was rotated, not recreated).
      */
     rootGeneration?: number;
+    /**
+     * Mount the new root in the collapsed state (header-only mode). Used to
+     * preserve "user explicitly minimized the panel" intent across silent
+     * re-roots (osc7 cd outside workspace, workspace folder changes).
+     * Skips the default `expandedPaths.add(rootPath)` and immediately
+     * collapses the root after `setInput`.
+     */
+    mountCollapsed?: boolean;
   }): void {
     // Tear down listeners + widgets bound to the previous mount.
     this.dragoverDetach?.();
@@ -563,7 +589,7 @@ export class FileTreePanel {
       // currentRootGeneration). Falling back to deps would re-introduce
       // the stale-gen bug, so we deliberately don't.
       const gen = args.rotateMsg?.rootGeneration ?? args.rootGeneration ?? this.currentRootGeneration;
-      this.mountTree(args.rootPath, gen);
+      this.mountTree(args.rootPath, gen, args.mountCollapsed === true);
     }
 
     // Re-apply position + size — the layoutWrapper survives across re-mounts;
@@ -961,6 +987,9 @@ export class FileTreePanel {
     }
     this.searchActive = true;
     this.currentSearchScope = scope;
+    // Search needs the body visible to render results — clear any
+    // root-collapsed class so the CSS doesn't keep it hidden.
+    this.syncRootCollapsedClass();
 
     if (this.headerRootRowEl) {
       this.headerRootRowEl.style.display = "none";
@@ -993,6 +1022,9 @@ export class FileTreePanel {
     }
     this.searchActive = false;
     this.currentSearchScope = null;
+    // Re-evaluate collapsed-class now that body visibility is governed by
+    // root expansion state again.
+    this.syncRootCollapsedClass();
     if (this.searchInputEl) {
       this.searchInputEl.oninput = null;
       this.searchInputEl.onkeydown = null;
@@ -1063,11 +1095,31 @@ export class FileTreePanel {
     if (!this.rootNode) {
       this.headerRootNameEl.textContent = "";
       this.headerRootRowEl.setAttribute("aria-expanded", "false");
+      this.syncRootCollapsedClass();
       return;
     }
     this.headerRootNameEl.textContent = this.rootNode.name;
     const expanded = this.tree?.isExpanded(this.rootNode) ?? false;
     this.headerRootRowEl.setAttribute("aria-expanded", expanded ? "true" : "false");
+    this.syncRootCollapsedClass();
+  }
+
+  /**
+   * Stamp `.file-tree--root-collapsed` on the layout wrapper when the body
+   * should be hidden (header-only mode). True iff a root is mounted, search
+   * is inactive, and the user has collapsed the root via the header chevron.
+   * Driving the CSS from a derived class — instead of `:has(aria-expanded)` —
+   * keeps the no-root empty state and search-active mode visible (both also
+   * carry aria-expanded="false" on the root row).
+   */
+  private syncRootCollapsedClass(): void {
+    const wrapper = this.deps.layoutWrapper;
+    if (!wrapper) {
+      return;
+    }
+    const collapsed =
+      !!this.tree && !!this.rootNode && !this.searchActive && !this.tree.isExpanded(this.rootNode);
+    wrapper.classList.toggle("file-tree--root-collapsed", collapsed);
   }
 
   private mountBody(): void {
@@ -1085,7 +1137,7 @@ export class FileTreePanel {
     this.emptyStateEl = el;
   }
 
-  private mountTree(workspaceRoot: string, overrideRootGeneration?: number): void {
+  private mountTree(workspaceRoot: string, overrideRootGeneration?: number, mountCollapsed = false): void {
     const gen = overrideRootGeneration ?? this.deps.rootGeneration;
     // Re-use existing data source if we have one (handleRootChanged already
     // pinned the new generation onto it). Otherwise construct fresh with
@@ -1157,12 +1209,18 @@ export class FileTreePanel {
       kind: "directory",
     };
     this.tree.setInput(rootNode);
-    this.expandedPaths.add(workspaceRoot);
+    if (mountCollapsed) {
+      // Collapse BEFORE assigning this.rootNode so the onDidChangeExpansion
+      // handler's `e.element === this.rootNode` guard doesn't fire — we
+      // call syncHeaderRoot ourselves below once the new state is settled.
+      this.tree.collapse(rootNode);
+    } else {
+      this.expandedPaths.add(workspaceRoot);
+    }
     this.rootNode = rootNode;
     this.workspaceRootPath = workspaceRoot;
     // Header surfaces the root row (chevron + name); sync now that rootNode
-    // is pinned. The expanded-state attr reflects what Tree.setInput just
-    // stamped (`{ expanded: true }`).
+    // is pinned.
     this.syncHeaderRoot();
 
     // Bridge host dimensions into the underlying List widget. ResizeObserver

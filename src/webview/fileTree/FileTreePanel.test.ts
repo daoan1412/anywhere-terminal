@@ -440,3 +440,205 @@ describe("FileTreePanel — refreshDirectoryByPath + refreshRootAndExpandedDirec
     panel.dispose();
   });
 });
+
+describe("FileTreePanel — root-collapsed (header-only) mode", () => {
+  // Covers oracle action item: when the user has explicitly collapsed the
+  // root via the header chevron, external reveals must NOT pop the body open.
+  // OSC 7 cd outside the workspace silently re-roots while staying collapsed
+  // so the header tracks shell PWD; in-root reveals are no-ops.
+
+  type TreeInternals = {
+    rootNode: FileNode | null;
+    workspaceRootPath: string | null;
+    tree: {
+      isExpanded(n: FileNode): boolean;
+      collapse(n: FileNode): void;
+      domFocus(): void;
+      revealElement(n: FileNode, top?: number): void;
+    } | null;
+  };
+
+  function setupCollapsedPanel(): {
+    panel: FileTreePanel;
+    posted: AnyMsg[];
+    wrapper: HTMLElement;
+    internals: TreeInternals;
+    respond: (requestId: string, entries: Array<{ name: string; path: string; kind: "file" | "directory" }>) => void;
+  } {
+    const wrapper = document.createElement("div");
+    wrapper.className = "webview-layout";
+    document.body.appendChild(wrapper);
+    const host = createHost();
+    const posted: AnyMsg[] = [];
+    const panel = new FileTreePanel({
+      host,
+      layoutWrapper: wrapper,
+      workspaceRoot: "/workspace",
+      rootGeneration: 1,
+      getActiveSessionId: () => "sess",
+      postMessage: (m) => posted.push(m),
+    });
+    const internals = panel as unknown as TreeInternals & {
+      dataSource: { handleResponse(m: unknown): void } | null;
+    };
+    if (!internals.dataSource) {
+      throw new Error("panel.dataSource was null after mount");
+    }
+    const ds = internals.dataSource;
+    const respond = (
+      requestId: string,
+      entries: Array<{ name: string; path: string; kind: "file" | "directory" }>,
+    ) => {
+      ds.handleResponse({ type: "read-directory-response", requestId, rootGeneration: 1, entries });
+    };
+    return { panel, posted, wrapper, internals, respond };
+  }
+
+  function readDirectoryPosts(posted: AnyMsg[]): Array<{ requestId: string; path: string }> {
+    return posted
+      .filter((m): m is RequestReadDirectoryMessage => m.type === "request-read-directory")
+      .map((m) => ({ requestId: m.requestId, path: m.path }));
+  }
+
+  it("revealPath(osc7, outside-workspace) re-roots silently and stays collapsed", async () => {
+    const { panel, posted, wrapper, internals, respond } = setupCollapsedPanel();
+    respond(readDirectoryPosts(posted)[0].requestId, []);
+    await Promise.resolve();
+    await Promise.resolve();
+
+    // User explicitly collapses the root via the header chevron equivalent.
+    const root = internals.rootNode;
+    if (!root || !internals.tree) {
+      throw new Error("test setup: tree or rootNode missing after mount");
+    }
+    internals.tree.collapse(root);
+    expect(wrapper.classList.contains("file-tree--root-collapsed")).toBe(true);
+
+    // Spy on the post-collapse tree's focus/reveal methods so we can prove
+    // the silent re-root does NOT steal focus or scroll the user's view.
+    // The NEW tree is created inside setRoot, so we need to spy AFTER reveal.
+
+    await panel.revealPath("/other/repo", { source: "osc7" });
+    await Promise.resolve();
+    await Promise.resolve();
+
+    // Root path tracked the cd.
+    expect(internals.workspaceRootPath).toBe("/other/repo");
+    expect(internals.rootNode?.path).toBe("/other/repo");
+
+    // Still collapsed: wrapper class persists across the silent re-root.
+    expect(wrapper.classList.contains("file-tree--root-collapsed")).toBe(true);
+    if (internals.rootNode && internals.tree) {
+      expect(internals.tree.isExpanded(internals.rootNode)).toBe(false);
+    }
+
+    panel.dispose();
+    wrapper.remove();
+  });
+
+  it("revealPath(osc7, inside-workspace) is a no-op while collapsed", async () => {
+    const { panel, posted, wrapper, internals, respond } = setupCollapsedPanel();
+    respond(readDirectoryPosts(posted)[0].requestId, [
+      { name: "a.ts", path: "/workspace/a.ts", kind: "file" },
+    ]);
+    await Promise.resolve();
+    await Promise.resolve();
+
+    const root = internals.rootNode;
+    if (!root || !internals.tree) {
+      throw new Error("test setup: tree or rootNode missing after mount");
+    }
+    internals.tree.collapse(root);
+    const focusSpy = vi.spyOn(internals.tree, "domFocus");
+    const revealSpy = vi.spyOn(internals.tree, "revealElement");
+    const beforeReads = readDirectoryPosts(posted).length;
+
+    await panel.revealPath("/workspace/a.ts", { source: "osc7" });
+
+    expect(focusSpy).not.toHaveBeenCalled();
+    expect(revealSpy).not.toHaveBeenCalled();
+    expect(readDirectoryPosts(posted).length).toBe(beforeReads);
+    expect(internals.workspaceRootPath).toBe("/workspace");
+    expect(wrapper.classList.contains("file-tree--root-collapsed")).toBe(true);
+
+    panel.dispose();
+    wrapper.remove();
+  });
+
+  it("revealPath(autoReveal) is a no-op while collapsed", async () => {
+    const { panel, posted, wrapper, internals, respond } = setupCollapsedPanel();
+    respond(readDirectoryPosts(posted)[0].requestId, [
+      { name: "a.ts", path: "/workspace/a.ts", kind: "file" },
+    ]);
+    await Promise.resolve();
+    await Promise.resolve();
+
+    const root = internals.rootNode;
+    if (!root || !internals.tree) {
+      throw new Error("test setup: tree or rootNode missing after mount");
+    }
+    internals.tree.collapse(root);
+    const focusSpy = vi.spyOn(internals.tree, "domFocus");
+    const revealSpy = vi.spyOn(internals.tree, "revealElement");
+
+    await panel.revealPath("/workspace/a.ts", { source: "autoReveal" });
+
+    expect(focusSpy).not.toHaveBeenCalled();
+    expect(revealSpy).not.toHaveBeenCalled();
+    expect(wrapper.classList.contains("file-tree--root-collapsed")).toBe(true);
+
+    panel.dispose();
+    wrapper.remove();
+  });
+
+  it("handleRootChanged preserves collapse intent across workspace folder change", async () => {
+    const { panel, posted, wrapper, internals, respond } = setupCollapsedPanel();
+    respond(readDirectoryPosts(posted)[0].requestId, []);
+    await Promise.resolve();
+    await Promise.resolve();
+
+    const root = internals.rootNode;
+    if (!root || !internals.tree) {
+      throw new Error("test setup: tree or rootNode missing after mount");
+    }
+    internals.tree.collapse(root);
+    expect(wrapper.classList.contains("file-tree--root-collapsed")).toBe(true);
+
+    panel.handleRootChanged({ rootPath: "/new-workspace", rootGeneration: 2 });
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(internals.workspaceRootPath).toBe("/new-workspace");
+    expect(wrapper.classList.contains("file-tree--root-collapsed")).toBe(true);
+    if (internals.rootNode && internals.tree) {
+      expect(internals.tree.isExpanded(internals.rootNode)).toBe(false);
+    }
+
+    panel.dispose();
+    wrapper.remove();
+  });
+
+  it("syncRootCollapsedClass does NOT stamp the class when no workspace is open", () => {
+    const wrapper = document.createElement("div");
+    wrapper.className = "webview-layout";
+    document.body.appendChild(wrapper);
+    const host = createHost();
+
+    const panel = new FileTreePanel({
+      host,
+      layoutWrapper: wrapper,
+      workspaceRoot: null,
+      rootGeneration: 0,
+      getActiveSessionId: () => null,
+      postMessage: () => {},
+    });
+
+    // No workspace → empty state visible, wrapper must NOT carry the
+    // collapsed class even though the header's aria-expanded is "false".
+    expect(wrapper.classList.contains("file-tree--root-collapsed")).toBe(false);
+    expect(host.querySelector(".file-tree-empty")).not.toBeNull();
+
+    panel.dispose();
+    wrapper.remove();
+  });
+});

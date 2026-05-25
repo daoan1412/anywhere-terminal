@@ -652,3 +652,20 @@
 .webview-layout.file-tree--closed .file-tree-panel {
   display: none;
 }
+
+/* Root-collapsed (header-only) mode. The wrapper class is stamped by
+ * FileTreePanel.syncRootCollapsedClass() — it's NOT derived from
+ * aria-expanded because the no-root and search-active states also set
+ * aria-expanded="false" but must keep their bodies visible. */
+.webview-layout.file-tree--root-collapsed .file-tree-body,
+.webview-layout.file-tree--root-collapsed .file-tree-panel .sash {
+  display: none;
+}
+
+/* Top/bottom only: shrink panel to header height so terminal reclaims the
+ * saved `--file-tree-size`. Left/right keeps its width — the horizontal
+ * header cluster needs room for chevron + name + action buttons. */
+.webview-layout.file-tree--top.file-tree--root-collapsed .file-tree-panel,
+.webview-layout.file-tree--bottom.file-tree--root-collapsed .file-tree-panel {
+  flex: 0 0 auto;
+}

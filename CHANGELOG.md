@@ -4,6 +4,16 @@ All notable changes to **AnyWhere Terminal** are documented in this file.
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.12.2] — 2026-05-25
+
+### Changed
+
+- **Collapsing the file tree now hides the body and shrinks the panel to its header strip** (top/bottom orientation), matching VS Code Explorer's "section collapsed" feel. Previously clicking the header chevron emptied the list but the panel kept reserving its full saved size, leaving a tall blank area under the title. The terminal area now reclaims that space automatically when the user minimizes the tree.
+
+### Fixed
+
+- **External "reveal file" signals no longer pop the file tree back open while it is collapsed.** Switching editor tabs in VS Code (auto-reveal) is a complete no-op when the tree is minimized; `cd`-ing in the terminal (OSC 7) inside the current workspace is likewise silent. A `cd` to a path outside the workspace still re-roots the tree so the header tracks the shell's PWD, but the body stays collapsed instead of expanding behind the user's back. Collapse intent is also preserved when VS Code reports a workspace folder change.
+
 ## [0.12.1] — 2026-05-24
 
 ### Fixed
