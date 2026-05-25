@@ -238,8 +238,7 @@ export class FileTreePanel {
     if (this.disposed) {
       return;
     }
-    const rootCollapsed =
-      !!this.tree && !!this.rootNode && !this.tree.isExpanded(this.rootNode);
+    const rootCollapsed = !!this.tree && !!this.rootNode && !this.tree.isExpanded(this.rootNode);
     // Auto-reveal: never disturb a hidden or collapsed panel — the user is
     // interacting with VS Code's editor / explorer, not us.
     if (opts?.source === "autoReveal" && (!this.open || rootCollapsed)) {
@@ -481,8 +480,7 @@ export class FileTreePanel {
     // Snapshot the user's "minimized" intent BEFORE teardown so the new
     // workspace root opens collapsed if the previous one was. Otherwise a
     // workspace folder change silently un-minimizes the panel.
-    const wasCollapsed =
-      !!this.tree && !!this.rootNode && !this.tree.isExpanded(this.rootNode);
+    const wasCollapsed = !!this.tree && !!this.rootNode && !this.tree.isExpanded(this.rootNode);
     // Bubble the change into the search controller (cache invalidation).
     this.searchController?.onWorkspaceRootChanged();
     if (this.searchActive) {
@@ -1117,8 +1115,7 @@ export class FileTreePanel {
     if (!wrapper) {
       return;
     }
-    const collapsed =
-      !!this.tree && !!this.rootNode && !this.searchActive && !this.tree.isExpanded(this.rootNode);
+    const collapsed = !!this.tree && !!this.rootNode && !this.searchActive && !this.tree.isExpanded(this.rootNode);
     wrapper.classList.toggle("file-tree--root-collapsed", collapsed);
   }
 

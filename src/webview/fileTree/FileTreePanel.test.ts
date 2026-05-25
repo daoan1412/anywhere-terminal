@@ -485,10 +485,7 @@ describe("FileTreePanel — root-collapsed (header-only) mode", () => {
       throw new Error("panel.dataSource was null after mount");
     }
     const ds = internals.dataSource;
-    const respond = (
-      requestId: string,
-      entries: Array<{ name: string; path: string; kind: "file" | "directory" }>,
-    ) => {
+    const respond = (requestId: string, entries: Array<{ name: string; path: string; kind: "file" | "directory" }>) => {
       ds.handleResponse({ type: "read-directory-response", requestId, rootGeneration: 1, entries });
     };
     return { panel, posted, wrapper, internals, respond };
@@ -538,9 +535,7 @@ describe("FileTreePanel — root-collapsed (header-only) mode", () => {
 
   it("revealPath(osc7, inside-workspace) is a no-op while collapsed", async () => {
     const { panel, posted, wrapper, internals, respond } = setupCollapsedPanel();
-    respond(readDirectoryPosts(posted)[0].requestId, [
-      { name: "a.ts", path: "/workspace/a.ts", kind: "file" },
-    ]);
+    respond(readDirectoryPosts(posted)[0].requestId, [{ name: "a.ts", path: "/workspace/a.ts", kind: "file" }]);
     await Promise.resolve();
     await Promise.resolve();
 
@@ -567,9 +562,7 @@ describe("FileTreePanel — root-collapsed (header-only) mode", () => {
 
   it("revealPath(autoReveal) is a no-op while collapsed", async () => {
     const { panel, posted, wrapper, internals, respond } = setupCollapsedPanel();
-    respond(readDirectoryPosts(posted)[0].requestId, [
-      { name: "a.ts", path: "/workspace/a.ts", kind: "file" },
-    ]);
+    respond(readDirectoryPosts(posted)[0].requestId, [{ name: "a.ts", path: "/workspace/a.ts", kind: "file" }]);
     await Promise.resolve();
     await Promise.resolve();
 
