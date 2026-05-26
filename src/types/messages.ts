@@ -388,9 +388,9 @@ export interface InitMessage {
      * leaf init, never the `activeTabId`). Required so that on reload /
      * cross-restart the layout tree in `WebviewStateStore.tabLayouts` finds
      * every referenced session in `validTabIds`. See restore-terminal-sessions
-     * design.md D12.
+     * design.md D12 + round-1 W10 (locked the contract — now required).
      */
-    isSplitPane?: boolean;
+    isSplitPane: boolean;
   }>;
   /** Terminal configuration from user settings */
   config: TerminalConfig;

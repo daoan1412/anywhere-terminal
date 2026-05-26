@@ -430,7 +430,8 @@ const routeMessage = createMessageRouter({
     // Replay a persisted snapshot into an xterm instance. The typical sequence
     // when triggered cross-restart is: `init` arrives first → factory creates
     // each tab terminal with `open()` called (default). Then this message
-    // arrives → we resize, write the buffer, and write the restore divider.
+    // arrives → we write the buffer and the restore divider; the post-init
+    // refit (debouncedFitAllLeaves) owns the live container's true cols/rows.
     // If the instance is missing (defensive — init didn't include this tab),
     // we create one with `deferOpen: true` and finalize the attach here.
     // See: restore-terminal-sessions design.md D8, D9, D13.
@@ -447,11 +448,16 @@ const routeMessage = createMessageRouter({
       );
       attachLater = true;
     }
-    try {
-      instance.terminal.resize(Math.max(1, msg.cols), Math.max(1, msg.rows));
-    } catch {
-      // resize fails when terminal not yet open — only meaningful for the
-      // open-already path; deferred path will resize again post-open via fit.
+    // Resize only for the deferred path — the open-already path's terminal has
+    // its REAL container dimensions established by the post-init refit. Writing
+    // the snapshot buffer at the persisted (stale) cols/rows and then refit
+    // afterwards would mis-wrap any concurrent live PTY output (round-1 W4).
+    if (attachLater) {
+      try {
+        instance.terminal.resize(Math.max(1, msg.cols), Math.max(1, msg.rows));
+      } catch {
+        // resize fails when terminal not yet open — the post-open fit recovers.
+      }
     }
     instance.terminal.write(msg.serializedBuffer);
     instance.terminal.write(
@@ -495,7 +501,7 @@ function handleInit(msg: InitMessage): void {
   // references this pane. See restore-terminal-sessions design.md D12.
   for (const tab of msg.tabs) {
     factory.createTerminal(tab.id, tab.name, msg.config, tab.isActive, tab.customName, {
-      isSplitPane: tab.isSplitPane === true,
+      isSplitPane: tab.isSplitPane,
     });
   }
   // Build the split-tree DOM for every restored multi-pane tab. Without this,
@@ -511,7 +517,7 @@ function handleInit(msg: InitMessage): void {
   // Reveal the active root tab's split container (no-op when the active tab
   // has no branch layout — the per-terminal `display: block` from createTerminal
   // already shows the single-pane case).
-  const activeRootTab = msg.tabs.find((t) => t.isActive && t.isSplitPane !== true);
+  const activeRootTab = msg.tabs.find((t) => t.isActive && !t.isSplitPane);
   if (activeRootTab) {
     const activeLayout = store.tabLayouts.get(activeRootTab.id);
     if (activeLayout && activeLayout.type === "branch") {

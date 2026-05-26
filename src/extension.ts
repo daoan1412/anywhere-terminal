@@ -1,12 +1,21 @@
+import * as fs from "node:fs";
 import * as vscode from "vscode";
 import { createWatcherPool } from "./providers/fsWatcherPool";
 import { createGitDecorationProvider } from "./providers/gitDecorationProvider";
 import { resolveRenameTargetTabId } from "./providers/resolveRenameTarget";
 import { TerminalEditorProvider } from "./providers/TerminalEditorProvider";
+import { TerminalPanelSerializer } from "./providers/TerminalPanelSerializer";
 import { TerminalViewProvider } from "./providers/TerminalViewProvider";
 import { loadNodePty } from "./pty/PtyManager";
 import { SessionManager } from "./session/SessionManager";
-import { affectsTerminalConfig, readTerminalConfig, readTerminalSettings } from "./settings/SettingsReader";
+import { SessionStorage } from "./session/SessionStorage";
+import {
+  affectsSessionRestoreEnabled,
+  affectsTerminalConfig,
+  readSessionRestoreEnabled,
+  readTerminalConfig,
+  readTerminalSettings,
+} from "./settings/SettingsReader";
 import { PtyLoadError } from "./types/errors";
 import { escapePathForShell } from "./utils/shellEscape";
 
@@ -24,9 +33,45 @@ export function activate(context: vscode.ExtensionContext) {
     }
     // Continue activation — individual createSession calls will fail gracefully
   }
+  // Cross-restart session-restore wiring. See: restore-terminal-sessions design.md D4–D7, D11.
+  //
+  // No-workspace windows: `context.storageUri` is undefined when no folder is
+  // open. Falling back to `globalStorageUri` would leak snapshots between
+  // otherwise-unrelated no-folder windows (next window's hydrate scans the
+  // shared global directory). Disable persistence entirely for this window
+  // instead — the user can re-enable by opening a folder. See round-1 W7.
+  const hasWorkspaceStorage = context.storageUri !== undefined;
+  const restoreEnabled = hasWorkspaceStorage && readSessionRestoreEnabled();
+  if (!hasWorkspaceStorage && readSessionRestoreEnabled()) {
+    console.warn(
+      "[AnyWhere Terminal] sessionRestore disabled for this window — no workspace folder open. Open a folder to enable persistence.",
+    );
+  }
+  const restoreStorageUri = context.storageUri ?? context.globalStorageUri;
+  const sessionStorage = new SessionStorage(context.workspaceState, restoreStorageUri, fs);
+
   // Create shared SessionManager (singleton). workspaceState backs the per-workspace
   // custom-tab-name persistence (anywhereTerminal.tabCustomNames); see design.md D3 of add-tab-rename.
-  const sessionManager = new SessionManager(context.workspaceState);
+  const sessionManager = new SessionManager(context.workspaceState, {
+    restoreEnabled,
+    storage: sessionStorage,
+  });
+
+  // Hydrate restore state BEFORE registering any view provider so the
+  // sidebar/panel/editor onReady branches see populated pending snapshots.
+  // Live panels MUST hydrate first — the snapshot orphan-recovery fallback
+  // uses the live-panels lookup to map an unindexed buffer file back to its
+  // owning editor panel rather than defaulting to sidebar. See round-1 W2.
+  if (restoreEnabled) {
+    sessionManager.hydrateLivePanels(sessionStorage.loadLivePanels());
+    sessionManager.hydrateFromSnapshots(sessionStorage.loadIndex());
+  } else {
+    // Setting disabled — purge any leftover persistence from a prior session.
+    void sessionStorage.purge();
+  }
+
+  // Allow late deactivate() to find this singleton without re-routing.
+  _activeSessionManager = sessionManager;
 
   // Shared GitDecorationProvider — one singleton, threaded through every
   // FileTreeHost so the three webviews (sidebar / panel / editor) see one
@@ -82,6 +127,16 @@ export function activate(context: vscode.ExtensionContext) {
       );
       context.subscriptions.push(panelDisposable);
     }),
+  );
+
+  // WebviewPanelSerializer — revives editor terminal panels on window reload.
+  // Wired AFTER SessionManager construction so consumeSnapshotsForPanel sees the
+  // hydrated pending snapshots. See: restore-terminal-sessions design.md D2, D7.
+  context.subscriptions.push(
+    vscode.window.registerWebviewPanelSerializer(
+      TerminalEditorProvider.viewType,
+      new TerminalPanelSerializer(context, sessionManager, gitDecorationProvider, fsWatcherPool),
+    ),
   );
 
   // ─── Provider Lookup ──────────────────────────────────────────
@@ -436,6 +491,13 @@ export function activate(context: vscode.ExtensionContext) {
 
   context.subscriptions.push(
     vscode.workspace.onDidChangeConfiguration((e) => {
+      // sessionRestore.enabled is the only `anywhereTerminal.*` setting that
+      // does NOT push a configUpdate to webviews — it owns the restore pipeline
+      // lifecycle and is handled here on the extension side.
+      if (affectsSessionRestoreEnabled(e)) {
+        sessionManager.setRestoreEnabled(readSessionRestoreEnabled());
+      }
+
       if (!affectsTerminalConfig(e)) {
         return;
       }
@@ -510,8 +572,9 @@ export function activate(context: vscode.ExtensionContext) {
     }),
   );
 
-  // Register SessionManager for disposal on extension deactivation
-  context.subscriptions.push(sessionManager);
+  // SessionManager is NOT added to context.subscriptions: the deactivate()
+  // hook below orchestrates a two-step flush (sync buffers → awaited index)
+  // BEFORE dispose, so ordering matters. See: design.md D6.
 }
 
 /** Safely post a message to a webview, handling both sync throws and async rejections. */
@@ -523,4 +586,36 @@ function safePostMessage(webview: vscode.Webview, message: unknown): void {
   }
 }
 
-export function deactivate() {}
+/**
+ * Singleton reference set in `activate` and consumed in `deactivate`.
+ * Lives at module scope so `deactivate` (which has no `context` arg) can
+ * orchestrate the two-step persistence flush. See: design.md D6.
+ */
+let _activeSessionManager: SessionManager | null = null;
+
+export async function deactivate(): Promise<void> {
+  const sm = _activeSessionManager;
+  if (!sm) {
+    return;
+  }
+  _activeSessionManager = null;
+  // Step 1 — synchronously write every active session's buffer to disk so
+  // partial-flush windows don't lose the most recent state.
+  try {
+    sm.flushSnapshotsSync();
+  } catch (err) {
+    console.error("[AnyWhere Terminal] flushSnapshotsSync failed during deactivate:", err);
+  }
+  // Step 2 — await the index + live-panels Memento updates.
+  try {
+    await sm.flushIndexAwaited();
+  } catch (err) {
+    console.error("[AnyWhere Terminal] flushIndexAwaited failed during deactivate:", err);
+  }
+  // Step 3 — tear down PTYs (idempotent).
+  try {
+    sm.dispose();
+  } catch (err) {
+    console.error("[AnyWhere Terminal] SessionManager.dispose failed during deactivate:", err);
+  }
+}

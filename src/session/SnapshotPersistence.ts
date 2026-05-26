@@ -77,12 +77,21 @@ export interface SnapshotPersistenceOptions {
   serializeAddonFactory: SerializeAddonFactory;
   /** Lookup callback for SessionManager's session registry. */
   getSession: (id: string) => TerminalSession | undefined;
+  /**
+   * Optional editor-panel registry — used during hydrate orphan fallback (W2)
+   * to map a torn-flush orphan buffer back to its owning editor panel rather
+   * than defaulting to sidebar.
+   */
+  editorPanels?: {
+    findPanelForSession(sessionId: string): string | undefined;
+  };
 }
 
 export class SnapshotPersistence {
   private readonly headlessFactory: HeadlessFactory;
   private readonly serializeAddonFactory: SerializeAddonFactory;
   private readonly getSession: (id: string) => TerminalSession | undefined;
+  private readonly editorPanels?: { findPanelForSession(sessionId: string): string | undefined };
   private storage: SessionStorage | null;
   private restoreEnabled: boolean;
 
@@ -127,6 +136,7 @@ export class SnapshotPersistence {
     this.headlessFactory = opts.headlessFactory;
     this.serializeAddonFactory = opts.serializeAddonFactory;
     this.getSession = opts.getSession;
+    this.editorPanels = opts.editorPanels;
   }
 
   isRestoreEnabled(): boolean {
@@ -537,6 +547,12 @@ export class SnapshotPersistence {
   hydrateFromSnapshots(index?: SessionSnapshotsIndex): void {
     if (!this.restoreEnabled || !this.storage) return;
     const now = Date.now();
+    // Distinguish "index absent" from "index present with unsupported version":
+    //   - absent → fall through to orphan-recovery (step 3) so a torn flush
+    //              isn't lost.
+    //   - corrupted (wrong version) → discard entirely per spec; do NOT run
+    //              orphan recovery. See round-1 W1.
+    const indexCorrupted = index !== undefined && (index.version !== 1 || !index.entries);
     const incoming: Record<string, SessionSnapshotMetadata> =
       index && index.version === 1 && index.entries ? { ...index.entries } : {};
 
@@ -559,37 +575,51 @@ export class SnapshotPersistence {
     }
 
     // Step 3 — Buffer-file fallback. Inspect buffer files that survived on disk
-    // but are absent from the index, not only when the index is entirely empty.
-    // Covers a torn deactivate flush where new buffer files landed but the
-    // awaited Memento index update was interrupted after an older partial index.
-    // Reconstructed metadata defaults to a sidebar terminal with no shell config.
-    for (const sessionId of this.storage.listBufferFiles()) {
-      if (indexAfterEviction[sessionId]) continue;
-      const buf = this.storage.readBufferFile(sessionId);
-      if (buf === null) continue;
-      // Note: preferred terminalNumber = 0 falls through to findAvailableNumber()
-      // (which starts at 1). See SessionManager.reserveNumber.
-      const meta: SessionSnapshotMetadata = {
-        sessionId,
-        viewLocation: "sidebar",
-        terminalNumber: 0,
-        customName: null,
-        shell: "",
-        shellArgs: [],
-        cwd: "",
-        currentCwd: null,
-        cols: 80,
-        rows: 24,
-        bufferFile: this.storage.bufferFileRelativePath(sessionId),
-        bufferBytes: Buffer.byteLength(buf, "utf8"),
-        isSplitPane: false,
-        rootTabId: sessionId,
-        snapshotAt: now,
-        shellExited: false,
-        exitCode: null,
-      };
-      hydrated.push({ metadata: meta, buffer: buf });
-      indexAfterEviction[sessionId] = meta;
+    // but are absent from the index. Covers a torn deactivate flush where new
+    // buffer files landed but the awaited Memento index update was interrupted
+    // after an older partial index. Skipped entirely when the index was present
+    // but corrupted (unsupported version) — per spec, corrupted state is
+    // discarded, not recovered. See round-1 W1.
+    if (!indexCorrupted) {
+      for (const sessionId of this.storage.listBufferFiles()) {
+        if (indexAfterEviction[sessionId]) continue;
+        let buf: string | null;
+        try {
+          buf = this.storage.readBufferFile(sessionId);
+        } catch {
+          // SessionStorage may reject unsafe sessionIds (W8 path-traversal guard).
+          continue;
+        }
+        if (buf === null) continue;
+        // Live-panels lookup: if this orphan was previously an editor session,
+        // restore it AS an editor session under the same panel — otherwise it
+        // defaults to a sidebar terminal. See round-1 W2.
+        const owningPanelId = this.editorPanels?.findPanelForSession(sessionId);
+        // Note: preferred terminalNumber = 0 falls through to findAvailableNumber()
+        // (which starts at 1). See SessionManager.reserveNumber.
+        const meta: SessionSnapshotMetadata = {
+          sessionId,
+          panelId: owningPanelId,
+          viewLocation: owningPanelId ? "editor" : "sidebar",
+          terminalNumber: 0,
+          customName: null,
+          shell: "",
+          shellArgs: [],
+          cwd: "",
+          currentCwd: null,
+          cols: 80,
+          rows: 24,
+          bufferFile: this.storage.bufferFileRelativePath(sessionId),
+          bufferBytes: Buffer.byteLength(buf, "utf8"),
+          isSplitPane: false,
+          rootTabId: sessionId,
+          snapshotAt: now,
+          shellExited: false,
+          exitCode: null,
+        };
+        hydrated.push({ metadata: meta, buffer: buf });
+        indexAfterEviction[sessionId] = meta;
+      }
     }
 
     // Step 4 — Orphan cleanup. Any buffer file not referenced by the surviving

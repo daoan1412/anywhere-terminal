@@ -37,6 +37,8 @@ function createMockHandlers(): MessageHandlers {
     onGitStatusChanged: vi.fn(),
     onFsChangesInvalidated: vi.fn(),
     onFsRehydrate: vi.fn(),
+    onSetPanelId: vi.fn(),
+    onRestoreFromSnapshot: vi.fn(),
   };
 }
 
@@ -106,7 +108,7 @@ describe("createMessageRouter", () => {
 
     dispatch({
       type: "init",
-      tabs: [{ id: "t1", name: "Terminal 1", customName: null, isActive: true }],
+      tabs: [{ id: "t1", name: "Terminal 1", customName: null, isActive: true, isSplitPane: false }],
       config: { fontSize: 14, cursorBlink: true, scrollback: 10000, fontFamily: "" },
       rootGeneration: 0,
       workspaceRoot: null,

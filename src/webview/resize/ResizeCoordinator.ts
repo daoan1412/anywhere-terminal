@@ -48,7 +48,14 @@ const RESIZE_DEBOUNCE_MS = 100;
 export class ResizeCoordinator {
   private pendingResize = false;
   private fitTimeout: number | undefined;
-  private splitFitTimeout: number | undefined;
+  /**
+   * Per-tab debounce timers — earlier rounds used a single shared slot, which
+   * meant a back-to-back loop of `debouncedFitAllLeaves(tabA)` then
+   * `debouncedFitAllLeaves(tabB)` cancelled tabA's timer. After cross-restart
+   * with multiple split roots, every root except the last stayed visually
+   * blank (0×0 canvas). Per-tab slots fix this. See round-1 W5.
+   */
+  private splitFitTimeouts: Map<string, number> = new Map();
   private observer: ResizeObserver | undefined;
 
   private readonly fitTerminal: (instance: FittableInstance) => void;
@@ -100,11 +107,16 @@ export class ResizeCoordinator {
   }
 
   /**
-   * Debounced fit for all leaf terminals in a tab.
+   * Debounced fit for all leaf terminals in a tab. Multiple concurrent calls
+   * for DIFFERENT tabs each get their own debounce slot — see round-1 W5.
    */
   debouncedFitAllLeaves(tabId: string): void {
-    clearTimeout(this.splitFitTimeout);
-    this.splitFitTimeout = window.setTimeout(() => {
+    const existing = this.splitFitTimeouts.get(tabId);
+    if (existing !== undefined) {
+      clearTimeout(existing);
+    }
+    const handle = window.setTimeout(() => {
+      this.splitFitTimeouts.delete(tabId);
       const { tabLayouts, terminals } = this.getState();
       const layout = tabLayouts.get(tabId);
       if (!layout) {
@@ -118,6 +130,7 @@ export class ResizeCoordinator {
         }
       }
     }, RESIZE_DEBOUNCE_MS);
+    this.splitFitTimeouts.set(tabId, handle);
   }
 
   /**
@@ -158,7 +171,10 @@ export class ResizeCoordinator {
       this.observer = undefined;
     }
     clearTimeout(this.fitTimeout);
-    clearTimeout(this.splitFitTimeout);
+    for (const handle of this.splitFitTimeouts.values()) {
+      clearTimeout(handle);
+    }
+    this.splitFitTimeouts.clear();
   }
 
   /**

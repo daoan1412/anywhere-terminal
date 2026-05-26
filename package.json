@@ -45,7 +45,8 @@
     "onCommand:anywhereTerminal.moveToSecondary",
     "onCommand:anywhereTerminal.splitHorizontal",
     "onCommand:anywhereTerminal.splitVertical",
-    "onCommand:anywhereTerminal.closeSplitPane"
+    "onCommand:anywhereTerminal.closeSplitPane",
+    "onWebviewPanel:anywhereTerminal.editor"
   ],
   "main": "./dist/extension.js",
   "contributes": {
@@ -71,6 +72,11 @@
           "type": "number",
           "default": 10000,
           "description": "Maximum number of lines in the scrollback buffer."
+        },
+        "anywhereTerminal.sessionRestore.enabled": {
+          "type": "boolean",
+          "default": true,
+          "description": "Restore terminal scrollback and metadata across VS Code restarts. NOTE: the persisted scrollback is plaintext on disk — anything echoed in the terminal (passwords typed at prompts, .env file contents, API tokens, kubeconfigs) lands in <storageUri>/snapshots until the per-snapshot caps evict it. Use Cmd+K (clear) before sensitive output, or set this to false to opt out entirely."
         },
         "anywhereTerminal.fileSearch.maxResults": {
           "type": "number",
@@ -539,8 +545,10 @@
     "@vscode/test-cli": "^0.0.12",
     "@vscode/test-electron": "^2.5.2",
     "@xterm/addon-fit": "^0.11.0",
+    "@xterm/addon-serialize": "^0.14.0",
     "@xterm/addon-web-links": "^0.12.0",
     "@xterm/addon-webgl": "^0.19.0",
+    "@xterm/headless": "^6.0.0",
     "@xterm/xterm": "^6.0.0",
     "esbuild": "^0.27.3",
     "jsdom": "^28.1.0",

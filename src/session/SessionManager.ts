@@ -142,6 +142,9 @@ export class SessionManager {
       headlessFactory: options.headlessFactory ?? defaultHeadlessFactory,
       serializeAddonFactory: options.serializeAddonFactory ?? defaultSerializeAddonFactory,
       getSession: (id) => this.sessions.get(id),
+      // Pass live-panels lookup so hydrate orphan fallback maps editor
+      // session ids back to their owning panel (round-1 W2).
+      editorPanels: this.editorPanels,
     });
     // Default exit-hook → immediate persist (bypass debounce) so the exit state
     // lands on disk even if the user closes the window right after. Tests
@@ -465,17 +468,29 @@ export class SessionManager {
     }
   }
 
-  /** Get tab info for a view (for init/restore messages). Returns empty array for unknown viewIds. */
-  getTabsForView(viewId: string): Array<{ id: string; name: string; customName: string | null; isActive: boolean }> {
+  /**
+   * Get tab info for a view (root tabs only — split panes are filtered).
+   * Returns empty array for unknown viewIds. Emits `isSplitPane: false`
+   * explicitly to match the InitMessage wire contract (see W10).
+   */
+  getTabsForView(
+    viewId: string,
+  ): Array<{ id: string; name: string; customName: string | null; isActive: boolean; isSplitPane: false }> {
     const viewSessionIds = this.viewSessions.get(viewId);
     if (!viewSessionIds) return [];
 
-    type TabInfo = { id: string; name: string; customName: string | null; isActive: boolean };
+    type TabInfo = {
+      id: string;
+      name: string;
+      customName: string | null;
+      isActive: boolean;
+      isSplitPane: false;
+    };
     return viewSessionIds
       .map((sid): TabInfo | undefined => {
         const s = this.sessions.get(sid);
         if (!s || s.isSplitPane) return undefined;
-        return { id: s.id, name: s.name, customName: s.customName, isActive: s.isActive };
+        return { id: s.id, name: s.name, customName: s.customName, isActive: s.isActive, isSplitPane: false };
       })
       .filter((tab): tab is TabInfo => tab !== undefined);
   }
@@ -749,40 +764,42 @@ export class SessionManager {
   }
 
   /**
-   * Dispose the SessionManager. Kills all PTY processes and clears all state.
-   * Called explicitly from `extension.deactivate` (NOT registered in
+   * Dispose the SessionManager. Kills every PTY synchronously and clears all
+   * state. Called explicitly from `extension.deactivate` (NOT registered in
    * context.subscriptions — ordering matters; see design.md D6).
+   *
+   * Spec: "Synchronous cleanup of pending destroys — SessionManager.dispose()
+   * SHALL synchronously iterate pendingDestroys, clear each timer, and invoke
+   * destroyAllForView(viewId) for every queued view ID before resolving."
+   * Implementation: we don't queue via `operationQueue` here (that's async); we
+   * walk every session inline and dispose its resources directly. PendingDestroy
+   * timers are cleared up front. See round-1 W3.
    */
   dispose(): void {
     if (this._disposed) return;
     this._disposed = true;
 
     // Tear down the snapshot debounce/timer; per-session mirror disposal
-    // happens below in the session iteration via detachSession.
+    // happens below in the session iteration via snapshots.detachSession.
     this.snapshots.dispose();
 
-    // Fire every pending grace-period destroy synchronously so no PTY leaks
-    // past extension shutdown. Clear the timer first to suppress its async
-    // callback. See design.md D3 + spec "Synchronous cleanup of pending destroys".
-    for (const [viewId, timer] of this.pendingDestroys) {
+    // Clear every pending grace-period timer up front so its async callback
+    // doesn't race with our synchronous cleanup below.
+    for (const [, timer] of this.pendingDestroys) {
       try {
         clearTimeout(timer);
       } catch {
         /* best-effort */
       }
-      try {
-        this.destroyAllForView(viewId);
-      } catch (err) {
-        console.error("[AnyWhere Terminal] destroyAllForView during dispose failed:", err);
-      }
     }
     this.pendingDestroys.clear();
 
-    // Kill all PTY processes immediately (no queue — we're shutting down).
-    // Reproduces the legacy bypass-cleanupSession path BUT explicitly disposes
-    // the headless mirror + SerializeAddon via detachSession so the snapshot
-    // pipeline doesn't leak addons across reloads.
-    for (const session of this.sessions.values()) {
+    // Synchronously dispose every session — bypasses the async operation queue
+    // entirely so no PTY leaks past extension shutdown.
+    const allIds = [...this.sessions.keys()];
+    for (const id of allIds) {
+      const session = this.sessions.get(id);
+      if (!session) continue;
       try {
         session.outputBuffer.dispose();
       } catch {
@@ -800,8 +817,8 @@ export class SessionManager {
           /* best-effort */
         }
       }
-      // Drops the snapshot index entry + unlinks the file + disposes mirror.
-      this.snapshots.detachSession(session.id);
+      // Drops snapshot index entry + unlinks file + disposes headless + addon.
+      this.snapshots.detachSession(id);
     }
 
     this.sessions.clear();
