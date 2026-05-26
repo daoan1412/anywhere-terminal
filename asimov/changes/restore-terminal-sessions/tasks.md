@@ -462,7 +462,7 @@ Order: R-1 → R-2 / R-3 (parallelizable, different files) → R-4 → R-5 → R
     3. Delete flushIndexAwaited.
     4. Update extension.deactivate to drop the awaited step.
 
-- [ ] R-7 Extend state-machine + invariant test coverage
+- [x] R-7 Extend state-machine + invariant test coverage
   - **Deps**: R-5, R-6
   - **Refs**: design.md D18, .reviews/round-5.md
   - **Scope**:

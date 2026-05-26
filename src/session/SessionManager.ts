@@ -801,23 +801,24 @@ export class SessionManager {
 
   /** Destroy all sessions for a specific view (queued, serialized). */
   destroyAllForView(viewId: string): void {
-    // Record destructive intent SYNCHRONOUSLY for every session in the view
-    // BEFORE enqueueing — dispose() / cleanupSession() branch on session.state
-    // to distinguish user-destroy intent from natural exits during shutdown.
-    // See design.md D14.
+    // Capture the doomed session ids + record destructive intent SYNC.
+    // Re-reading viewSessions inside the queued drain would sweep up
+    // sessions created between sync-enqueue and async-execute — see
+    // .reviews/round-5.md [W3]. The state transition gates against
+    // sweeping a session a NEW destroyAllForView already moved into
+    // "destroying" too.
     const viewSessionIds = this.viewSessions.get(viewId);
+    const doomedIds: string[] = [];
     if (viewSessionIds) {
       for (const sid of viewSessionIds) {
         this.transitionState(sid, ["live", "exited-preserved"], "destroying");
+        doomedIds.push(sid);
       }
     }
     this.operationQueue = this.operationQueue
       .then(async () => {
-        const liveSessionIds = this.viewSessions.get(viewId);
-        if (!liveSessionIds) return;
-        // Copy the array since performDestroy modifies viewSessions
-        const ids = [...liveSessionIds];
-        for (const sid of ids) {
+        // Iterate the captured list, NOT the live viewSessions map.
+        for (const sid of doomedIds) {
           await this.performDestroy(sid);
         }
       })
