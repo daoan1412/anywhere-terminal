@@ -463,6 +463,53 @@ describe("SessionStorage", () => {
       expect(allFiles.filter((k) => k.includes(".tmp."))).toEqual([]);
     });
 
+    it("post-rename TOCTOU: stale async rename that lost the race against a sync writer unlinks canonical (R6.W1)", async () => {
+      const mem = makeFakeMemento();
+      const { fs, files } = makeFakeFs();
+      const s = new SessionStorage(mem as unknown as vscode.Memento, STORAGE_URI, fs);
+
+      // Simulate the libuv race: rename runs LATE — after the post-write
+      // gen check passes, a sync commitBufferSync runs THEN the async
+      // rename finally executes. The post-rename gen recheck must catch
+      // this and unlink canonical.
+      const realRename = fs.promises.rename;
+      let asyncRenameStarted = false;
+      let releaseAsyncRename: () => void = () => {};
+      fs.promises.rename = vi.fn(async (from: string, to: string) => {
+        if (!asyncRenameStarted) {
+          asyncRenameStarted = true;
+          await new Promise<void>((resolve) => {
+            releaseAsyncRename = resolve;
+          });
+        }
+        return realRename(from, to);
+      });
+
+      const capturedGen = s.currentBufferGen("alpha");
+      const asyncCommit = s.commitBufferAsync("alpha", "ASYNC_STALE", capturedGen);
+
+      // Let the async writer pass its pre-write + post-write gen checks
+      // and reach the rename await (held).
+      await Promise.resolve();
+      await Promise.resolve();
+      await Promise.resolve();
+
+      // Sync writer fires DURING the held async rename — bumps gen, writes
+      // its own data via temp+renameSync.
+      s.commitBufferSync("alpha", "SYNC_FRESH");
+      expect(files.get(bufferFile("alpha"))).toBe("SYNC_FRESH");
+
+      // Release the async rename. It overwrites canonical with stale data,
+      // then the post-rename gen check detects the race + unlinks canonical.
+      releaseAsyncRename();
+      const outcome = await asyncCommit;
+      expect(outcome).toBe("stale-post-rename");
+
+      // Canonical is gone (unlinked by the recovery path). Privacy
+      // boundary intact: stale data does NOT persist.
+      expect(files.get(bufferFile("alpha"))).toBeUndefined();
+    });
+
     it("cleanupOrphanTemps removes leftover *.tmp.* files from a prior crashed write", () => {
       const mem = makeFakeMemento();
       const { fs, files } = makeFakeFs();

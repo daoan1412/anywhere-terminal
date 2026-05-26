@@ -481,7 +481,7 @@ Order: R-1 → R-2 / R-3 (parallelizable, different files) → R-4 → R-5 → R
     1. Per invariant: write a focused test that would FAIL without the redesign + passes with it.
     2. Run full suite after each.
 
-- [ ] R-8 Verify gate + round 6 review
+- [x] R-8 Verify gate + round 6 review
   - **Deps**: R-7
   - **Refs**: .reviews/round-5.md, design.md D18
   - **Scope**: (verification only, no production files)

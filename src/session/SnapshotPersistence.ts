@@ -243,7 +243,7 @@ export class SnapshotPersistence {
     const result = this.generateSnapshotMetadata(id);
     if (!result) return;
     const capturedGen = storage.currentBufferGen(id);
-    let outcome: "renamed" | "stale-skipped" | "stale-post-write";
+    let outcome: "renamed" | "stale-skipped" | "stale-post-write" | "stale-post-rename";
     try {
       outcome = await storage.commitBufferAsync(id, result.buffer, capturedGen);
     } catch (err) {
@@ -312,14 +312,24 @@ export class SnapshotPersistence {
       }
       return;
     }
-    // RIS the mirror (fire-and-forget — xterm.js write is async). Subsequent
-    // commitLiveSnapshot serializes will reflect the empty state once the
-    // write callback parses.
-    try {
-      session.headless.write("\x1bc", () => {});
-    } catch (err) {
-      console.error("[AnyWhere Terminal] commitClearSnapshot RIS failed:", err);
-    }
+    // RIS the mirror. Chain into writeBarriers so the next commitLiveSnapshot
+    // awaits the RIS parse before serialize — otherwise a debounced flush
+    // arriving between the bumped buffer gen and the new pty.onData could
+    // capture pre-RIS state. Subsequent serialize reflects the cleared
+    // buffer. See round-6 R6.S1.
+    const prior = this.writeBarriers.get(id) ?? Promise.resolve();
+    const risPromise = new Promise<void>((resolve) => {
+      try {
+        session.headless?.write("\x1bc", () => resolve());
+      } catch (err) {
+        console.error("[AnyWhere Terminal] commitClearSnapshot RIS failed:", err);
+        resolve();
+      }
+    });
+    this.writeBarriers.set(
+      id,
+      prior.then(() => risPromise),
+    );
     // Sync-commit an empty canonical so a window close immediately after Cmd+K
     // doesn't preserve the pre-clear content. We can't await the RIS parse
     // sync; overwrite with literal empty bytes.
@@ -355,7 +365,14 @@ export class SnapshotPersistence {
     delete this._snapshotIndex[id];
     if (!this.storage) return;
     this.storage.dropBuffer(id);
-    if (!hadEntry && this._disposed) return;
+    if (!hadEntry) return;
+    // Skip the per-session sidecar commit when dispose() is iterating N
+    // destroying sessions — flushSnapshotsSync/flushIndexAwaited writes the
+    // final sidecar ONCE at the end of the dispose path, batching all the
+    // deletions. Avoids quadratic shutdown cost (R6.W2). Outside dispose
+    // (normal user destroy), commit the sidecar immediately so the next
+    // restart doesn't resurrect a snapshot the user just deleted.
+    if (this._disposed) return;
     try {
       this.storage.commitIndexSync({ version: 1, entries: { ...this._snapshotIndex } });
     } catch (err) {
@@ -605,6 +622,13 @@ export class SnapshotPersistence {
     }
     this._pendingSessions.clear();
     for (const id of liveSessionIds) {
+      const session = this.getSession(id);
+      // Skip sessions the user has marked for destruction — their snapshot
+      // MUST NOT be persisted to the sidecar (would resurrect on next
+      // activate). The subsequent dispose() walk fires dropSession for
+      // these. State machine guarantees this is the only safe filter
+      // (design.md D14+D15).
+      if (session && session.state === "destroying") continue;
       const result = this.generateSnapshotMetadata(id);
       if (!result) continue;
       try {

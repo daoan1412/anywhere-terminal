@@ -277,7 +277,7 @@ export class SessionStorage {
     sessionId: string,
     data: string,
     capturedGen: number,
-  ): Promise<"renamed" | "stale-skipped" | "stale-post-write"> {
+  ): Promise<"renamed" | "stale-skipped" | "stale-post-write" | "stale-post-rename"> {
     // Pre-write check: if the gen already advanced past `capturedGen`,
     // someone else's sync write / drop won the race before we even mkdir'd.
     if ((this.bufferGens.get(sessionId) ?? 0) !== capturedGen) return "stale-skipped";
@@ -297,6 +297,21 @@ export class SessionStorage {
       return "stale-post-write";
     }
     await this.fs.promises.rename(temp, canonical);
+    // Post-rename TOCTOU recheck (round-6 R6.W1): a sync writer (e.g.
+    // commitBufferSync / dropBuffer) may have raced our libuv-pool rename
+    // and completed BEFORE the async rename landed — meaning canonical now
+    // holds our stale async data on top of the sync writer's intended
+    // state. Detect the race; unlink canonical to surface the lost write
+    // (orphan recovery will see a missing buffer instead of a stale one).
+    // Privacy boundary takes priority over data preservation.
+    if ((this.bufferGens.get(sessionId) ?? 0) !== capturedGen) {
+      try {
+        await this.fs.promises.unlink(canonical);
+      } catch {
+        /* best-effort */
+      }
+      return "stale-post-rename";
+    }
     return "renamed";
   }
 
@@ -337,7 +352,7 @@ export class SessionStorage {
   async commitIndexAsync(
     index: SessionSnapshotsIndex,
     capturedGen: number,
-  ): Promise<"renamed" | "stale-skipped" | "stale-post-write"> {
+  ): Promise<"renamed" | "stale-skipped" | "stale-post-write" | "stale-post-rename"> {
     if (this.sidecarGen !== capturedGen) return "stale-skipped";
     await this.fs.promises.mkdir(this.snapshotsDir, { recursive: true });
     const canonical = this.indexSidecarPath();
@@ -352,6 +367,17 @@ export class SessionStorage {
       return "stale-post-write";
     }
     await this.fs.promises.rename(temp, canonical);
+    // Post-rename TOCTOU recheck (R6.W1): same race as commitBufferAsync —
+    // sync sidecar writer may have completed during our libuv-pool rename.
+    // Detect + unlink to surface as "missing sidecar" rather than stale.
+    if (this.sidecarGen !== capturedGen) {
+      try {
+        await this.fs.promises.unlink(canonical);
+      } catch {
+        /* best-effort */
+      }
+      return "stale-post-rename";
+    }
     return "renamed";
   }
 
