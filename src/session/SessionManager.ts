@@ -34,7 +34,7 @@ import type { ShellIntegrationEvent } from "../pty/ShellIntegrationEvents";
 import {
   appendToCommandOutput,
   closeCommand,
-  createCommandTrackingRuntime,
+  hydrateCommandTrackingRuntime,
   lastCompleted,
   openCommand,
   setInFlightCommandLine,
@@ -472,7 +472,11 @@ export class SessionManager {
       panelId: viewId.startsWith("editor-") ? viewId.slice("editor-".length) : undefined,
       shellExited: restoringExited || undefined,
       exitCode: restoringExited ? (restoreFrom?.metadata.exitCode ?? null) : undefined,
-      commandTracking: createCommandTrackingRuntime(),
+      // Hydrate from snapshot when restoring so "Export Last Command…" /
+      // "Export Command…" survive window reload + IDE restart. Fresh
+      // sessions and back-compat snapshots (no `trackedCommands` field)
+      // get a clean runtime.
+      commandTracking: hydrateCommandTrackingRuntime(restoreFrom?.metadata.trackedCommands),
     };
 
     // Deactivate other sessions in the same view (only for root tab sessions)

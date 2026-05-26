@@ -259,6 +259,114 @@ describe("SessionManager.generateSnapshotMetadata", () => {
     sm.dispose();
   });
 
+  it("attaches trackedCommands to metadata when commandTracking has entries", () => {
+    const fx = makeFactories();
+    const sm = new SessionManager(undefined, {
+      restoreEnabled: true,
+      headlessFactory: fx.headless,
+      serializeAddonFactory: fx.serializeAddon,
+    });
+    const id = sm.createSession("anywhereTerminal.sidebar", mockWebview());
+    mockPtySessions[0].onData?.("x");
+    const session = sm.getSession(id);
+    expect(session).toBeDefined();
+    session?.commandTracking.commands.push({
+      id: "cmd-1",
+      commandLine: "echo hello",
+      output: "hello",
+      exitCode: 0,
+      cwd: "/tmp",
+      startedAt: 100,
+      endedAt: 200,
+      outputBytes: 5,
+      outputTruncated: false,
+    });
+    const m = sm.generateSnapshotMetadata(id)!.metadata;
+    expect(m.trackedCommands).toHaveLength(1);
+    expect(m.trackedCommands?.[0].commandLine).toBe("echo hello");
+    // Defensive copy: mutating the metadata array must not affect the runtime.
+    m.trackedCommands?.pop();
+    expect(session?.commandTracking.commands).toHaveLength(1);
+    sm.dispose();
+  });
+
+  it("round-trips trackedCommands: restoreFrom seeds commandTracking; in-flight dropped", () => {
+    const fx = makeFactories();
+    const sm = new SessionManager(undefined, {
+      restoreEnabled: true,
+      headlessFactory: fx.headless,
+      serializeAddonFactory: fx.serializeAddon,
+    });
+    const sessionId = "restored-session";
+    const completed = {
+      id: "cmd-A",
+      commandLine: "ls -la",
+      output: "total 8",
+      exitCode: 0,
+      cwd: "/tmp",
+      startedAt: 100,
+      endedAt: 200,
+      outputBytes: 7,
+      outputTruncated: false,
+    };
+    const inFlight = {
+      id: "cmd-B",
+      commandLine: "tail -f /var/log/syslog",
+      output: "...",
+      exitCode: null,
+      cwd: "/tmp",
+      startedAt: 300,
+      endedAt: null,
+      outputBytes: 3,
+      outputTruncated: false,
+    };
+    const id = sm.createSession("anywhereTerminal.sidebar", mockWebview(), {
+      restoreFrom: {
+        metadata: {
+          sessionId,
+          viewLocation: "sidebar",
+          terminalNumber: 1,
+          customName: null,
+          shell: "/bin/zsh",
+          shellArgs: [],
+          cwd: "/tmp",
+          currentCwd: null,
+          cols: 80,
+          rows: 24,
+          bufferFile: `snapshots/${sessionId}.snapshot.ans`,
+          bufferBytes: 100,
+          isSplitPane: false,
+          rootTabId: sessionId,
+          snapshotAt: Date.now() - 1000,
+          shellExited: false,
+          exitCode: null,
+          trackedCommands: [completed, inFlight],
+        },
+        buffer: "stale content",
+      },
+    });
+    const session = sm.getSession(id);
+    expect(session?.commandTracking.commands).toHaveLength(1);
+    expect(session?.commandTracking.commands[0].id).toBe("cmd-A");
+    // In-flight at persist time MUST NOT be resurrected (no D marker → invariant).
+    expect(session?.commandTracking.inFlight).toBeNull();
+    sm.dispose();
+  });
+
+  it("omits trackedCommands from metadata when commandTracking is empty", () => {
+    const fx = makeFactories();
+    const sm = new SessionManager(undefined, {
+      restoreEnabled: true,
+      headlessFactory: fx.headless,
+      serializeAddonFactory: fx.serializeAddon,
+    });
+    const id = sm.createSession("anywhereTerminal.sidebar", mockWebview());
+    mockPtySessions[0].onData?.("x");
+    const m = sm.generateSnapshotMetadata(id)!.metadata;
+    expect(m.trackedCommands).toBeUndefined();
+    sm.dispose();
+  });
+
   it("uses sidebar viewLocation by default and panel viewLocation for the panel container", () => {
     const fx = makeFactories();
     const sm = new SessionManager(undefined, {

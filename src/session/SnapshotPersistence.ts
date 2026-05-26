@@ -55,7 +55,9 @@ export const defaultSerializeAddonFactory: SerializeAddonFactory = () => {
  */
 export function truncateSnapshotBuffer(buffer: string, maxBytes: number = SNAPSHOT_BUFFER_MAX_BYTES): string {
   const totalBytes = Buffer.byteLength(buffer, "utf8");
-  if (totalBytes <= maxBytes) return buffer;
+  if (totalBytes <= maxBytes) {
+    return buffer;
+  }
   const buf = Buffer.from(buffer, "utf8");
   const tail = buf.subarray(buf.length - maxBytes);
   const lf = tail.indexOf(0x0a);
@@ -65,8 +67,12 @@ export function truncateSnapshotBuffer(buffer: string, maxBytes: number = SNAPSH
 
 /** Map a viewId back to the `viewLocation` kept in the persisted index. */
 export function viewLocationOf(viewId: string): ViewLocation {
-  if (viewId.startsWith("editor-")) return "editor";
-  if (viewId === "anywhereTerminal.panel") return "panel";
+  if (viewId.startsWith("editor-")) {
+    return "editor";
+  }
+  if (viewId === "anywhereTerminal.panel") {
+    return "panel";
+  }
   return "sidebar";
 }
 
@@ -149,7 +155,9 @@ export class SnapshotPersistence {
    * See design.md D11.
    */
   setRestoreEnabled(enabled: boolean, liveSessionIds: Iterable<string>): void {
-    if (this.restoreEnabled === enabled) return;
+    if (this.restoreEnabled === enabled) {
+      return;
+    }
     this.restoreEnabled = enabled;
     // Invalidate any in-flight async flush so it can't resurrect snapshots
     // after this teardown completes.
@@ -165,10 +173,14 @@ export class SnapshotPersistence {
       // only the restore pipeline is torn down.
       for (const id of liveSessionIds) {
         const session = this.getSession(id);
-        if (session) this.disposeMirrorFor(session);
+        if (session) {
+          this.disposeMirrorFor(session);
+        }
       }
       this._snapshotIndex = {};
-      if (this.storage) void this.storage.purge();
+      if (this.storage) {
+        void this.storage.purge();
+      }
     }
   }
 
@@ -185,9 +197,15 @@ export class SnapshotPersistence {
    * on disk already captures everything.
    */
   attachSession(session: TerminalSession, restoreFrom?: PendingSnapshot): void {
-    if (!this.restoreEnabled) return;
-    if (!restoreFrom?.buffer) return;
-    if (restoreFrom.metadata.shellExited === true) return;
+    if (!this.restoreEnabled) {
+      return;
+    }
+    if (!restoreFrom?.buffer) {
+      return;
+    }
+    if (restoreFrom.metadata.shellExited === true) {
+      return;
+    }
     try {
       const seeded = this.headlessFactory(session.cols, session.rows);
       session.headless = seeded;
@@ -227,7 +245,9 @@ export class SnapshotPersistence {
    * on-disk canonical file.
    */
   async commitLiveSnapshot(id: string): Promise<void> {
-    if (this._disposed || !this.restoreEnabled || !this.storage) return;
+    if (this._disposed || !this.restoreEnabled || !this.storage) {
+      return;
+    }
     const storage = this.storage;
     const generation = this._persistGeneration;
     const session = this.getSession(id);
@@ -239,9 +259,13 @@ export class SnapshotPersistence {
       return;
     }
     await this.awaitWriteBarrier(id);
-    if (!this.isStillCurrent(storage, generation)) return;
+    if (!this.isStillCurrent(storage, generation)) {
+      return;
+    }
     const result = this.generateSnapshotMetadata(id);
-    if (!result) return;
+    if (!result) {
+      return;
+    }
     const capturedGen = storage.currentBufferGen(id);
     let outcome: "renamed" | "stale-skipped" | "stale-post-write" | "stale-post-rename";
     try {
@@ -250,11 +274,17 @@ export class SnapshotPersistence {
       console.error("[AnyWhere Terminal] commitLiveSnapshot commitBufferAsync failed:", err);
       return;
     }
-    if (!this.isStillCurrent(storage, generation)) return;
-    if (outcome !== "renamed") return;
+    if (!this.isStillCurrent(storage, generation)) {
+      return;
+    }
+    if (outcome !== "renamed") {
+      return;
+    }
     // Liveness re-check: a destroy may have run during our await. Don't
     // re-insert metadata for a session the user already killed.
-    if (!this.getSession(id)) return;
+    if (!this.getSession(id)) {
+      return;
+    }
     this._snapshotIndex[id] = result.metadata;
   }
 
@@ -265,14 +295,20 @@ export class SnapshotPersistence {
    * + sidecar via the transactional storage API.
    */
   commitExitSnapshot(id: string, exitCode: number | null): void {
-    if (this._disposed || !this.restoreEnabled || !this.storage) return;
+    if (this._disposed || !this.restoreEnabled || !this.storage) {
+      return;
+    }
     const session = this.getSession(id);
-    if (!session) return;
+    if (!session) {
+      return;
+    }
     session.shellExited = true;
     session.exitCode = exitCode;
     this._pendingSessions.delete(id);
     const result = this.generateSnapshotMetadata(id);
-    if (!result) return;
+    if (!result) {
+      return;
+    }
     try {
       this.storage.commitBufferSync(id, result.buffer);
     } catch (err) {
@@ -296,9 +332,13 @@ export class SnapshotPersistence {
    * Replaces the round-4 `resetMirror` + `purgePersistedSnapshot` unification.
    */
   commitClearSnapshot(id: string): void {
-    if (this._disposed || !this.restoreEnabled || !this.storage) return;
+    if (this._disposed || !this.restoreEnabled || !this.storage) {
+      return;
+    }
     const session = this.getSession(id);
-    if (!session) return;
+    if (!session) {
+      return;
+    }
     this._pendingSessions.delete(id);
     if (!session.headless) {
       // No mirror to RIS — drop entirely (privacy boundary for restored
@@ -358,21 +398,29 @@ export class SnapshotPersistence {
    */
   dropSession(id: string): void {
     const session = this.getSession(id);
-    if (session) this.disposeMirrorFor(session);
+    if (session) {
+      this.disposeMirrorFor(session);
+    }
     this._pendingSessions.delete(id);
     this.writeBarriers.delete(id);
     const hadEntry = this._snapshotIndex[id] !== undefined;
     delete this._snapshotIndex[id];
-    if (!this.storage) return;
+    if (!this.storage) {
+      return;
+    }
     this.storage.dropBuffer(id);
-    if (!hadEntry) return;
+    if (!hadEntry) {
+      return;
+    }
     // Skip the per-session sidecar commit when dispose() is iterating N
     // destroying sessions — flushSnapshotsSync/flushIndexAwaited writes the
     // final sidecar ONCE at the end of the dispose path, batching all the
     // deletions. Avoids quadratic shutdown cost (R6.W2). Outside dispose
     // (normal user destroy), commit the sidecar immediately so the next
     // restart doesn't resurrect a snapshot the user just deleted.
-    if (this._disposed) return;
+    if (this._disposed) {
+      return;
+    }
     try {
       this.storage.commitIndexSync({ version: 1, entries: { ...this._snapshotIndex } });
     } catch (err) {
@@ -394,7 +442,9 @@ export class SnapshotPersistence {
    */
   releaseRuntimeOnly(id: string): void {
     const session = this.getSession(id);
-    if (session) this.disposeMirrorFor(session);
+    if (session) {
+      this.disposeMirrorFor(session);
+    }
     this._pendingSessions.delete(id);
     this.writeBarriers.delete(id);
     // Intentionally NOT touching _snapshotIndex or storage — the on-disk
@@ -416,10 +466,14 @@ export class SnapshotPersistence {
    * cache already fired before this is called. See design.md D1.
    */
   recordData(session: TerminalSession, data: string): void {
-    if (!this.restoreEnabled) return;
+    if (!this.restoreEnabled) {
+      return;
+    }
     // Once the shell has exited, freeze the mirror so post-exit noise doesn't
     // overwrite the captured state. See D13.
-    if (session.shellExited) return;
+    if (session.shellExited) {
+      return;
+    }
     if (!session.headless) {
       try {
         session.headless = this.headlessFactory(session.cols, session.rows);
@@ -452,7 +506,9 @@ export class SnapshotPersistence {
 
   /** Mirror a PTY resize. Best-effort — never break the user-facing resize on a mirror failure. */
   recordResize(session: TerminalSession, cols: number, rows: number): void {
-    if (!session.headless) return;
+    if (!session.headless) {
+      return;
+    }
     try {
       session.headless.resize(cols, rows);
     } catch {
@@ -483,7 +539,9 @@ export class SnapshotPersistence {
    */
   generateSnapshotMetadata(sessionId: string): { metadata: SessionSnapshotMetadata; buffer: string } | null {
     const session = this.getSession(sessionId);
-    if (!session || !session.headless) return null;
+    if (!session || !session.headless) {
+      return null;
+    }
 
     if (!session.serializeAddon) {
       try {
@@ -528,6 +586,12 @@ export class SnapshotPersistence {
       snapshotAt: Date.now(),
       shellExited: session.shellExited ?? false,
       exitCode: session.exitCode ?? null,
+      // Snapshot a shallow copy so concurrent appendToCommandOutput /
+      // closeCommand calls during JSON.stringify can't mutate what we hand
+      // off to the storage layer. The TrackedCommand objects themselves
+      // are pure data (no methods), so shallow clone is sufficient.
+      trackedCommands:
+        session.commandTracking.commands.length > 0 ? [...session.commandTracking.commands] : undefined,
     };
     return { metadata, buffer };
   }
@@ -540,9 +604,13 @@ export class SnapshotPersistence {
    * SessionStorage is configured. See design.md D6.
    */
   schedulePersist(sessionId: string): void {
-    if (!this.restoreEnabled || !this.storage) return;
+    if (!this.restoreEnabled || !this.storage) {
+      return;
+    }
     this._pendingSessions.add(sessionId);
-    if (this._persistTimer) return;
+    if (this._persistTimer) {
+      return;
+    }
     this._persistTimer = setTimeout(() => {
       this._persistTimer = null;
       void this.flushPending();
@@ -555,7 +623,9 @@ export class SnapshotPersistence {
    * the window in the next moment.
    */
   async flushSessionImmediate(sessionId: string): Promise<void> {
-    if (!this.restoreEnabled || !this.storage) return;
+    if (!this.restoreEnabled || !this.storage) {
+      return;
+    }
     this._pendingSessions.add(sessionId);
     if (this._persistTimer) {
       clearTimeout(this._persistTimer);
@@ -571,7 +641,9 @@ export class SnapshotPersistence {
    * session epoch token needed. See design.md D15+D16.
    */
   private async flushPending(): Promise<void> {
-    if (this._disposed || !this.storage || !this.restoreEnabled) return;
+    if (this._disposed || !this.storage || !this.restoreEnabled) {
+      return;
+    }
     const storage = this.storage;
     const generation = this._persistGeneration;
     const ids = Array.from(this._pendingSessions);
@@ -580,7 +652,9 @@ export class SnapshotPersistence {
     // commitLiveSnapshot internally re-checks isStillCurrent post-await so
     // invalidation mid-flight is safe even without the per-iteration guard.
     await Promise.all(ids.map((id) => this.commitLiveSnapshot(id)));
-    if (!this.isStillCurrent(storage, generation)) return;
+    if (!this.isStillCurrent(storage, generation)) {
+      return;
+    }
     // Apply eviction before persisting the index.
     const merged: SessionSnapshotsIndex = { version: 1, entries: { ...this._snapshotIndex } };
     const { kept, dropped } = evictIndex(merged, Date.now());
@@ -615,7 +689,9 @@ export class SnapshotPersistence {
    * Caller passes the list of live session ids.
    */
   flushSnapshotsSync(liveSessionIds: Iterable<string>): void {
-    if (this._disposed || !this.restoreEnabled || !this.storage) return;
+    if (this._disposed || !this.restoreEnabled || !this.storage) {
+      return;
+    }
     if (this._persistTimer) {
       clearTimeout(this._persistTimer);
       this._persistTimer = null;
@@ -628,9 +704,13 @@ export class SnapshotPersistence {
       // activate). The subsequent dispose() walk fires dropSession for
       // these. State machine guarantees this is the only safe filter
       // (design.md D14+D15).
-      if (session && session.state === "destroying") continue;
+      if (session && session.state === "destroying") {
+        continue;
+      }
       const result = this.generateSnapshotMetadata(id);
-      if (!result) continue;
+      if (!result) {
+        continue;
+      }
       try {
         this.storage.commitBufferSync(id, result.buffer);
       } catch (err) {
@@ -664,7 +744,9 @@ export class SnapshotPersistence {
    * `storage.writeLivePanelsAwaited` directly via EditorPanelRegistry).
    */
   async flushIndexAwaited(): Promise<void> {
-    if (this._disposed || !this.restoreEnabled || !this.storage) return;
+    if (this._disposed || !this.restoreEnabled || !this.storage) {
+      return;
+    }
     const merged: SessionSnapshotsIndex = { version: 1, entries: { ...this._snapshotIndex } };
     const { kept, dropped } = evictIndex(merged, Date.now());
     this._snapshotIndex = { ...kept.entries };
@@ -701,7 +783,9 @@ export class SnapshotPersistence {
    * purging persisted state in that case — see D11).
    */
   hydrateFromSnapshots(index?: SessionSnapshotsIndex): void {
-    if (!this.restoreEnabled || !this.storage) return;
+    if (!this.restoreEnabled || !this.storage) {
+      return;
+    }
     const now = Date.now();
     // Prefer the typed loadIndexDetailed result over the passed-in legacy
     // arg — only the detailed loader can distinguish "missing" (orphan
@@ -770,7 +854,9 @@ export class SnapshotPersistence {
     // discarded, not recovered. See round-1 W1.
     if (!indexCorrupted) {
       for (const sessionId of this.storage.listBufferFiles()) {
-        if (indexAfterEviction[sessionId]) continue;
+        if (indexAfterEviction[sessionId]) {
+          continue;
+        }
         let buf: string | null;
         try {
           buf = this.storage.readBufferFile(sessionId);
@@ -778,7 +864,9 @@ export class SnapshotPersistence {
           // SessionStorage may reject unsafe sessionIds (W8 path-traversal guard).
           continue;
         }
-        if (buf === null) continue;
+        if (buf === null) {
+          continue;
+        }
         // Live-panels lookup: if this orphan was previously an editor session,
         // restore it AS an editor session under the same panel — otherwise it
         // defaults to a sidebar terminal. See round-1 W2.
@@ -837,7 +925,9 @@ export class SnapshotPersistence {
 
   hasSnapshotsForLocation(loc: "sidebar" | "panel"): boolean {
     for (const snap of this._pendingSnapshots.values()) {
-      if (snap.metadata.viewLocation === loc) return true;
+      if (snap.metadata.viewLocation === loc) {
+        return true;
+      }
     }
     return false;
   }
@@ -881,7 +971,9 @@ export class SnapshotPersistence {
   // ─── Shutdown ───────────────────────────────────────────────────
 
   dispose(): void {
-    if (this._disposed) return;
+    if (this._disposed) {
+      return;
+    }
     this._disposed = true;
     if (this._persistTimer) {
       clearTimeout(this._persistTimer);
@@ -898,7 +990,9 @@ export class SnapshotPersistence {
   /** Wait for the current write barrier to settle. Best-effort — never throws. */
   private async awaitWriteBarrier(sessionId: string): Promise<void> {
     const barrier = this.writeBarriers.get(sessionId);
-    if (!barrier) return;
+    if (!barrier) {
+      return;
+    }
     try {
       await barrier;
     } catch {

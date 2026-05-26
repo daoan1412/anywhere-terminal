@@ -11,12 +11,14 @@ import {
   appendToCommandOutput,
   closeCommand,
   createCommandTrackingRuntime,
+  hydrateCommandTrackingRuntime,
   lastCompleted,
   MAX_COMMANDS_PER_SESSION,
   MAX_OUTPUT_PER_COMMAND,
   MAX_TOTAL_OUTPUT_PER_SESSION,
   openCommand,
   setInFlightCommandLine,
+  type TrackedCommand,
 } from "./TrackedCommand";
 
 let idCounter = 0;
@@ -256,5 +258,74 @@ describe("TrackedCommand: spec scenarios", () => {
     const total = runtime.commands.reduce((acc, c) => acc + c.output.length, 0);
     expect(total).toBeLessThanOrEqual(MAX_TOTAL_OUTPUT_PER_SESSION);
     expect(total).toBe(200 * 5000);
+  });
+});
+
+describe("hydrateCommandTrackingRuntime", () => {
+  function completed(id: string, output = "ok"): TrackedCommand {
+    return {
+      id,
+      commandLine: `cmd ${id}`,
+      output,
+      exitCode: 0,
+      cwd: "/tmp",
+      startedAt: 100,
+      endedAt: 200,
+      outputBytes: output.length,
+      outputTruncated: false,
+    };
+  }
+
+  it("returns a fresh empty runtime for undefined input", () => {
+    const rt = hydrateCommandTrackingRuntime(undefined);
+    expect(rt.commands).toEqual([]);
+    expect(rt.inFlight).toBeNull();
+  });
+
+  it("returns a fresh empty runtime for empty array input", () => {
+    const rt = hydrateCommandTrackingRuntime([]);
+    expect(rt.commands).toEqual([]);
+    expect(rt.inFlight).toBeNull();
+  });
+
+  it("seeds completed commands and never resurrects inFlight", () => {
+    const inFlightAtPersistTime: TrackedCommand = { ...completed("c1"), endedAt: null };
+    const persisted = [completed("c0"), inFlightAtPersistTime, completed("c2")];
+    const rt = hydrateCommandTrackingRuntime(persisted);
+    expect(rt.commands.map((c) => c.id)).toEqual(["c0", "c2"]);
+    expect(rt.inFlight).toBeNull();
+  });
+
+  it("re-applies the MAX_COMMANDS_PER_SESSION cap (FIFO drop)", () => {
+    const persisted: TrackedCommand[] = [];
+    for (let i = 0; i < MAX_COMMANDS_PER_SESSION + 25; i++) {
+      persisted.push(completed(`c-${i}`));
+    }
+    const rt = hydrateCommandTrackingRuntime(persisted);
+    expect(rt.commands).toHaveLength(MAX_COMMANDS_PER_SESSION);
+    // Oldest dropped, newest kept.
+    expect(rt.commands[0].id).toBe(`c-${25}`);
+    expect(rt.commands.at(-1)?.id).toBe(`c-${MAX_COMMANDS_PER_SESSION + 25 - 1}`);
+  });
+
+  it("re-applies the MAX_TOTAL_OUTPUT_PER_SESSION cap (FIFO drop)", () => {
+    // 11 commands × 100 KB = 1.1 MB → exceeds 1 MB cap, oldest drops.
+    const big = "z".repeat(100_000);
+    const persisted: TrackedCommand[] = [];
+    for (let i = 0; i < 11; i++) {
+      persisted.push({ ...completed(`big-${i}`, big), outputBytes: big.length });
+    }
+    const rt = hydrateCommandTrackingRuntime(persisted);
+    const total = rt.commands.reduce((acc, c) => acc + c.output.length, 0);
+    expect(total).toBeLessThanOrEqual(MAX_TOTAL_OUTPUT_PER_SESSION);
+    expect(rt.commands).toHaveLength(10);
+    expect(rt.commands[0].id).toBe("big-1");
+  });
+
+  it("does not alias the persisted command objects (defensive copy)", () => {
+    const original = completed("c0", "before");
+    const rt = hydrateCommandTrackingRuntime([original]);
+    rt.commands[0].output = "after";
+    expect(original.output).toBe("before");
   });
 });

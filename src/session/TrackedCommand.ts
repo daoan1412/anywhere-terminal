@@ -61,6 +61,42 @@ export function createCommandTrackingRuntime(): CommandTrackingRuntime {
 }
 
 /**
+ * Build a runtime seeded from a persisted command list (snapshot restore).
+ * Drops anything still in-flight at persist time — the missing `D` marker
+ * means the command never completed and the runtime invariant
+ * `commands[i].endedAt !== null` would be violated. Also defensively
+ * re-applies the per-session caps in case the persisted list pre-dates a
+ * cap reduction. Returns a runtime with `inFlight: null` — restored
+ * sessions start a fresh capture cycle on the next OSC 633 marker.
+ *
+ * Pass `undefined` (no persisted field) to get the same runtime as
+ * `createCommandTrackingRuntime()`.
+ */
+export function hydrateCommandTrackingRuntime(persisted: readonly TrackedCommand[] | undefined): CommandTrackingRuntime {
+  if (!persisted || persisted.length === 0) {
+    return createCommandTrackingRuntime();
+  }
+  // Only keep completed commands. Defensive deep-shallow-copy so future
+  // mutations of the runtime can't leak back into the persisted reference.
+  const commands: TrackedCommand[] = [];
+  for (const c of persisted) {
+    if (c.endedAt === null) continue;
+    commands.push({ ...c });
+  }
+  // Re-apply both caps the same way `closeCommand` does.
+  while (commands.length > MAX_COMMANDS_PER_SESSION) {
+    commands.shift();
+  }
+  let totalSize = 0;
+  for (const c of commands) totalSize += c.output.length;
+  while (totalSize > MAX_TOTAL_OUTPUT_PER_SESSION && commands.length > 0) {
+    const dropped = commands.shift();
+    if (dropped) totalSize -= dropped.output.length;
+  }
+  return { commands, inFlight: null };
+}
+
+/**
  * Append a data chunk to the in-flight command's `output`, enforcing the
  * per-command cap. Does nothing when there is no in-flight command.
  *
