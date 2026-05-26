@@ -292,6 +292,13 @@ export class SessionManager {
       shellArgs?: string[];
       cwd?: string;
       restoreFrom?: PendingSnapshot;
+      /**
+       * For split-pane children, the sessionId of the owning root tab. The
+       * extension stores this on the session so cross-restart eviction can
+       * group split snapshots atomically. Ignored when `isSplitPane !== true`.
+       * See round-1 B4.
+       */
+      rootTabId?: string;
     },
   ): string {
     const restoreFrom = options?.restoreFrom;
@@ -358,6 +365,11 @@ export class SessionManager {
       disposables: [],
       webview,
       isSplitPane,
+      // For splits: caller-supplied rootTabId (live runtime) or persisted (restore).
+      // For roots: own id — supports atomic group eviction across the tab unit.
+      rootTabId: isSplitPane
+        ? (options?.rootTabId ?? restoreFrom?.metadata.rootTabId ?? id)
+        : (restoreFrom?.metadata.rootTabId ?? id),
       initialCwd: cwd,
       currentCwd: restoreFrom?.metadata.currentCwd ?? undefined,
       shell: resolvedShell,
@@ -384,6 +396,18 @@ export class SessionManager {
       this.viewSessions.set(viewId, []);
     }
     this.viewSessions.get(viewId)!.push(id);
+
+    // For Phase B (restore-from-snapshot) we pause output flushing so the
+    // fresh PTY's first prompt CAN'T race ahead of the webview's
+    // `restoreFromSnapshot` replay. The provider's `onReady` calls
+    // `resumeOutputForView(viewId)` AFTER posting every snapshot replay; the
+    // fresh-shell prompt then flushes in correct FIFO order behind the
+    // divider line. Spec: cross-restart-session-restore § "resize → write
+    // buffer → write divider → DOM attach → begin PTY forwarding".
+    // See round-1 B3.
+    if (restoreFrom && !restoringExited) {
+      outputBuffer.pauseOutput();
+    }
 
     // Seed the headless mirror from the restore buffer (if applicable) so
     // subsequent serializes include the prior session's history.
@@ -560,12 +584,19 @@ export class SessionManager {
     this.snapshots.schedulePersist(sessionId);
   }
 
-  /** Clear scrollback cache for a session. Silent no-op for unknown session IDs. */
+  /**
+   * Clear scrollback cache for a session. Silent no-op for unknown session IDs.
+   *
+   * Also resets the headless mirror (`\x1bc` RIS) and schedules an immediate
+   * persist so the cleared state is a true privacy boundary — a restart after
+   * clear MUST NOT resurrect the cleared content. See round-1 B2.
+   */
   clearScrollback(sessionId: string): void {
     const session = this.sessions.get(sessionId);
     if (!session) return;
     session.scrollbackCache = [];
     session.scrollbackSize = 0;
+    this.snapshots.resetMirror(sessionId);
   }
 
   /** Handle ack message for a session's output buffer. Silent no-op for unknown session IDs. */

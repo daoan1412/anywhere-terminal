@@ -93,6 +93,16 @@ export class SnapshotPersistence {
   private _pendingSessions = new Set<string>();
 
   /**
+   * Per-session promise chain of in-flight headless writes. xterm.js
+   * `write(data, cb)` is asynchronous — the buffer is not guaranteed to be
+   * up-to-date until `cb` fires. Async flushes MUST await this barrier before
+   * `serialize()` so the snapshot reflects the full byte stream.
+   * Sync flush (deactivate) is best-effort — captures whatever is currently
+   * parsed; this is the accepted ≤8ms loss window. See `.reviews/round-1.md` B1.
+   */
+  private writeBarriers = new Map<string, Promise<void>>();
+
+  /**
    * Incremented when persistence is invalidated (restore toggled off, storage
    * swapped). In-flight async flushes capture the generation at entry and
    * abort if it changes — prevents stale writes from resurrecting purged
@@ -140,6 +150,7 @@ export class SnapshotPersistence {
         this._persistTimer = null;
       }
       this._pendingSessions.clear();
+      this.writeBarriers.clear();
       // Dispose every mirror + cached addon. The session itself stays alive;
       // only the restore pipeline is torn down.
       for (const id of liveSessionIds) {
@@ -169,10 +180,19 @@ export class SnapshotPersistence {
     if (restoreFrom.metadata.shellExited === true) return;
     try {
       const seeded = this.headlessFactory(session.cols, session.rows);
-      seeded.write(restoreFrom.buffer);
       session.headless = seeded;
+      // Track the seed write so an immediate snapshot waits for it to parse.
+      const seedBarrier = new Promise<void>((resolve) => {
+        try {
+          seeded.write(restoreFrom.buffer, () => resolve());
+        } catch (err) {
+          console.error("[AnyWhere Terminal] Failed to seed headless mirror from restore buffer:", err);
+          resolve();
+        }
+      });
+      this.writeBarriers.set(session.id, seedBarrier);
     } catch (err) {
-      console.error("[AnyWhere Terminal] Failed to seed headless mirror from restore buffer:", err);
+      console.error("[AnyWhere Terminal] Failed to construct seeded headless mirror:", err);
     }
   }
 
@@ -186,6 +206,7 @@ export class SnapshotPersistence {
     if (session) this.disposeMirrorFor(session);
 
     this._pendingSessions.delete(sessionId);
+    this.writeBarriers.delete(sessionId);
     if (this._snapshotIndex[sessionId]) {
       delete this._snapshotIndex[sessionId];
       if (this.storage) {
@@ -220,11 +241,22 @@ export class SnapshotPersistence {
         return;
       }
     }
-    try {
-      session.headless.write(data);
-    } catch (err) {
-      console.error("[AnyWhere Terminal] Headless mirror write failed:", err);
-    }
+    // Chain the write callback onto the per-session barrier. Async flushes
+    // await the latest barrier before serialize so the snapshot is consistent.
+    // The map stores only the tail Promise — the chain itself stays
+    // bounded because each `.then(() => writePromise)` returns a single
+    // Promise (no nesting).
+    const prior = this.writeBarriers.get(session.id) ?? Promise.resolve();
+    const writePromise = new Promise<void>((resolve) => {
+      try {
+        // biome-ignore lint/style/noNonNullAssertion: just constructed above
+        session.headless!.write(data, () => resolve());
+      } catch (err) {
+        console.error("[AnyWhere Terminal] Headless mirror write failed:", err);
+        resolve();
+      }
+    });
+    this.writeBarriers.set(session.id, prior.then(() => writePromise));
     this.schedulePersist(session.id);
   }
 
@@ -236,6 +268,33 @@ export class SnapshotPersistence {
     } catch {
       // headless is best-effort.
     }
+  }
+
+  /**
+   * Reset the headless mirror to empty (RIS — `\x1bc`). Used by
+   * `SessionManager.clearScrollback` so a user-triggered clear is also a
+   * persistence boundary — the next snapshot reflects an empty buffer rather
+   * than restoring the just-cleared content after a restart. See round-1 B2.
+   */
+  resetMirror(sessionId: string): void {
+    if (!this.restoreEnabled) return;
+    const session = this.getSession(sessionId);
+    if (!session?.headless) return;
+    // RIS (Reset to Initial State) clears the buffer, scrollback, and modes.
+    // Track it in the barrier chain so the next serialize sees the empty state.
+    const prior = this.writeBarriers.get(sessionId) ?? Promise.resolve();
+    const resetPromise = new Promise<void>((resolve) => {
+      try {
+        // biome-ignore lint/style/noNonNullAssertion: checked above
+        session.headless!.write("\x1bc", () => resolve());
+      } catch (err) {
+        console.error("[AnyWhere Terminal] Headless mirror reset failed:", err);
+        resolve();
+      }
+    });
+    this.writeBarriers.set(sessionId, prior.then(() => resetPromise));
+    // Persist immediately so the cleared state survives a quick window close.
+    void this.flushSessionImmediate(sessionId);
   }
 
   /**
@@ -299,7 +358,9 @@ export class SnapshotPersistence {
       bufferFile: `snapshots/${session.id}.snapshot.ans`,
       bufferBytes,
       isSplitPane: session.isSplitPane,
-      rootTabId: session.id,
+      // For roots: own id. For splits: the owning tab's id (so eviction can
+      // keep/drop split groups atomically). See round-1 B4.
+      rootTabId: session.rootTabId ?? session.id,
       snapshotAt: Date.now(),
       shellExited: session.shellExited ?? false,
       exitCode: session.exitCode ?? null,
@@ -370,6 +431,10 @@ export class SnapshotPersistence {
         }
         continue;
       }
+      // Wait for any in-flight headless writes to be parsed before serialize.
+      // See round-1 B1.
+      await this.awaitWriteBarrier(id);
+      if (!isStillCurrent()) return;
       const result = this.generateSnapshotMetadata(id);
       if (!result) continue;
       try {
@@ -608,6 +673,17 @@ export class SnapshotPersistence {
   }
 
   // ─── Private helpers ────────────────────────────────────────────
+
+  /** Wait for the current write barrier to settle. Best-effort — never throws. */
+  private async awaitWriteBarrier(sessionId: string): Promise<void> {
+    const barrier = this.writeBarriers.get(sessionId);
+    if (!barrier) return;
+    try {
+      await barrier;
+    } catch {
+      // The write promise resolver swallows errors; this catch is defensive.
+    }
+  }
 
   private disposeMirrorFor(session: TerminalSession): void {
     if (session.serializeAddon) {

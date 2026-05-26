@@ -1,8 +1,9 @@
 import * as crypto from "node:crypto";
 import * as vscode from "vscode";
 import type { SessionManager } from "../session/SessionManager";
+import type { PendingSnapshot } from "../session/SessionSnapshot";
 import { readTerminalConfig, readTerminalSettings } from "../settings/SettingsReader";
-import type { ThemeChangedMessage, WebViewToExtensionMessage } from "../types/messages";
+import type { SetPanelIdMessage, ThemeChangedMessage, WebViewToExtensionMessage } from "../types/messages";
 import { FileTreeHost } from "./fileTreeHost";
 import type { WatcherPool } from "./fsWatcherPool";
 import type { GitDecorationProvider } from "./gitDecorationProvider";
@@ -25,6 +26,13 @@ import { getTerminalHtml } from "./webviewHtml";
  *
  * See: docs/design/webview-provider.md#§7
  */
+/**
+ * Grace window between the editor panel disposing and the underlying PTY
+ * being destroyed. A webview-reload (Cmd+R) typically re-attaches within
+ * ~1s; we wait 5s to be safe. See: restore-terminal-sessions design.md D3.
+ */
+const GRACE_PERIOD_MS = 5000;
+
 export class TerminalEditorProvider {
   public static readonly viewType = "anywhereTerminal.editor";
 
@@ -126,15 +134,34 @@ export class TerminalEditorProvider {
   /** In-flight hover-preview cancellation tokens, keyed by `sessionId`. See: design.md D9, D10 */
   private readonly _previewTokens = new Map<string, vscode.CancellationTokenSource>();
 
+  /** Stable panel identity persisted via webview `vscode.setState`. See: design.md D2. */
+  private readonly _panelId: string;
+  /**
+   * Snapshots consumed from `SessionManager.consumeSnapshotsForPanel(panelId)`
+   * by `TerminalPanelSerializer.deserializeWebviewPanel`. Empty on cold-open.
+   * `setupPanel().onReady` decides between existing / restore / cold branches.
+   * See: design.md D7.
+   */
+  private readonly restoreSnapshots: PendingSnapshot[];
+
+  /** Public accessor — used by `TerminalPanelSerializer` for back-compat lookups. */
+  getPanelId(): string {
+    return this._panelId;
+  }
+
   private constructor(
     private readonly extensionUri: vscode.Uri,
     private readonly sessionManager: SessionManager,
     panel: vscode.WebviewPanel,
     gitDecorationProvider: GitDecorationProvider | null = null,
     watcherPool: WatcherPool | null = null,
+    panelId: string = crypto.randomUUID(),
+    restoreSnapshots: PendingSnapshot[] = [],
   ) {
     this._panel = panel;
-    this._viewId = `editor-${crypto.randomUUID()}`;
+    this._panelId = panelId;
+    this._viewId = `editor-${panelId}`;
+    this.restoreSnapshots = restoreSnapshots;
     this.fileTreeHost = new FileTreeHost(gitDecorationProvider, watcherPool);
     this.setupPanel();
   }
@@ -168,12 +195,15 @@ export class TerminalEditorProvider {
       panel,
       gitDecorationProvider,
       watcherPool,
+      crypto.randomUUID(),
+      [],
     );
 
     // Track this panel for config updates + the provider instance for host-side
     // commands (rename). Disposal happens in `setupPanel`'s onDidDispose.
     TerminalEditorProvider._activePanels.add(panel);
     TerminalEditorProvider._instances.set(panel, provider);
+    sessionManager.registerEditorPanel(provider._panelId);
 
     // Return a disposable that cleans up via panel dispose (which triggers onDidDispose → destroyAllForView)
     return {
@@ -181,6 +211,37 @@ export class TerminalEditorProvider {
         panel.dispose();
       },
     };
+  }
+
+  /**
+   * Revive an editor panel previously serialized by VS Code. Constructed by
+   * `TerminalPanelSerializer.deserializeWebviewPanel` after `cancelScheduledDestroy`
+   * + `consumeSnapshotsForPanel`. The new provider takes over an existing
+   * `WebviewPanel` instance (no createWebviewPanel call) and registers it in
+   * the live-panels registry. See: restore-terminal-sessions design.md D2, D3, D7.
+   */
+  static revive(
+    context: vscode.ExtensionContext,
+    sessionManager: SessionManager,
+    panel: vscode.WebviewPanel,
+    panelId: string,
+    restoreSnapshots: PendingSnapshot[],
+    gitDecorationProvider: GitDecorationProvider | null = null,
+    watcherPool: WatcherPool | null = null,
+  ): TerminalEditorProvider {
+    const provider = new TerminalEditorProvider(
+      context.extensionUri,
+      sessionManager,
+      panel,
+      gitDecorationProvider,
+      watcherPool,
+      panelId,
+      restoreSnapshots,
+    );
+    TerminalEditorProvider._activePanels.add(panel);
+    TerminalEditorProvider._instances.set(panel, provider);
+    sessionManager.registerEditorPanel(panelId);
+    return provider;
   }
 
   /**
@@ -244,7 +305,10 @@ export class TerminalEditorProvider {
       }),
     );
 
-    // 4. Wire dispose handler — clean up all subscriptions and sessions
+    // 4. Wire dispose handler — clean up all subscriptions and sessions.
+    //    NOTE: PTY destruction is DEFERRED via scheduleDestroyForView so a
+    //    window-reload's webview swap can revive the panel before the grace
+    //    period elapses. See: restore-terminal-sessions design.md D3.
     this._panel.onDidDispose(() => {
       for (const d of disposables) {
         d.dispose();
@@ -253,7 +317,11 @@ export class TerminalEditorProvider {
       this.cancelAllPreviewTokens();
       TerminalEditorProvider._activePanels.delete(this._panel);
       TerminalEditorProvider._instances.delete(this._panel);
-      this.sessionManager.destroyAllForView(this._viewId);
+      this.sessionManager.scheduleDestroyForView(this._viewId, GRACE_PERIOD_MS, () => {
+        // Live-panels registry is cleaned only on the REAL destroy (grace
+        // window elapsed without revival). See: design.md D10.
+        this.sessionManager.unregisterEditorPanel(this._panelId);
+      });
     });
   }
 
@@ -387,6 +455,7 @@ export class TerminalEditorProvider {
             shellArgs: createSettings.shellArgs,
             cwd: createSettings.cwd,
           });
+          this.sessionManager.attachSessionToPanel(this._panelId, newSessionId);
           const newSession = this.sessionManager.getSession(newSessionId);
           if (newSession) {
             this.safePostMessage({
@@ -516,6 +585,11 @@ export class TerminalEditorProvider {
   private onReady(): void {
     this._ready = true;
 
+    // Tell the webview which panelId VS Code will use to identify this panel
+    // across reloads. The webview persists `{ panelId }` via vscode.setState
+    // so the serializer's `state` arg carries it back. See design.md D2.
+    this.safePostMessage({ type: "setPanelId", panelId: this._panelId } satisfies SetPanelIdMessage);
+
     // Post the initial theme so the popup renderer can pick the right Shiki
     // theme before the first hover.
     this.safePostMessage({
@@ -530,23 +604,79 @@ export class TerminalEditorProvider {
     });
 
     try {
-      // Create initial session via SessionManager with resolved settings
       const settings = readTerminalSettings();
-      this.sessionManager.createSession(this._viewId, this._panel.webview, {
-        shell: settings.shell,
-        shellArgs: settings.shellArgs,
-        cwd: settings.cwd,
-      });
+      const existingSessions = this.sessionManager.getAllSessionsForView(this._viewId);
 
-      // Get tabs for the init message
-      const tabs = this.sessionManager.getTabsForView(this._viewId);
-
-      this.safePostMessage({
-        type: "init",
-        tabs,
-        config: readTerminalConfig(),
-        ...this.fileTreeHost.initPayload(),
-      });
+      if (existingSessions.length > 0) {
+        // Phase A: window-reload revive — sessions survived the grace window.
+        // Rebind their webview reference BEFORE replaying scrollback, otherwise
+        // the surviving sessions still hold the disposed webview and
+        // safePostMessage silently no-ops. See: design.md D3, D12.
+        this.sessionManager.updateWebviewForView(this._viewId, this._panel.webview);
+        this.safePostMessage({
+          type: "init",
+          tabs: existingSessions,
+          config: readTerminalConfig(),
+          ...this.fileTreeHost.initPayload(),
+        });
+        for (const session of existingSessions) {
+          const scrollback = this.sessionManager.getScrollbackData(session.id);
+          if (scrollback) {
+            this.safePostMessage({ type: "restore", tabId: session.id, data: scrollback });
+          }
+        }
+        this.sessionManager.resumeOutputForView(this._viewId);
+      } else if (this.restoreSnapshots.length > 0) {
+        // Phase B: cross-restart restore — consume staged snapshots from the
+        // panel serializer and seed new sessions with the persisted metadata.
+        for (const snap of this.restoreSnapshots) {
+          const sessionId = this.sessionManager.createSession(this._viewId, this._panel.webview, {
+            shell: settings.shell,
+            shellArgs: settings.shellArgs,
+            cwd: settings.cwd,
+            restoreFrom: snap,
+          });
+          this.sessionManager.attachSessionToPanel(this._panelId, sessionId);
+        }
+        const restoredSessions = this.sessionManager.getAllSessionsForView(this._viewId);
+        this.safePostMessage({
+          type: "init",
+          tabs: restoredSessions,
+          config: readTerminalConfig(),
+          ...this.fileTreeHost.initPayload(),
+        });
+        for (const snap of this.restoreSnapshots) {
+          this.safePostMessage({
+            type: "restoreFromSnapshot",
+            tabId: snap.metadata.sessionId,
+            serializedBuffer: snap.buffer,
+            cols: snap.metadata.cols,
+            rows: snap.metadata.rows,
+            snapshotAt: snap.metadata.snapshotAt,
+            shellExited: snap.metadata.shellExited,
+            exitCode: snap.metadata.exitCode,
+          });
+        }
+        // Resume output flushing for sessions paused by createSession({restoreFrom}).
+        // Order is now: init → restoreFromSnapshot (per session) → buffered PTY
+        // output flush. See round-1 B3.
+        this.sessionManager.resumeOutputForView(this._viewId);
+      } else {
+        // Cold open: existing behaviour — spawn a fresh session.
+        const newSessionId = this.sessionManager.createSession(this._viewId, this._panel.webview, {
+          shell: settings.shell,
+          shellArgs: settings.shellArgs,
+          cwd: settings.cwd,
+        });
+        this.sessionManager.attachSessionToPanel(this._panelId, newSessionId);
+        const tabs = this.sessionManager.getTabsForView(this._viewId);
+        this.safePostMessage({
+          type: "init",
+          tabs,
+          config: readTerminalConfig(),
+          ...this.fileTreeHost.initPayload(),
+        });
+      }
     } catch (err) {
       console.error("[AnyWhere Terminal] Failed to initialize editor terminal:", err);
 

@@ -67,6 +67,13 @@ export interface TerminalSession {
   webview: MessageSender;
   /** Whether this session is a split pane (not a root tab). Split pane sessions are excluded from getTabsForView(). */
   isSplitPane: boolean;
+  /**
+   * For split-pane children, the sessionId of the owning root tab (the
+   * top-level entry in the webview's `tabLayouts`). For root tabs, this is
+   * set to the session's own id so eviction can group reliably. See:
+   * restore-terminal-sessions design.md D12 + round-1 B4.
+   */
+  rootTabId?: string;
   /** Resolved cwd passed to the PTY at spawn time; used for resolving relative file paths in terminal links. */
   initialCwd?: string;
   /** Latest cwd observed from PTY OSC 7 / OSC 633 reports; undefined until the first parse. */

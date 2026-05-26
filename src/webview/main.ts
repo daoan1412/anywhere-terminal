@@ -30,6 +30,7 @@ import { SplitTreeRenderer } from "./split/SplitTreeRenderer";
 import { WebviewStateStore } from "./state/WebviewStateStore";
 import { buildTabBarData, handleTabKeyboardShortcut, renderTabBar } from "./TabBarUtils";
 import { hideRenameOverlay, repositionRenameOverlay, showRenameOverlay } from "./tabRenameOverlay";
+import { formatRestoreDivider } from "./terminal/restoreDivider";
 import { TerminalFactory } from "./terminal/TerminalFactory";
 import { ThemeManager } from "./theme/ThemeManager";
 import { showBanner } from "./ui/BannerService";
@@ -306,7 +307,12 @@ const routeMessage = createMessageRouter({
       return;
     }
     const activePaneId = store.tabActivePaneIds.get(store.activeTabId) ?? store.activeTabId;
-    vscode.postMessage({ type: "requestSplitSession", direction: msg.direction, sourcePaneId: activePaneId });
+    vscode.postMessage({
+      type: "requestSplitSession",
+      direction: msg.direction,
+      sourcePaneId: activePaneId,
+      rootTabId: store.activeTabId,
+    });
   },
   onSplitPaneCreated(msg) {
     splitRenderer.handleSplitPaneCreated(msg, factory);
@@ -326,7 +332,12 @@ const routeMessage = createMessageRouter({
     if (store.activeTabId && msg.direction && msg.sourcePaneId) {
       store.tabActivePaneIds.set(store.activeTabId, msg.sourcePaneId);
       splitRenderer.updateActivePaneVisual(store.activeTabId);
-      vscode.postMessage({ type: "requestSplitSession", direction: msg.direction, sourcePaneId: msg.sourcePaneId });
+      vscode.postMessage({
+        type: "requestSplitSession",
+        direction: msg.direction,
+        sourcePaneId: msg.sourcePaneId,
+        rootTabId: store.activeTabId,
+      });
     }
   },
   onCtxClear(msg) {
@@ -409,6 +420,56 @@ const routeMessage = createMessageRouter({
   onFsRehydrate(msg) {
     fileTreeController?.handleFsRehydrate(msg);
   },
+  onSetPanelId(msg) {
+    // Persist the panel identity so VS Code includes it in the serializer's
+    // `state` arg on next reload. See: restore-terminal-sessions design.md D2.
+    store.updateState({ panelId: msg.panelId });
+    vscode.postMessage({ type: "persistPanelId", panelId: msg.panelId });
+  },
+  onRestoreFromSnapshot(msg) {
+    // Replay a persisted snapshot into an xterm instance. The typical sequence
+    // when triggered cross-restart is: `init` arrives first → factory creates
+    // each tab terminal with `open()` called (default). Then this message
+    // arrives → we resize, write the buffer, and write the restore divider.
+    // If the instance is missing (defensive — init didn't include this tab),
+    // we create one with `deferOpen: true` and finalize the attach here.
+    // See: restore-terminal-sessions design.md D8, D9, D13.
+    let instance = store.terminals.get(msg.tabId);
+    let attachLater = false;
+    if (!instance) {
+      instance = factory.createTerminal(
+        msg.tabId,
+        msg.tabId,
+        store.currentConfig,
+        store.activeTabId === msg.tabId,
+        null,
+        { deferOpen: true },
+      );
+      attachLater = true;
+    }
+    try {
+      instance.terminal.resize(Math.max(1, msg.cols), Math.max(1, msg.rows));
+    } catch {
+      // resize fails when terminal not yet open — only meaningful for the
+      // open-already path; deferred path will resize again post-open via fit.
+    }
+    instance.terminal.write(msg.serializedBuffer);
+    instance.terminal.write(
+      formatRestoreDivider({
+        snapshotAt: msg.snapshotAt,
+        shellExited: msg.shellExited,
+        exitCode: msg.exitCode,
+      }),
+    );
+    if (msg.shellExited) {
+      instance.exited = true;
+      updateTabBar();
+    }
+    if (attachLater) {
+      factory.attachDeferredTerminal(instance);
+      factory.fitTerminal(instance);
+    }
+  },
 });
 
 // ─── Init & Bootstrap ───────────────────────────────────────────────
@@ -428,8 +489,48 @@ function handleInit(msg: InitMessage): void {
       store.tabActivePaneIds.delete(tabId);
     }
   }
+  // Create xterm instances for every session. For split-pane children we pass
+  // `isSplitPane: true` so the factory skips the per-tab side effects (no new
+  // `tabLayouts` leaf, never `activeTabId`) — the root tab's layout already
+  // references this pane. See restore-terminal-sessions design.md D12.
   for (const tab of msg.tabs) {
-    factory.createTerminal(tab.id, tab.name, msg.config, tab.isActive, tab.customName);
+    factory.createTerminal(tab.id, tab.name, msg.config, tab.isActive, tab.customName, {
+      isSplitPane: tab.isSplitPane === true,
+    });
+  }
+  // Build the split-tree DOM for every restored multi-pane tab. Without this,
+  // a Cmd+R reload (Phase A) or cross-restart (Phase B) loses the split layout
+  // because nothing in the existing init flow re-renders it.
+  const splitRootIds: string[] = [];
+  for (const [tabId, layout] of store.tabLayouts) {
+    if (layout.type === "branch") {
+      splitRenderer.renderTabSplitTree(tabId);
+      splitRootIds.push(tabId);
+    }
+  }
+  // Reveal the active root tab's split container (no-op when the active tab
+  // has no branch layout — the per-terminal `display: block` from createTerminal
+  // already shows the single-pane case).
+  const activeRootTab = msg.tabs.find((t) => t.isActive && t.isSplitPane !== true);
+  if (activeRootTab) {
+    const activeLayout = store.tabLayouts.get(activeRootTab.id);
+    if (activeLayout && activeLayout.type === "branch") {
+      splitRenderer.showTabContainer(activeRootTab.id);
+    }
+  }
+  // Refit every leaf in each restored split layout. Split-pane children were
+  // created with `isActive=false` (their containers started `display: none`,
+  // so `terminal.open()` measured a 0×0 box) — without refitting after
+  // `renderTabSplitTree` reparents them into visible leaves, the xterm
+  // renderer keeps the 0×0 canvas and the pane stays visually blank even
+  // though its `restore` payload was written. Mirrors the recovery path in
+  // `SplitTreeRenderer.handleSplitPaneCreated`.
+  if (splitRootIds.length > 0) {
+    requestAnimationFrame(() => {
+      for (const tabId of splitRootIds) {
+        resizeCoordinator.debouncedFitAllLeaves(tabId);
+      }
+    });
   }
   const containerEl = document.getElementById("terminal-container");
   if (containerEl) {

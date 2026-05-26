@@ -418,7 +418,11 @@ export class TerminalViewProvider implements vscode.WebviewViewProvider {
             typeof (message as { direction?: unknown }).direction === "string" &&
             typeof (message as { sourcePaneId?: unknown }).sourcePaneId === "string"
           ) {
-            const splitMsg = message as { direction: "horizontal" | "vertical"; sourcePaneId: string };
+            const splitMsg = message as {
+              direction: "horizontal" | "vertical";
+              sourcePaneId: string;
+              rootTabId?: string;
+            };
             const viewId = this.getViewId();
             const splitSettings = readTerminalSettings();
             try {
@@ -427,6 +431,9 @@ export class TerminalViewProvider implements vscode.WebviewViewProvider {
                 shell: splitSettings.shell,
                 shellArgs: splitSettings.shellArgs,
                 cwd: splitSettings.cwd,
+                // Propagate root-tab identity for atomic group eviction (round-1 B4).
+                // Older webviews (legacy IPC shape) omit rootTabId — fall through.
+                rootTabId: splitMsg.rootTabId,
               });
               const newSession = this.sessionManager.getSession(newSessionId);
               if (newSession) {
@@ -577,34 +584,72 @@ export class TerminalViewProvider implements vscode.WebviewViewProvider {
 
     try {
       const viewId = this.getViewId();
-      const existingTabs = this.sessionManager.getTabsForView(viewId);
+      const existingSessions = this.sessionManager.getAllSessionsForView(viewId);
 
-      if (existingTabs.length > 0) {
+      if (existingSessions.length > 0) {
         // Re-creation scenario: sessions already exist for this view
         // Update webview references for all existing sessions
         this.sessionManager.updateWebviewForView(viewId, webviewView.webview);
 
-        // Send 'init' message with existing tabs (with retry for transient failures)
+        // Send 'init' message with all existing sessions (roots + splits, see
+        // restore-terminal-sessions design.md D12) — splits MUST be present so
+        // the webview can recreate every xterm referenced by `tabLayouts`.
         void this.safeSendWithRetry(webviewView.webview, {
           type: "init",
-          tabs: existingTabs,
+          tabs: existingSessions,
           config: readTerminalConfig(),
           ...this.fileTreeHost.initPayload(),
         });
 
         // Send 'restore' messages with scrollback data for each session
-        for (const tab of existingTabs) {
-          const scrollbackData = this.sessionManager.getScrollbackData(tab.id);
+        for (const session of existingSessions) {
+          const scrollbackData = this.sessionManager.getScrollbackData(session.id);
           if (scrollbackData) {
             this.safePostMessage(webviewView.webview, {
               type: "restore",
-              tabId: tab.id,
+              tabId: session.id,
               data: scrollbackData,
             });
           }
         }
 
         // Resume output flushing for the view
+        this.sessionManager.resumeOutputForView(viewId);
+      } else if (this.sessionManager.hasSnapshotsForLocation(this.location)) {
+        // Cross-restart restore: this.location has persisted snapshots staged
+        // by `hydrateFromSnapshots`. See: restore-terminal-sessions design.md D7, D12.
+        const settings = readTerminalSettings();
+        const snaps = this.sessionManager.consumeSnapshotsForLocation(this.location);
+        for (const snap of snaps) {
+          this.sessionManager.createSession(viewId, webviewView.webview, {
+            shell: settings.shell,
+            shellArgs: settings.shellArgs,
+            cwd: settings.cwd,
+            restoreFrom: snap,
+          });
+        }
+        const restoredSessions = this.sessionManager.getAllSessionsForView(viewId);
+        void this.safeSendWithRetry(webviewView.webview, {
+          type: "init",
+          tabs: restoredSessions,
+          config: readTerminalConfig(),
+          ...this.fileTreeHost.initPayload(),
+        });
+        for (const snap of snaps) {
+          this.safePostMessage(webviewView.webview, {
+            type: "restoreFromSnapshot",
+            tabId: snap.metadata.sessionId,
+            serializedBuffer: snap.buffer,
+            cols: snap.metadata.cols,
+            rows: snap.metadata.rows,
+            snapshotAt: snap.metadata.snapshotAt,
+            shellExited: snap.metadata.shellExited,
+            exitCode: snap.metadata.exitCode,
+          });
+        }
+        // Resume output flushing for sessions paused by createSession({restoreFrom}).
+        // Order is now: init → restoreFromSnapshot (per session) → buffered PTY
+        // output flush. See round-1 B3.
         this.sessionManager.resumeOutputForView(viewId);
       } else {
         // First-time creation: create initial session with resolved settings

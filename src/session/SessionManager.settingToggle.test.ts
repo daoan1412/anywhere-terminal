@@ -1,0 +1,243 @@
+// Mid-session toggle of `anywhereTerminal.sessionRestore.enabled`.
+// See: asimov/changes/restore-terminal-sessions/design.md D11.
+
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { __resetAll, __setAppRoot, __setWorkspaceFolders } from "../test/__mocks__/vscode";
+import type { MessageSender } from "./OutputBuffer";
+
+const mockPtySessions: Array<{
+  id: string;
+  onData: ((data: string) => void) | undefined;
+}> = [];
+
+vi.mock("../pty/processCwd", () => ({ queryProcessCwd: vi.fn(async () => undefined) }));
+vi.mock("../pty/PtyManager", () => ({
+  loadNodePty: vi.fn(() => ({ spawn: vi.fn() })),
+  detectShell: vi.fn(() => ({ shell: "/bin/zsh", args: ["--login"] })),
+  buildEnvironment: vi.fn(() => ({ PATH: "/usr/bin" })),
+  resolveWorkingDirectory: vi.fn(() => "/tmp"),
+}));
+vi.mock("../pty/PtySession", () => {
+  class MockPtySession {
+    id: string;
+    pid = 99000;
+    spawn = vi.fn();
+    write = vi.fn();
+    resize = vi.fn();
+    kill = vi.fn();
+    pause = vi.fn();
+    resume = vi.fn();
+    setCurrentCwdSink = vi.fn();
+    private _od: ((d: string) => void) | undefined;
+    get onData() {
+      return this._od;
+    }
+    set onData(cb: ((d: string) => void) | undefined) {
+      this._od = cb;
+      const t = mockPtySessions.find((p) => p.id === this.id);
+      if (t) {
+        t.onData = cb;
+      }
+    }
+    onExit: any = undefined;
+    constructor(id: string) {
+      this.id = id;
+      mockPtySessions.push({ id, onData: undefined });
+    }
+  }
+  return { PtySession: MockPtySession };
+});
+vi.mock("./OutputBuffer", () => {
+  class MockOutputBuffer {
+    append = vi.fn();
+    dispose = vi.fn();
+    updateWebview = vi.fn();
+    pauseOutput = vi.fn();
+    resumeOutput = vi.fn();
+    handleAck = vi.fn();
+    flush = vi.fn();
+    bufferSize = 0;
+    unackedCharCount = 0;
+    constructor(
+      public _i: string,
+      public _w: unknown,
+      public _p: unknown,
+    ) {}
+  }
+  return { OutputBuffer: MockOutputBuffer };
+});
+
+import {
+  type HeadlessFactory,
+  type HeadlessTerminalLike,
+  type SerializeAddonFactory,
+  type SerializeAddonLike,
+  SessionManager,
+} from "./SessionManager";
+
+function mockWebview(): MessageSender {
+  return { postMessage: vi.fn(() => Promise.resolve(true)) };
+}
+
+function makeStorageMock() {
+  return {
+    writeBufferFileAsync: vi.fn(async () => {}),
+    writeBufferFileSync: vi.fn(),
+    scheduleIndexWrite: vi.fn(),
+    unlinkBufferFile: vi.fn(),
+    writeIndexAwaited: vi.fn(async () => {}),
+    writeLivePanelsAwaited: vi.fn(async () => {}),
+    readBufferFile: () => null,
+    listBufferFiles: () => [],
+    loadIndex: () => undefined,
+    loadLivePanels: () => undefined,
+    bufferFilePath: (id: string) => `/tmp/${id}`,
+    bufferFileRelativePath: (id: string) => `snapshots/${id}.snapshot.ans`,
+    cancelPendingIndex: vi.fn(),
+    purge: vi.fn(async () => {}),
+  };
+}
+
+function makeFactories() {
+  const builtHeadless: Array<HeadlessTerminalLike & { disposed: boolean }> = [];
+  const builtAddons: Array<SerializeAddonLike & { disposed: boolean }> = [];
+  const headless: HeadlessFactory = (cols, rows) => {
+    const inst = {
+      cols,
+      rows,
+      write(_data: string, cb?: () => void) {
+        cb?.();
+      },
+      resize() {},
+      disposed: false,
+      dispose() {
+        this.disposed = true;
+      },
+      loadAddon() {},
+    };
+    builtHeadless.push(inst);
+    return inst;
+  };
+  const serialize: SerializeAddonFactory = () => {
+    const inst = {
+      disposed: false,
+      serialize: () => "X",
+      dispose() {
+        this.disposed = true;
+      },
+    };
+    builtAddons.push(inst);
+    return inst;
+  };
+  return { headless, serialize, builtHeadless, builtAddons };
+}
+
+beforeEach(() => {
+  __resetAll();
+  __setAppRoot("/mock/vscode/app");
+  __setWorkspaceFolders([{ uri: { fsPath: "/mock/workspace" } }]);
+  vi.clearAllMocks();
+  vi.useFakeTimers();
+  mockPtySessions.length = 0;
+});
+
+afterEach(() => {
+  vi.useRealTimers();
+  vi.restoreAllMocks();
+});
+
+describe("SessionManager.setRestoreEnabled", () => {
+  it("true → false disposes every mirror + cached addon, cancels debounce, calls storage.purge", async () => {
+    const fx = makeFactories();
+    const storage = makeStorageMock();
+    const sm = new SessionManager(undefined, {
+      restoreEnabled: true,
+      headlessFactory: fx.headless,
+      serializeAddonFactory: fx.serialize,
+      storage: storage as any,
+    });
+    const id = sm.createSession("sidebar", mockWebview());
+    mockPtySessions[0].onData?.("seed");
+    sm.generateSnapshotMetadata(id); // ensure addon was constructed
+    expect(fx.builtHeadless).toHaveLength(1);
+    expect(fx.builtAddons).toHaveLength(1);
+
+    sm.setRestoreEnabled(false);
+
+    expect((fx.builtHeadless[0] as any).disposed).toBe(true);
+    expect((fx.builtAddons[0] as any).disposed).toBe(true);
+    expect(storage.purge).toHaveBeenCalledTimes(1);
+    expect(sm.isRestoreEnabled()).toBe(false);
+
+    // Subsequent data is NOT mirrored or persisted.
+    mockPtySessions[0].onData?.("after");
+    await vi.advanceTimersByTimeAsync(2000);
+    expect(fx.builtHeadless).toHaveLength(1);
+    expect(storage.writeBufferFileAsync).not.toHaveBeenCalled();
+    sm.dispose();
+  });
+
+  it("does not resurrect snapshot files or index writes when disabled during an in-flight async flush", async () => {
+    const fx = makeFactories();
+    const storage = makeStorageMock();
+    let resolveWrite: (() => void) | undefined;
+    storage.writeBufferFileAsync.mockImplementation(
+      () =>
+        new Promise<void>((resolve) => {
+          resolveWrite = resolve;
+        }),
+    );
+    const sm = new SessionManager(undefined, {
+      restoreEnabled: true,
+      headlessFactory: fx.headless,
+      serializeAddonFactory: fx.serialize,
+      storage: storage as any,
+    });
+    const id = sm.createSession("sidebar", mockWebview());
+    mockPtySessions[0].onData?.("seed");
+
+    await vi.advanceTimersByTimeAsync(1000);
+    expect(storage.writeBufferFileAsync).toHaveBeenCalledWith(id, "X");
+
+    sm.setRestoreEnabled(false);
+    resolveWrite?.();
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(storage.unlinkBufferFile).toHaveBeenCalledWith(id);
+    expect(storage.scheduleIndexWrite).not.toHaveBeenCalled();
+    sm.dispose();
+  });
+
+  it("false → true lazily reconstructs the mirror on next data", () => {
+    const fx = makeFactories();
+    const storage = makeStorageMock();
+    const sm = new SessionManager(undefined, {
+      restoreEnabled: false,
+      headlessFactory: fx.headless,
+      serializeAddonFactory: fx.serialize,
+      storage: storage as any,
+    });
+    sm.createSession("sidebar", mockWebview());
+    mockPtySessions[0].onData?.("pre-toggle");
+    expect(fx.builtHeadless).toHaveLength(0);
+
+    sm.setRestoreEnabled(true);
+    mockPtySessions[0].onData?.("post-toggle");
+    expect(fx.builtHeadless).toHaveLength(1);
+    sm.dispose();
+  });
+
+  it("setting to the same value is a no-op", () => {
+    const fx = makeFactories();
+    const storage = makeStorageMock();
+    const sm = new SessionManager(undefined, {
+      restoreEnabled: false,
+      headlessFactory: fx.headless,
+      serializeAddonFactory: fx.serialize,
+      storage: storage as any,
+    });
+    sm.setRestoreEnabled(false);
+    expect(storage.purge).not.toHaveBeenCalled();
+  });
+});

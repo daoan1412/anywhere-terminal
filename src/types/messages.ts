@@ -142,6 +142,13 @@ export interface RequestSplitSessionMessage {
   direction: "horizontal" | "vertical";
   /** Session ID of the pane being split */
   sourcePaneId: string;
+  /**
+   * Session ID of the root tab that owns the split tree containing
+   * `sourcePaneId`. The extension propagates this onto the new pane's
+   * `rootTabId` so cross-restart eviction can group split snapshots
+   * atomically. See restore-terminal-sessions design.md D12 + round-1 B4.
+   */
+  rootTabId: string;
 }
 
 /** User requested destruction of a split pane's session. */
@@ -343,7 +350,21 @@ export type WebViewToExtensionMessage =
   | RequestSetFileTreePositionMessage
   | RequestSubscribeFsChangesMessage
   | RequestUnsubscribeFsChangesMessage
-  | UpdateHoverPreviewSettingMessage;
+  | UpdateHoverPreviewSettingMessage
+  | PersistPanelIdMessage;
+
+/**
+ * Webview → Extension. Sent by the editor webview after it has merged the
+ * extension-supplied panelId into `vscode.setState({...})`. Lets the editor
+ * provider know it is safe to assume VS Code will include the panelId in any
+ * subsequent `WebviewPanelSerializer.deserializeWebviewPanel` payload.
+ *
+ * See: asimov/changes/restore-terminal-sessions/design.md D2.
+ */
+export interface PersistPanelIdMessage {
+  type: "persistPanelId";
+  panelId: string;
+}
 
 // ─── Extension → WebView Messages ───────────────────────────────────
 
@@ -360,6 +381,16 @@ export interface InitMessage {
     customName: string | null;
     /** Whether this tab is currently active */
     isActive: boolean;
+    /**
+     * When true, the entry is a split-pane child of another root tab (not a
+     * top-level tab in its own right). The webview MUST create the xterm
+     * instance for the pane but skip per-tab side effects (no `tabLayouts`
+     * leaf init, never the `activeTabId`). Required so that on reload /
+     * cross-restart the layout tree in `WebviewStateStore.tabLayouts` finds
+     * every referenced session in `validTabIds`. See restore-terminal-sessions
+     * design.md D12.
+     */
+    isSplitPane?: boolean;
   }>;
   /** Terminal configuration from user settings */
   config: TerminalConfig;
@@ -792,4 +823,38 @@ export type ExtensionToWebViewMessage =
   | GitStatusChangedMessage
   | FsChangesInvalidatedMessage
   | FsRehydrateMessage
-  | RevealInFileTreeMessage;
+  | RevealInFileTreeMessage
+  | SetPanelIdMessage
+  | RestoreFromSnapshotMessage;
+
+/**
+ * Extension → Webview. Tells the editor webview the panelId VS Code will use
+ * to identify this WebviewPanel across reloads. The webview persists this in
+ * `vscode.setState({...})` so the serializer's `state` arg carries it back.
+ *
+ * See: asimov/changes/restore-terminal-sessions/design.md D2.
+ */
+export interface SetPanelIdMessage {
+  type: "setPanelId";
+  panelId: string;
+}
+
+/**
+ * Extension → Webview. Replays a persisted snapshot into an xterm instance after
+ * a VS Code restart. The webview writes the serialized buffer + restore divider
+ * before attaching the terminal to the DOM. `shellExited === true` means the
+ * underlying shell terminated before the snapshot — the webview marks the
+ * instance read-only and the divider includes the exit indicator.
+ *
+ * See: asimov/changes/restore-terminal-sessions/design.md D8, D9, D13.
+ */
+export interface RestoreFromSnapshotMessage {
+  type: "restoreFromSnapshot";
+  tabId: string;
+  serializedBuffer: string;
+  cols: number;
+  rows: number;
+  snapshotAt: number;
+  shellExited: boolean;
+  exitCode: number | null;
+}
