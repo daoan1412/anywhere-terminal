@@ -55,9 +55,7 @@ interface PendingDump {
  * Construct a handler closure. The returned function is wired into the
  * webview's MessageRouter for the `requestScrollbackDump` message type.
  */
-export function createScrollbackDumpHandler(
-  deps: ScrollbackDumpDeps,
-): (msg: RequestScrollbackDumpMessage) => void {
+export function createScrollbackDumpHandler(deps: ScrollbackDumpDeps): (msg: RequestScrollbackDumpMessage) => void {
   const schedule = deps.scheduleMicrotask ?? queueMicrotask;
   const pendingByTab = new Map<string, PendingDump[]>();
 

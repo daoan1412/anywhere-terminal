@@ -9,6 +9,7 @@ import { resolveRenameTargetTabId } from "./providers/resolveRenameTarget";
 import { TerminalEditorProvider } from "./providers/TerminalEditorProvider";
 import { TerminalPanelSerializer } from "./providers/TerminalPanelSerializer";
 import { TerminalViewProvider } from "./providers/TerminalViewProvider";
+import { exportBuffer, exportCommand, exportLastCommand } from "./commands/exportCommands";
 import { loadNodePty } from "./pty/PtyManager";
 import { SessionManager } from "./session/SessionManager";
 import { SessionStorage } from "./session/SessionStorage";
@@ -195,6 +196,32 @@ export function activate(context: vscode.ExtensionContext) {
     return lastFocusedProvider;
   };
 
+  // Helper: assemble the dependency bag for the export commands. Resolved
+  // lazily so the closure picks up the latest focused provider at click time.
+  const buildExportDeps = (
+    getProvider: () => TerminalViewProvider,
+    sm: SessionManager,
+  ) => ({
+    sessionManager: sm,
+    getFocusedSessionId: () => getProvider().getActiveSessionId(),
+    getSessionName: (sessionId: string) => sm.getSession(sessionId)?.customName ?? sm.getSession(sessionId)?.name ?? "terminal",
+    vsc: {
+      showSaveDialog: (opts: vscode.SaveDialogOptions) => vscode.window.showSaveDialog(opts),
+      showQuickPick: <T extends vscode.QuickPickItem>(
+        items: readonly T[] | Thenable<readonly T[]>,
+        options?: vscode.QuickPickOptions,
+      ) => vscode.window.showQuickPick(items as T[] | Thenable<T[]>, options),
+      showInformationMessage: (message: string, ...items: string[]) =>
+        vscode.window.showInformationMessage(message, ...items),
+      showWarningMessage: (message: string) => vscode.window.showWarningMessage(message),
+      showErrorMessage: (message: string) => vscode.window.showErrorMessage(message),
+      openExternal: (uri: vscode.Uri) => vscode.env.openExternal(uri),
+      fs: vscode.workspace.fs,
+    },
+    readmeShellIntegrationUrl:
+      "https://github.com/huybuidac/anywhere-terminal/blob/main/README.md#shell-integration",
+  });
+
   // ─── Action Helpers ──────────────────────────────────────────
 
   const doNewTerminal = (provider: TerminalViewProvider): void => {
@@ -291,6 +318,17 @@ export function activate(context: vscode.ExtensionContext) {
         void view.webview.postMessage({ type: "toggle-file-tree" });
       }
     }),
+    // ─── Export Terminal Session ──────────────────────────────────
+    // See: asimov/changes/export-terminal-session/specs/terminal-session-export/spec.md
+    vscode.commands.registerCommand("anywhereTerminal.exportBuffer", () =>
+      exportBuffer(buildExportDeps(getFocusedProvider, sessionManager)),
+    ),
+    vscode.commands.registerCommand("anywhereTerminal.exportLastCommand", () =>
+      exportLastCommand(buildExportDeps(getFocusedProvider, sessionManager)),
+    ),
+    vscode.commands.registerCommand("anywhereTerminal.exportCommand", () =>
+      exportCommand(buildExportDeps(getFocusedProvider, sessionManager)),
+    ),
     vscode.commands.registerCommand("anywhereTerminal.setFileTreePosition", async () => {
       const view = getFocusedProvider().view;
       if (!view) {

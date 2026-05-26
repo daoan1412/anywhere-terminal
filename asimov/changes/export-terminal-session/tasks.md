@@ -105,7 +105,7 @@
 
 ## 4. Export commands
 
-- [ ] 4_1 Shared export helpers (sanitize filename, ANSI strip, save flow)
+- [x] 4_1 Shared export helpers (sanitize filename, ANSI strip, save flow)
   - **Deps**: 1_1, 3_3
   - **Refs**: `specs/terminal-session-export/spec.md` Requirements "ANSI stripping by default with raw-preserved option" · `design.md` D7 · `design.md` D8
   - **Scope**: `src/commands/exportHelpers.ts` (new), `src/commands/exportHelpers.test.ts` (new)
@@ -116,7 +116,7 @@
     1. Implement each helper per the spec/design clauses.
     2. Tests: sanitization regex `[^A-Za-z0-9._-]`→`_`, timestamp format `YYYYMMDD-HHmmss`, atomic-rename happy + write-fail + cleanup paths, command-block formatter (null exit code → `[exit ?]`).
 
-- [ ] 4_2 Implement `anywhereTerminal.exportBuffer` command
+- [x] 4_2 Implement `anywhereTerminal.exportBuffer` command
   - **Deps**: 3_3, 4_1
   - **Refs**: `specs/terminal-session-export/spec.md` Requirement "Export Buffer command" · `design.md` D7, D8
   - **Scope**: `src/commands/exportBufferCommand.ts` (new)
@@ -129,7 +129,7 @@
     3. Detect chosen filter from returned URI extension (`.ansi` → preserve; else strip).
     4. Wrap the dump in try/catch — on `ScrollbackDumpTimeoutError`/`ScrollbackDumpAbortedError` show error toast with cause.
 
-- [ ] 4_3 Implement `anywhereTerminal.exportLastCommand` command
+- [x] 4_3 Implement `anywhereTerminal.exportLastCommand` command
   - **Deps**: 2_3, 4_1
   - **Refs**: `specs/terminal-session-export/spec.md` Requirement "Export Last Command Output command"
   - **Scope**: `src/commands/exportLastCommandCommand.ts` (new)
@@ -140,7 +140,7 @@
     1. Implement using helpers from 4_1.
     2. `Help` button uses `vscode.env.openExternal` with `README.md#shell-integration` GitHub URL (or `vscode.commands.executeCommand("markdown.showPreview", ...)` to the bundled README — pick whichever works locally; document choice in the commit).
 
-- [ ] 4_4 Implement `anywhereTerminal.exportCommand` picker
+- [x] 4_4 Implement `anywhereTerminal.exportCommand` picker
   - **Deps**: 2_3, 4_1
   - **Refs**: `specs/terminal-session-export/spec.md` Requirement "Export Command picker"
   - **Scope**: `src/commands/exportCommandPickerCommand.ts` (new)
@@ -152,7 +152,7 @@
     2. Relative-time format: use a small inline helper (`s/m/h/d` ago) — avoid adding `date-fns` for one usage.
     3. Quick-pick `placeholder`: `"Select a command to export"`.
 
-- [ ] 4_5 Register the three commands in `package.json` + `extension.ts`
+- [x] 4_5 Register the three commands in `package.json` + `extension.ts`
   - **Deps**: 4_2, 4_3, 4_4
   - **Refs**: `specs/terminal-session-export/spec.md` (all three command requirements)
   - **Scope**: `package.json`, `src/extension.ts`
@@ -165,7 +165,7 @@
 
 ## 5. Docs + smoke-test matrix
 
-- [ ] 5_1 README section "Export Terminal Session" with shell-integration setup + privacy note
+- [x] 5_1 README section "Export Terminal Session" with shell-integration setup + privacy note
   - **Deps**: 4_5
   - **Refs**: `proposal.md` In scope · `design.md` D3 · `design.md` D6
   - **Scope**: `README.md`
@@ -175,7 +175,7 @@
   - **Plan**:
     1. Write the section under existing structure; cross-link from the features overview; include the privacy line verbatim.
 
-- [ ] 5_2 Smoke-test matrix execution and result documentation
+- [x] 5_2 Smoke-test matrix execution and result documentation
   - **Deps**: 4_5
   - **Refs**: `design.md` Risk Map row "`ShellIntegrationInjector`" · `specs/shell-integration-tracker/spec.md` Requirement "Inject shell-integration scripts at PTY spawn"
   - **Scope**: `docs/qa/export-session-smoke.md` (new — manual test log)

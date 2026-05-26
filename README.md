@@ -82,6 +82,41 @@ Persistence is workspace-scoped (when a workspace folder is open): snapshots fro
 
 > Process revive (the actual shell process surviving a full restart) is out of scope for this release. A future opt-in path may integrate `tmux` / `screen` / `zellij` for users who need that.
 
+## Export terminal session
+
+Three Command Palette entries write the active terminal's content to a file:
+
+| Command | What it writes |
+|---|---|
+| **AnyWhere Terminal: Export Buffer to File…** | Full scrollback of the focused terminal. Always available regardless of shell integration. |
+| **AnyWhere Terminal: Export Last Command Output…** | The most-recently-completed command (`$ <command>` + exit code + cwd + output). Requires shell integration. |
+| **AnyWhere Terminal: Export Command…** | Pick a tracked command from a quickpick (most-recent-first), then save. Requires shell integration. |
+
+The save dialog offers two formats:
+
+- **Text (ANSI stripped)** (default) — readable in any editor; ANSI escape codes removed via `strip-ansi`.
+- **Raw (ANSI preserved)** — keeps color/cursor escapes so the file replays correctly in `cat` / `less -R`.
+
+> **Exports include the literal command line, current working directory, exit code, and raw output of the terminal — review files before sharing.** Anything visible on screen ends up in the export, including credentials echoed at a prompt or secrets pasted into the shell.
+
+### Shell integration
+
+Per-command export ("Export Last Command Output" and "Export Command") relies on the same **OSC 633** shell-integration sequences that VS Code's built-in terminal uses. AnyWhere Terminal auto-injects VS Code's MIT-licensed scripts at PTY spawn for these shells:
+
+| Shell | macOS | Linux | Windows |
+|---|---|---|---|
+| bash | ✓ | ✓ | (Git Bash supported through the same injection) |
+| zsh | ✓ | ✓ | — |
+| fish | ✓ | ✓ | — |
+| pwsh / pwsh.exe | ✓ | ✓ | ✓ |
+| sh / dash / cmd / nushell / custom | not supported — export buffer still works | | |
+
+If you launch the shell with `bash --noprofile --norc` or `pwsh -NoProfile`, the injection is skipped — the per-command commands then surface an info toast pointing here, and you can still use "Export Buffer to File…".
+
+**Privacy**: the per-session UUID nonce that the parser uses to validate command-line metadata is set as the `VSCODE_NONCE` environment variable on the spawned shell only.
+
+After a window reload, tracked commands reset to empty — the scrollback is restored from snapshot but the command list is not persisted. You'll see the same "no tracked commands yet" toast as if shell integration were off; just run one command and the list rebuilds.
+
 ## Requirements
 
 - VS Code 1.105+ or Cursor 3.2.21+

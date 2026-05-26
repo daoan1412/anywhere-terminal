@@ -324,6 +324,18 @@
         "command": "anywhereTerminal.setFileTreePosition",
         "title": "AnyWhere Terminal: Move File Tree…",
         "icon": "$(layout)"
+      },
+      {
+        "command": "anywhereTerminal.exportBuffer",
+        "title": "AnyWhere Terminal: Export Buffer to File…"
+      },
+      {
+        "command": "anywhereTerminal.exportLastCommand",
+        "title": "AnyWhere Terminal: Export Last Command Output…"
+      },
+      {
+        "command": "anywhereTerminal.exportCommand",
+        "title": "AnyWhere Terminal: Export Command…"
       }
     ],
     "menus": {

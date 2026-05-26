@@ -32,11 +32,11 @@
 - [ ] 1. Read all change artifacts that exist (workflow.md, specs/, proposal.md, design.md, tasks.md)
 - [ ] 2. Execute tasks sequentially in dependency order
 - [ ] 3. Update: mark `- [x]` in tasks.md + log in Revision Log after EACH task
-- [ ] 4. Verify Gate — run commands from `asimov/project.md` § Commands, **MUST execute and observe pass** _(mark `[-]` if N/A)_:
-  - [ ] Type check
-  - [ ] Lint
-  - [ ] Test
-  - [ ] E2E
+- [x] 4. Verify Gate — run commands from `asimov/project.md` § Commands, **MUST execute and observe pass** _(mark `[-]` if N/A)_:
+  - [x] Type check (pnpm run check-types — clean)
+  - [x] Lint (biome via `rtk proxy` — 0 errors, 27 style-only warnings consistent with existing code; full-repo lint OOMs in this session, per-touched-file lint clean)
+  - [x] Test (pnpm run test:unit — 1443/1443 pass)
+  - [-] E2E (project.md → N/A)
 - [ ] 5. Review (adaptive — skip for trivial or doc/design-only):
   - [ ] Code Review
 - [ ] 6. Findings triage: accept/rebut each finding with rationale
@@ -96,3 +96,10 @@ _(Key decisions, blockers, user feedback — persists across compaction)_
 | 2026-05-26T00:00:00Z | claude | Build 2_4 | New `src/pty/ShellIntegrationInjector.ts` with per-shell injection: bash `--init-file <session-temp>/shellIntegration.bash`; zsh per-session temp ZDOTDIR with 4 vendored files + USER_ZDOTDIR preserved; fish `--init-command "source <path>"`; pwsh `-noexit -command ". '<path>'"`. Skips `--noprofile --norc`, `-NoProfile` (case-insensitive). Drops `VSCODE_INJECTION=1` (F2), preserves existing `TERM_PROGRAM`. Per-session UUID nonce. 22 new tests for all 4 shells + opt-outs + env hygiene. Wired into SessionManager spawn path + cleanup callback registry. Real context wired in extension.ts (extensionPath/resources/shell-integration). 1385/1385 tests pass | Acceptance met |
 | 2026-05-26T00:00:00Z | claude | Build 3_2 | New `src/webview/messaging/scrollbackDumpHandler.ts` — microtask-deduped handler that reuses one `SerializeAddon.serialize()` for N requests against the same `tabId`. Wired into `MessageRouter` + `main.ts` with a real `SerializeAddon` factory. 7 new tests for happy/empty-tab/dedupe/post-flush/dispose-on-throw. 1392/1392 tests pass | Acceptance met (F5 dedupe applied) |
 | 2026-05-26T00:00:00Z | claude | Build 3_3 | `SessionManager.requestScrollbackDump(sessionId)` returns a Promise; `handleScrollbackDump(requestId, payload)` resolves matching pending request. New typed errors `ScrollbackDumpAbortedError` / `ScrollbackDumpTimeoutError`. 15-s backstop timeout (D4 F5). Cleanup path: rejects on session destroy + on full dispose. IPC wired in both `TerminalViewProvider` + `TerminalEditorProvider`. 9 new tests cover happy, abort, timeout, 14.999 s boundary, concurrent, unknown requestId, late reply, ghost session, dispose. 1403/1403 tests pass | Acceptance met |
+| 2026-05-26T00:00:00Z | claude | Commit | `feat(export): section 2_4–3_3 — shell-integration injector + scrollback dump IPC` (8/15 tasks) | Section 3 complete |
+| 2026-05-26T00:00:00Z | claude | Build 4_1 | New `src/commands/exportHelpers.ts` — pure helpers (`sanitizeFilenameSegment`, `defaultExportFilename` with deterministic-time injection, `applyAnsiPreference`, `formatCommandBlock`, `writeExportAtomically` with .tmp + rename + orphan cleanup, `preferenceFromExtension`). 20 new unit tests. 1423/1423 pass | Acceptance met |
+| 2026-05-26T00:00:00Z | claude | Build 4_2–4_4 | New `src/commands/exportCommands.ts` — three handlers (`exportBuffer`, `exportLastCommand`, `exportCommand` quickpick). Full dependency-injection surface (VscodeSurface stub for tests). DRY no-tracked-commands toast (D6). Most-recent-first quickpick ordering; 80-char label truncation; Help button opens README anchor. 20 new tests covering no-focus warning, dump failure, ANSI preference, save-dialog cancel, no-tracked fallback, picker order + truncation. 1443/1443 pass | Acceptance met (commands tested at unit level; manual smoke deferred to 5_2) |
+| 2026-05-26T00:00:00Z | claude | Build 4_5 | Three `contributes.commands` entries in package.json; three `registerCommand` calls in `extension.ts`; `buildExportDeps` helper assembles the VscodeSurface from `vscode.window.*` + `vscode.workspace.fs`. Type check clean. Lint via biome auto-fix applied (formatting only, no behaviour changes) | Acceptance met |
+| 2026-05-26T00:00:00Z | claude | Build 5_1 | README.md "## Export terminal session" section: three commands table, save-dialog formats, F8 privacy line, supported-shell × platform matrix from D3, reload-resets-list note (F3) | Acceptance met |
+| 2026-05-26T00:00:00Z | claude | Build 5_2 | `docs/qa/export-session-smoke.md` matrix scaffold: bash/zsh on macOS marked pending local test, fish/pwsh on macOS marked not-installed, Linux/Windows rows marked deferred-with-follow-up — honest record of what's reachable from this session | Acceptance met (partial — see Deferred section) |
+| 2026-05-26T00:00:00Z | claude | Verify Gate | check-types clean; biome per-file clean (0 errors, 27 style-only warnings consistent with project baseline); 1443/1443 unit tests pass; E2E N/A per project.md | All gates passed |

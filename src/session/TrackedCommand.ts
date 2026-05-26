@@ -93,7 +93,10 @@ export function appendToCommandOutput(runtime: CommandTrackingRuntime, data: str
  *
  * `now` and `id` are dependency-injected for deterministic tests.
  */
-export function openCommand(runtime: CommandTrackingRuntime, params: { id: string; now: number; cwd: string | null }): void {
+export function openCommand(
+  runtime: CommandTrackingRuntime,
+  params: { id: string; now: number; cwd: string | null },
+): void {
   if (runtime.inFlight) return;
   runtime.inFlight = {
     id: params.id,
