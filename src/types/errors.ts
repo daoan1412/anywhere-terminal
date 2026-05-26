@@ -8,6 +8,8 @@ export enum ErrorCode {
   PtyLoadFailed = "PTY_LOAD_FAILED",
   ShellNotFound = "SHELL_NOT_FOUND",
   BufferOverflow = "BUFFER_OVERFLOW",
+  ScrollbackDumpAborted = "SCROLLBACK_DUMP_ABORTED",
+  ScrollbackDumpTimeout = "SCROLLBACK_DUMP_TIMEOUT",
 }
 
 // ─── Base Error ─────────────────────────────────────────────────────
@@ -44,5 +46,35 @@ export class ShellNotFoundError extends AnyWhereTerminalError {
   ) {
     super(`No valid shell found. Tried: ${attemptedShells.join(", ")}`, ErrorCode.ShellNotFound);
     this.name = "ShellNotFoundError";
+  }
+}
+
+/**
+ * A pending `SessionManager.requestScrollbackDump()` was aborted because the
+ * owning session was disposed before the webview replied. See:
+ * asimov/changes/export-terminal-session/design.md D4.
+ */
+export class ScrollbackDumpAbortedError extends AnyWhereTerminalError {
+  constructor(
+    public readonly sessionId: string,
+    public readonly requestId: string,
+  ) {
+    super(`Scrollback dump aborted (session ${sessionId} disposed)`, ErrorCode.ScrollbackDumpAborted);
+    this.name = "ScrollbackDumpAbortedError";
+  }
+}
+
+/**
+ * A pending `SessionManager.requestScrollbackDump()` did not receive a webview
+ * reply within the 15 s backstop. See:
+ * asimov/changes/export-terminal-session/design.md D4.
+ */
+export class ScrollbackDumpTimeoutError extends AnyWhereTerminalError {
+  constructor(
+    public readonly sessionId: string,
+    public readonly requestId: string,
+  ) {
+    super(`Scrollback dump timed out (session ${sessionId}, request ${requestId})`, ErrorCode.ScrollbackDumpTimeout);
+    this.name = "ScrollbackDumpTimeoutError";
   }
 }

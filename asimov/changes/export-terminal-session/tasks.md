@@ -51,7 +51,7 @@
     5. Run eviction after every D-marker close (200 / 1 MB rule).
     6. Expose `getTrackedCommands` + `getLastCompletedCommand` on `SessionManager`; Vitest covers boundary at 200/201, 1 MB ± 1 byte, in-flight-skipped.
 
-- [ ] 2_4 Shell-integration injector
+- [x] 2_4 Shell-integration injector
   - **Deps**: 2_1, 2_3
   - **Refs**: `specs/shell-integration-tracker/spec.md` Requirement "Inject shell-integration scripts at PTY spawn" · `design.md` D3
   - **Scope**: `src/pty/ShellIntegrationInjector.ts` (new), `src/pty/ShellIntegrationInjector.test.ts` (new), `src/pty/PtyManager.ts` (or whichever module currently calls `node-pty.spawn`)
@@ -77,7 +77,7 @@
   - **Plan**:
     1. Add the two interfaces verbatim from `design.md` D4 to the message-types union.
 
-- [ ] 3_2 Webview-side handler using SerializeAddon
+- [x] 3_2 Webview-side handler using SerializeAddon
   - **Deps**: 3_1
   - **Refs**: `specs/webview-scrollback-dump/spec.md` Requirement "Request/response IPC for full xterm scrollback"
   - **Scope**: `src/webview/messages/scrollbackDumpHandler.ts` (new), wiring file (`src/webview/messages/index.ts` or the existing dispatch site found by finder), `src/webview/terminal/TerminalFactory.ts` (only if needs reference to existing SerializeAddon import — read first; modify only if necessary)
@@ -89,7 +89,7 @@
     2. Register it in the webview dispatch table (find existing pattern, follow it).
     3. Unit tests with a stubbed Terminal that exposes the necessary buffer/options/SerializeAddon surface; cover the unknown-tab scenario per spec.
 
-- [ ] 3_3 Extension-side `requestScrollbackDump()` with dispose + timeout safety
+- [x] 3_3 Extension-side `requestScrollbackDump()` with dispose + timeout safety
   - **Deps**: 3_1
   - **Refs**: `specs/webview-scrollback-dump/spec.md` Requirement "Extension-side promise wrapper with session-dispose safety" · `design.md` D4
   - **Scope**: `src/session/SessionManager.ts`, `src/session/SessionManager.scrollbackDump.test.ts` (new), `src/session/errors.ts` (or wherever existing session errors live — add `ScrollbackDumpAbortedError`, `ScrollbackDumpTimeoutError`)

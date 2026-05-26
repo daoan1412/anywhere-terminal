@@ -21,6 +21,7 @@ import type {
   InsertPathEffectMessage,
   OutputMessage,
   ReadDirectoryResponseMessage,
+  RequestScrollbackDumpMessage,
   RestoreFromSnapshotMessage,
   RestoreMessage,
   RevealInFileTreeMessage,
@@ -82,6 +83,8 @@ export interface MessageHandlers {
   // ── Session restore (restore-terminal-sessions) ──
   onSetPanelId(msg: SetPanelIdMessage): void;
   onRestoreFromSnapshot(msg: RestoreFromSnapshotMessage): void;
+  // ── Export terminal session (export-terminal-session) ──
+  onRequestScrollbackDump(msg: RequestScrollbackDumpMessage): void;
 }
 
 // ─── Factory ────────────────────────────────────────────────────────
@@ -188,6 +191,9 @@ export function createMessageRouter(handlers: MessageHandlers): (msg: ExtensionT
         break;
       case "restoreFromSnapshot":
         handlers.onRestoreFromSnapshot(msg);
+        break;
+      case "requestScrollbackDump":
+        handlers.onRequestScrollbackDump(msg);
         break;
       case "init":
         // init is handled directly by main.ts — not routed

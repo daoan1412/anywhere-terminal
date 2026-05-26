@@ -448,6 +448,21 @@ export class TerminalEditorProvider {
           }
           break;
 
+        case "scrollbackDump":
+          if (
+            typeof message.requestId === "string" &&
+            typeof message.data === "string" &&
+            typeof message.lineCount === "number" &&
+            typeof message.truncated === "boolean"
+          ) {
+            this.sessionManager.handleScrollbackDump(message.requestId, {
+              data: message.data,
+              lineCount: message.lineCount,
+              truncated: message.truncated,
+            });
+          }
+          break;
+
         case "createTab": {
           const createSettings = readTerminalSettings();
           const newSessionId = this.sessionManager.createSession(this._viewId, this._panel.webview, {
@@ -627,9 +642,7 @@ export class TerminalEditorProvider {
           ...this.fileTreeHost.initPayload(),
         });
         if (!initDelivered) {
-          console.error(
-            "[AnyWhere Terminal] init delivery failed during editor reload — skipping scrollback restore.",
-          );
+          console.error("[AnyWhere Terminal] init delivery failed during editor reload — skipping scrollback restore.");
           this.sessionManager.resumeOutputForView(this._viewId);
           return;
         }

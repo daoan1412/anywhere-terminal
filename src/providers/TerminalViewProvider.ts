@@ -354,6 +354,21 @@ export class TerminalViewProvider implements vscode.WebviewViewProvider {
           }
           break;
 
+        case "scrollbackDump":
+          if (
+            typeof message.requestId === "string" &&
+            typeof message.data === "string" &&
+            typeof message.lineCount === "number" &&
+            typeof message.truncated === "boolean"
+          ) {
+            this.sessionManager.handleScrollbackDump(message.requestId, {
+              data: message.data,
+              lineCount: message.lineCount,
+              truncated: message.truncated,
+            });
+          }
+          break;
+
         case "createTab": {
           const viewId = this.getViewId();
           const settings = readTerminalSettings();
@@ -609,9 +624,7 @@ export class TerminalViewProvider implements vscode.WebviewViewProvider {
           ...this.fileTreeHost.initPayload(),
         });
         if (!initDelivered) {
-          console.error(
-            "[AnyWhere Terminal] init delivery failed during reload — skipping restore posts.",
-          );
+          console.error("[AnyWhere Terminal] init delivery failed during reload — skipping restore posts.");
           this.sessionManager.resumeOutputForView(viewId);
           return;
         }

@@ -1481,3 +1481,172 @@ describe("SessionManager.getTabsForView: customName field", () => {
     sm.dispose();
   });
 });
+
+// ─── Scrollback Dump (export-terminal-session, design.md D4) ────────
+
+describe("SessionManager.requestScrollbackDump", () => {
+  it("posts requestScrollbackDump to the webview and resolves on matching reply", async () => {
+    const sm = new SessionManager();
+    const webview = createMockWebview();
+    const sessionId = sm.createSession("sidebar", webview);
+
+    const dumpPromise = sm.requestScrollbackDump(sessionId);
+    const sent = webview.messages.find(
+      (m): m is { type: "requestScrollbackDump"; tabId: string; requestId: string } =>
+        typeof m === "object" && m !== null && (m as { type?: string }).type === "requestScrollbackDump",
+    );
+    expect(sent).toBeTruthy();
+    expect(sent!.tabId).toBe(sessionId);
+    expect(sent!.requestId).toBeTruthy();
+
+    sm.handleScrollbackDump(sent!.requestId, {
+      data: "hello world",
+      lineCount: 42,
+      truncated: false,
+    });
+
+    const result = await dumpPromise;
+    expect(result).toEqual({ data: "hello world", lineCount: 42, truncated: false });
+    sm.dispose();
+  });
+
+  it("rejects with ScrollbackDumpAbortedError when the session is destroyed mid-flight", async () => {
+    const sm = new SessionManager();
+    const webview = createMockWebview();
+    const sessionId = sm.createSession("sidebar", webview);
+
+    const dumpPromise = sm.requestScrollbackDump(sessionId);
+    const guard = dumpPromise.catch((err: unknown) => err);
+    // destroySession queues onto the operationQueue and uses setTimeout-based
+    // grace windows internally. Run any pending timers to drain.
+    const destroyP = sm.destroySession(sessionId);
+    await vi.runAllTimersAsync();
+    await destroyP;
+
+    const err = (await guard) as Error;
+    expect(err.constructor.name).toBe("ScrollbackDumpAbortedError");
+    sm.dispose();
+  });
+
+  it("rejects with ScrollbackDumpTimeoutError after 15 s", async () => {
+    const sm = new SessionManager();
+    const webview = createMockWebview();
+    const sessionId = sm.createSession("sidebar", webview);
+
+    const dumpPromise = sm.requestScrollbackDump(sessionId);
+    const guard = dumpPromise.catch((err: unknown) => err);
+    await vi.advanceTimersByTimeAsync(15_001);
+
+    const err = (await guard) as Error;
+    expect(err.constructor.name).toBe("ScrollbackDumpTimeoutError");
+    sm.dispose();
+  });
+
+  it("does NOT time out before 15 s (boundary)", async () => {
+    const sm = new SessionManager();
+    const webview = createMockWebview();
+    const sessionId = sm.createSession("sidebar", webview);
+
+    const dumpPromise = sm.requestScrollbackDump(sessionId);
+    let settled = false;
+    dumpPromise.then(
+      () => {
+        settled = true;
+      },
+      () => {
+        settled = true;
+      },
+    );
+    await vi.advanceTimersByTimeAsync(14_999);
+    await Promise.resolve();
+    expect(settled).toBe(false);
+
+    const sent = webview.messages.find(
+      (m): m is { type: "requestScrollbackDump"; tabId: string; requestId: string } =>
+        typeof m === "object" && m !== null && (m as { type?: string }).type === "requestScrollbackDump",
+    )!;
+    sm.handleScrollbackDump(sent.requestId, { data: "x", lineCount: 1, truncated: false });
+    const result = await dumpPromise;
+    expect(result.data).toBe("x");
+    sm.dispose();
+  });
+
+  it("concurrent requests resolve independently with distinct requestIds", async () => {
+    const sm = new SessionManager();
+    const webview = createMockWebview();
+    const sessionId = sm.createSession("sidebar", webview);
+
+    const a = sm.requestScrollbackDump(sessionId);
+    const b = sm.requestScrollbackDump(sessionId);
+
+    const requests = webview.messages.filter(
+      (m): m is { type: "requestScrollbackDump"; tabId: string; requestId: string } =>
+        typeof m === "object" && m !== null && (m as { type?: string }).type === "requestScrollbackDump",
+    );
+    expect(requests).toHaveLength(2);
+    expect(requests[0].requestId).not.toBe(requests[1].requestId);
+
+    sm.handleScrollbackDump(requests[1].requestId, { data: "from-b", lineCount: 2, truncated: false });
+    sm.handleScrollbackDump(requests[0].requestId, { data: "from-a", lineCount: 1, truncated: false });
+
+    const [resA, resB] = await Promise.all([a, b]);
+    expect(resA.data).toBe("from-a");
+    expect(resB.data).toBe("from-b");
+    sm.dispose();
+  });
+
+  it("handleScrollbackDump with unknown requestId is a silent no-op", () => {
+    const sm = new SessionManager();
+    expect(() =>
+      sm.handleScrollbackDump("never-requested", { data: "", lineCount: 0, truncated: false }),
+    ).not.toThrow();
+    sm.dispose();
+  });
+
+  it("late reply after timeout is silently dropped (no double-settle)", async () => {
+    const sm = new SessionManager();
+    const webview = createMockWebview();
+    const sessionId = sm.createSession("sidebar", webview);
+
+    const dumpPromise = sm.requestScrollbackDump(sessionId);
+    const guard = dumpPromise.catch((err: unknown) => err);
+    await vi.advanceTimersByTimeAsync(15_001);
+    const err = (await guard) as Error;
+    expect(err.constructor.name).toBe("ScrollbackDumpTimeoutError");
+
+    const sent = webview.messages.find(
+      (m): m is { type: "requestScrollbackDump"; tabId: string; requestId: string } =>
+        typeof m === "object" && m !== null && (m as { type?: string }).type === "requestScrollbackDump",
+    )!;
+    expect(() =>
+      sm.handleScrollbackDump(sent.requestId, { data: "late", lineCount: 1, truncated: false }),
+    ).not.toThrow();
+    sm.dispose();
+  });
+
+  it("requestScrollbackDump on a nonexistent session rejects synchronously with Aborted", async () => {
+    const sm = new SessionManager();
+    await expect(sm.requestScrollbackDump("ghost-session")).rejects.toMatchObject({
+      name: "ScrollbackDumpAbortedError",
+    });
+    sm.dispose();
+  });
+
+  it("dispose() rejects all pending dumps", async () => {
+    const sm = new SessionManager();
+    const webview = createMockWebview();
+    const sid1 = sm.createSession("sidebar", webview);
+    const sid2 = sm.createSession("panel", webview);
+
+    const a = sm.requestScrollbackDump(sid1);
+    const b = sm.requestScrollbackDump(sid2);
+    const guardA = a.catch((err: unknown) => err);
+    const guardB = b.catch((err: unknown) => err);
+
+    sm.dispose();
+
+    const [errA, errB] = (await Promise.all([guardA, guardB])) as Error[];
+    expect(errA.constructor.name).toBe("ScrollbackDumpAbortedError");
+    expect(errB.constructor.name).toBe("ScrollbackDumpAbortedError");
+  });
+});

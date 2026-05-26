@@ -1,6 +1,13 @@
 // src/types/errors.test.ts — Unit tests for custom error classes
 import { describe, expect, it } from "vitest";
-import { AnyWhereTerminalError, ErrorCode, PtyLoadError, ShellNotFoundError } from "./errors";
+import {
+  AnyWhereTerminalError,
+  ErrorCode,
+  PtyLoadError,
+  ScrollbackDumpAbortedError,
+  ScrollbackDumpTimeoutError,
+  ShellNotFoundError,
+} from "./errors";
 
 // ─── ErrorCode enum ─────────────────────────────────────────────────
 
@@ -9,11 +16,37 @@ describe("ErrorCode", () => {
     expect(ErrorCode.PtyLoadFailed).toBe("PTY_LOAD_FAILED");
     expect(ErrorCode.ShellNotFound).toBe("SHELL_NOT_FOUND");
     expect(ErrorCode.BufferOverflow).toBe("BUFFER_OVERFLOW");
+    expect(ErrorCode.ScrollbackDumpAborted).toBe("SCROLLBACK_DUMP_ABORTED");
+    expect(ErrorCode.ScrollbackDumpTimeout).toBe("SCROLLBACK_DUMP_TIMEOUT");
   });
 
-  it("has 3 members", () => {
+  it("has 5 members", () => {
     const values = Object.values(ErrorCode);
-    expect(values).toHaveLength(3);
+    expect(values).toHaveLength(5);
+  });
+});
+
+// ─── ScrollbackDump errors (export-terminal-session) ────────────────
+
+describe("ScrollbackDumpAbortedError", () => {
+  it("has the right shape", () => {
+    const err = new ScrollbackDumpAbortedError("sess-1", "req-1");
+    expect(err.code).toBe(ErrorCode.ScrollbackDumpAborted);
+    expect(err.name).toBe("ScrollbackDumpAbortedError");
+    expect(err.sessionId).toBe("sess-1");
+    expect(err.requestId).toBe("req-1");
+    expect(err).toBeInstanceOf(AnyWhereTerminalError);
+  });
+});
+
+describe("ScrollbackDumpTimeoutError", () => {
+  it("has the right shape", () => {
+    const err = new ScrollbackDumpTimeoutError("sess-1", "req-1");
+    expect(err.code).toBe(ErrorCode.ScrollbackDumpTimeout);
+    expect(err.name).toBe("ScrollbackDumpTimeoutError");
+    expect(err.sessionId).toBe("sess-1");
+    expect(err.requestId).toBe("req-1");
+    expect(err).toBeInstanceOf(AnyWhereTerminalError);
   });
 });
 

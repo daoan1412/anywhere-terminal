@@ -25,6 +25,8 @@ import { FlowControl } from "./flow/FlowControl";
 import type { HoverPreviewThemeKind } from "./links/HoverPreviewController";
 import { preloadSyntaxHighlighter } from "./links/syntaxRenderer";
 import { createMessageRouter } from "./messaging/MessageRouter";
+import { createScrollbackDumpHandler } from "./messaging/scrollbackDumpHandler";
+import { SerializeAddon } from "@xterm/addon-serialize";
 import { ResizeCoordinator } from "./resize/ResizeCoordinator";
 import { SplitTreeRenderer } from "./split/SplitTreeRenderer";
 import { WebviewStateStore } from "./state/WebviewStateStore";
@@ -248,6 +250,14 @@ function removeTerminal(id: string): void {
   updateTabBar();
 }
 
+// ─── Scrollback Dump (export-terminal-session) ───────────────────────
+
+const handleScrollbackDump = createScrollbackDumpHandler({
+  getTerminal: (tabId) => store.terminals.get(tabId)?.terminal,
+  postMessage: (msg) => vscode.postMessage(msg),
+  createSerializeAddon: () => new SerializeAddon(),
+});
+
 // ─── Message Router ─────────────────────────────────────────────────
 
 const routeMessage = createMessageRouter({
@@ -425,6 +435,9 @@ const routeMessage = createMessageRouter({
     // `state` arg on next reload. See: restore-terminal-sessions design.md D2.
     store.updateState({ panelId: msg.panelId });
     vscode.postMessage({ type: "persistPanelId", panelId: msg.panelId });
+  },
+  onRequestScrollbackDump(msg) {
+    handleScrollbackDump(msg);
   },
   onRestoreFromSnapshot(msg) {
     // Replay a persisted snapshot into an xterm instance. The typical sequence

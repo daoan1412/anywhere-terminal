@@ -58,6 +58,7 @@ describe("Integration: ack routing through FlowControl + MessageRouter", () => {
       onFsRehydrate: vi.fn(),
       onSetPanelId: vi.fn(),
       onRestoreFromSnapshot: vi.fn(),
+      onRequestScrollbackDump: vi.fn(),
     };
 
     const dispatch = createMessageRouter(handlers);

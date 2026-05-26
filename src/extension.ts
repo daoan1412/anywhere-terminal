@@ -1,4 +1,7 @@
 import * as fs from "node:fs";
+import * as os from "node:os";
+import * as crypto from "node:crypto";
+import * as path from "node:path";
 import * as vscode from "vscode";
 import { createWatcherPool } from "./providers/fsWatcherPool";
 import { createGitDecorationProvider } from "./providers/gitDecorationProvider";
@@ -50,11 +53,27 @@ export function activate(context: vscode.ExtensionContext) {
   const restoreStorageUri = context.storageUri ?? context.globalStorageUri;
   const sessionStorage = new SessionStorage(context.workspaceState, restoreStorageUri, fs);
 
+  // Shell-integration injector context — wires the vendored MIT scripts into
+  // every freshly-spawned PTY. See:
+  //   asimov/changes/export-terminal-session/design.md D3
+  //   resources/shell-integration/  (vendored from microsoft/vscode@1.95.3)
+  const shellIntegrationContext = {
+    scriptsDir: path.join(context.extensionPath, "resources", "shell-integration"),
+    tmpRoot: os.tmpdir(),
+    generateId: () => crypto.randomUUID(),
+    fs: {
+      mkdirSync: fs.mkdirSync as (target: string, options: { recursive?: boolean; mode?: number }) => void,
+      copyFileSync: fs.copyFileSync,
+      rmSync: fs.rmSync,
+    },
+  };
+
   // Create shared SessionManager (singleton). workspaceState backs the per-workspace
   // custom-tab-name persistence (anywhereTerminal.tabCustomNames); see design.md D3 of add-tab-rename.
   const sessionManager = new SessionManager(context.workspaceState, {
     restoreEnabled,
     storage: sessionStorage,
+    shellIntegrationContext,
   });
 
   // Hydrate restore state BEFORE registering any view provider so the
@@ -509,9 +528,7 @@ export function activate(context: vscode.ExtensionContext) {
         // leak snapshots across unrelated no-folder windows. See round-2 [W2].
         const want = readSessionRestoreEnabled();
         if (want && !hasWorkspaceStorage) {
-          console.warn(
-            "[AnyWhere Terminal] sessionRestore toggle ignored — no workspace folder open.",
-          );
+          console.warn("[AnyWhere Terminal] sessionRestore toggle ignored — no workspace folder open.");
         }
         sessionManager.setRestoreEnabled(hasWorkspaceStorage && want);
       }

@@ -13,6 +13,7 @@
 //      asimov/changes/restore-terminal-sessions/design.md (D1-D13).
 
 import * as crypto from "node:crypto";
+import { ScrollbackDumpAbortedError, ScrollbackDumpTimeoutError } from "../types/errors";
 import * as PtyManager from "../pty/PtyManager";
 import { PtySession } from "../pty/PtySession";
 import { queryProcessCwd } from "../pty/processCwd";
@@ -28,6 +29,7 @@ import type {
 } from "./SessionSnapshot";
 import type { SessionStorage } from "./SessionStorage";
 import { defaultHeadlessFactory, defaultSerializeAddonFactory, SnapshotPersistence } from "./SnapshotPersistence";
+import { injectShellIntegration, type InjectionContext } from "../pty/ShellIntegrationInjector";
 import type { ShellIntegrationEvent } from "../pty/ShellIntegrationEvents";
 import {
   appendToCommandOutput,
@@ -85,6 +87,14 @@ export interface SessionManagerOptions {
   serializeAddonFactory?: SerializeAddonFactory;
   /** Persistence backend for cross-restart snapshots. Required when restoreEnabled === true. */
   storage?: SessionStorage;
+  /**
+   * Shell-integration injection context. When provided, recognised shells
+   * (bash/zsh/fish/pwsh) get their args+env mutated at spawn time so
+   * OSC 633 markers stream into the session's tracked-command runtime.
+   * Omit to disable integration (e.g. in unit tests).
+   * See: asimov/changes/export-terminal-session/design.md D3.
+   */
+  shellIntegrationContext?: InjectionContext;
 }
 
 // ─── SessionManager ─────────────────────────────────────────────────
@@ -124,6 +134,31 @@ export class SessionManager {
   /** Default grace window applied when scheduleDestroyForView is called without an explicit delay. */
   private readonly defaultGracePeriodMs: number;
 
+  /** Optional shell-integration injector context (see SessionManagerOptions). */
+  private readonly shellIntegrationCtx: InjectionContext | undefined;
+
+  /** Per-session cleanup callbacks from the shell-integration injector. */
+  private readonly shellIntegrationCleanups = new Map<string, () => void>();
+
+  /**
+   * In-flight scrollback-dump requests, keyed by `requestId`. Resolved when
+   * the webview replies with a matching `ScrollbackDumpMessage`; rejected on
+   * session dispose (Aborted) or 15 s backstop timeout (Timeout).
+   * See: asimov/changes/export-terminal-session/design.md D4.
+   */
+  private readonly pendingDumps = new Map<
+    string,
+    {
+      sessionId: string;
+      resolve: (value: { data: string; lineCount: number; truncated: boolean }) => void;
+      reject: (err: Error) => void;
+      timer: ReturnType<typeof setTimeout>;
+    }
+  >();
+
+  /** 15-second backstop timeout for `requestScrollbackDump`. See D4. */
+  private static readonly SCROLLBACK_DUMP_TIMEOUT_MS = 15_000;
+
   /** Per-number custom-name persistence (workspace-scoped). */
   private readonly customNames: CustomNameRegistry;
 
@@ -147,6 +182,7 @@ export class SessionManager {
     this.customNames = new CustomNameRegistry(customNameStorage);
     this.storage = options.storage ?? null;
     this.defaultGracePeriodMs = options.gracePeriodMs ?? DEFAULT_GRACE_DESTROY_MS;
+    this.shellIntegrationCtx = options.shellIntegrationContext;
     this.editorPanels = new EditorPanelRegistry((record) => {
       // Only write through to storage when restore is enabled; otherwise we
       // produce churn against `workspaceState` for no benefit.
@@ -368,8 +404,24 @@ export class SessionManager {
     const pty = new PtySession(id);
     if (!restoringExited) {
       const nodePty = PtyManager.loadNodePty();
-      const env = PtyManager.buildEnvironment();
-      pty.spawn(nodePty, resolvedShell, resolvedArgs, { cwd, env });
+      const baseEnv = PtyManager.buildEnvironment();
+      // Try to inject shell integration. Returns null when the shell is
+      // unrecognised (sh, dash, nu, custom) OR the user passed opt-out flags
+      // (--noprofile --norc / -NoProfile); the spawn then proceeds with the
+      // original args/env, and per-command export commands fall back to the
+      // no-tracked-commands toast (design D6).
+      let spawnArgs = resolvedArgs;
+      let spawnEnv = baseEnv;
+      if (this.shellIntegrationCtx) {
+        const injection = injectShellIntegration(resolvedShell, resolvedArgs, baseEnv, this.shellIntegrationCtx);
+        if (injection) {
+          spawnArgs = injection.args;
+          spawnEnv = injection.env;
+          pty.setShellIntegrationNonce(injection.nonce);
+          this.shellIntegrationCleanups.set(id, injection.cleanup);
+        }
+      }
+      pty.spawn(nodePty, resolvedShell, spawnArgs, { cwd, env: spawnEnv });
       // Wire passive OSC 7 / OSC 633 cwd parser. Sink receives sanitized absolute
       // paths only; PtySession guarantees byte-identical forwarding to onData.
       pty.setCurrentCwdSink((cwd) => this.setCurrentCwd(id, cwd));
@@ -801,6 +853,77 @@ export class SessionManager {
     return lastCompleted(session.commandTracking);
   }
 
+  // ─── Scrollback dump IPC ───────────────────────────────────────────
+  //
+  // See: asimov/changes/export-terminal-session/specs/webview-scrollback-dump/spec.md
+  // See: asimov/changes/export-terminal-session/design.md D4
+
+  /**
+   * Ask the webview to serialise the full xterm.js scrollback for the given
+   * session and resolve with the payload. Returns a Promise that:
+   *   - resolves with `{ data, lineCount, truncated }` when the matching
+   *     `scrollbackDump` reply arrives.
+   *   - rejects with `ScrollbackDumpAbortedError` if the session is disposed.
+   *   - rejects with `ScrollbackDumpTimeoutError` after 15 s.
+   *
+   * Multiple concurrent calls for the same `sessionId` are dispatched with
+   * distinct `requestId` values. Webview-side dedupe ensures both replies
+   * carry identical payloads (see scrollbackDumpHandler.ts).
+   */
+  async requestScrollbackDump(
+    sessionId: string,
+  ): Promise<{ data: string; lineCount: number; truncated: boolean }> {
+    const session = this.sessions.get(sessionId);
+    if (!session) {
+      throw new ScrollbackDumpAbortedError(sessionId, "<no-request-yet>");
+    }
+    const requestId = crypto.randomUUID();
+    return new Promise((resolve, reject) => {
+      const timer = setTimeout(() => {
+        if (this.pendingDumps.delete(requestId)) {
+          reject(new ScrollbackDumpTimeoutError(sessionId, requestId));
+        }
+      }, SessionManager.SCROLLBACK_DUMP_TIMEOUT_MS);
+      this.pendingDumps.set(requestId, { sessionId, resolve, reject, timer });
+      this.safePostMessage(session.webview, {
+        type: "requestScrollbackDump",
+        tabId: sessionId,
+        requestId,
+      });
+    });
+  }
+
+  /**
+   * Resolve a pending `requestScrollbackDump` with the webview's reply.
+   * Called by providers when a `scrollbackDump` IPC message arrives.
+   * Silently ignores unknown / already-settled `requestId`s (defensive
+   * against double-fires + late replies after timeout).
+   */
+  handleScrollbackDump(
+    requestId: string,
+    payload: { data: string; lineCount: number; truncated: boolean },
+  ): void {
+    const pending = this.pendingDumps.get(requestId);
+    if (!pending) return;
+    clearTimeout(pending.timer);
+    this.pendingDumps.delete(requestId);
+    pending.resolve(payload);
+  }
+
+  /**
+   * Reject all pending dump requests targeting `sessionId` with
+   * `ScrollbackDumpAbortedError`. Called from cleanupSession + dispose.
+   */
+  private abortPendingDumpsForSession(sessionId: string): void {
+    for (const [requestId, pending] of this.pendingDumps) {
+      if (pending.sessionId === sessionId) {
+        clearTimeout(pending.timer);
+        this.pendingDumps.delete(requestId);
+        pending.reject(new ScrollbackDumpAbortedError(sessionId, requestId));
+      }
+    }
+  }
+
   /** Get aggregate memory usage metrics across all sessions. */
   getMemoryMetrics(): MemoryMetrics {
     let totalBufferSize = 0;
@@ -1046,6 +1169,24 @@ export class SessionManager {
       }
     }
 
+    // Reject every still-pending scrollback dump (the webviews are gone).
+    for (const [requestId, pending] of this.pendingDumps) {
+      clearTimeout(pending.timer);
+      pending.reject(new ScrollbackDumpAbortedError(pending.sessionId, requestId));
+    }
+    this.pendingDumps.clear();
+
+    // Run any remaining shell-integration cleanups (sessions that disposed
+    // without going through cleanupSession — rare but possible during dispose).
+    for (const cleanup of this.shellIntegrationCleanups.values()) {
+      try {
+        cleanup();
+      } catch {
+        /* best-effort */
+      }
+    }
+    this.shellIntegrationCleanups.clear();
+
     this.sessions.clear();
     this.viewSessions.clear();
     this.usedNumbers.clear();
@@ -1104,6 +1245,22 @@ export class SessionManager {
       } catch {
         /* best-effort */
       }
+    }
+
+    // Reject any in-flight scrollback dumps for this session — the webview
+    // is about to disappear and the response will never arrive (D4).
+    this.abortPendingDumpsForSession(sessionId);
+
+    // Run the shell-integration cleanup (per-session temp ZDOTDIR / bash
+    // init-file). Idempotent — see ShellIntegrationInjector.makeTempDirCleanup.
+    const integrationCleanup = this.shellIntegrationCleanups.get(sessionId);
+    if (integrationCleanup) {
+      try {
+        integrationCleanup();
+      } catch {
+        /* best-effort — OS temp cleanup will reclaim later */
+      }
+      this.shellIntegrationCleanups.delete(sessionId);
     }
 
     // Branch on lifecycle state — design.md D14+D15. "destroying" means the
