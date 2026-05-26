@@ -4,25 +4,21 @@ All notable changes to **AnyWhere Terminal** are documented in this file.
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.13.0] — 2026-05-26
 
 ### Added
 
-- **Terminal sessions now survive window reload and full VS Code restart.** Sidebar, panel, and editor terminals are restored with their scrollback content, names, working directories, and split-pane layouts. On Cmd+R the underlying shell keeps running; on a full restart the prior session restores read-only with a divider and a fresh shell is spawned beneath it. Exited shells (`exit`, ^D, crash) are preserved read-only so the last visible state is recoverable. Controlled by `anywhereTerminal.sessionRestore.enabled` (default on); flipping it off purges all persisted snapshots.
+- **Terminal sessions survive window reload and VS Code restart.** Scrollback, names, cwd, and split layouts restore for sidebar, panel, and editor terminals. Cmd+R keeps the shell running; full restart shows the prior session read-only with a fresh shell beneath. Toggle via `anywhereTerminal.sessionRestore.enabled`.
 
 ### Changed
 
-- **Editor terminal Cmd+R no longer kills the underlying PTY.** Closing an editor tab now schedules a 5-second grace-period destroy that VS Code's `WebviewPanelSerializer` cancels when the panel revives. Closing the tab without revival still tears down the PTY as before.
-
-
-
-### Changed
-
-- **Collapsing the file tree now hides the body and shrinks the panel to its header strip** (top/bottom orientation), matching VS Code Explorer's "section collapsed" feel. Previously clicking the header chevron emptied the list but the panel kept reserving its full saved size, leaving a tall blank area under the title. The terminal area now reclaims that space automatically when the user minimizes the tree.
+- **Editor terminal Cmd+R no longer kills the PTY.** Closing an editor tab schedules a 5 s grace-period destroy that the panel-serializer cancels on revive.
+- **Collapsing the file tree shrinks the panel to its header strip** (top/bottom), so the terminal area reclaims the saved size instead of leaving a blank strip below the title.
 
 ### Fixed
 
-- **External "reveal file" signals no longer pop the file tree back open while it is collapsed.** Switching editor tabs in VS Code (auto-reveal) is a complete no-op when the tree is minimized; `cd`-ing in the terminal (OSC 7) inside the current workspace is likewise silent. A `cd` to a path outside the workspace still re-roots the tree so the header tracks the shell's PWD, but the body stays collapsed instead of expanding behind the user's back. Collapse intent is also preserved when VS Code reports a workspace folder change.
+- **File tree collapse state survives reload.** A minimized tree no longer pops back open on Cmd+R — the mount path now honors the persisted `expandedPaths` set for the root.
+- **External reveal signals don't pop the tree open while collapsed.** Auto-reveal on editor-tab switch is a no-op; OSC 7 inside the workspace stays silent; OSC 7 outside re-roots the header while keeping the body collapsed. Same for workspace-folder changes.
 
 ## [0.12.1] — 2026-05-24
 

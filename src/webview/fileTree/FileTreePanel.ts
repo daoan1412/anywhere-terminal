@@ -201,7 +201,12 @@ export class FileTreePanel {
       this.mountEmptyState();
       return;
     }
-    this.mountTree(deps.workspaceRoot);
+    // Preserve the user's "minimized" intent across reload: if persisted state
+    // exists but the workspace root is NOT in expandedPaths, the user explicitly
+    // collapsed the root via the header chevron — mount in collapsed mode so
+    // the panel comes up the same way it was left.
+    const rootWasCollapsed = persisted !== undefined && !this.expandedPaths.has(deps.workspaceRoot);
+    this.mountTree(deps.workspaceRoot, undefined, rootWasCollapsed);
     // Sash + size CSS var must be applied AFTER the panel host has been
     // attached to the tree. Position class lands when main.ts calls
     // `setPosition` shortly after construction; the size variable is
