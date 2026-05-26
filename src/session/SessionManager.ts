@@ -16,7 +16,7 @@ import * as crypto from "node:crypto";
 import * as PtyManager from "../pty/PtyManager";
 import { PtySession } from "../pty/PtySession";
 import { queryProcessCwd } from "../pty/processCwd";
-import { type CustomNameStorage, CustomNameRegistry, noopCustomNameStorage } from "./CustomNameRegistry";
+import { CustomNameRegistry, type CustomNameStorage, noopCustomNameStorage } from "./CustomNameRegistry";
 import { EditorPanelRegistry } from "./EditorPanelRegistry";
 import type { MessageSender } from "./OutputBuffer";
 import { OutputBuffer } from "./OutputBuffer";
@@ -38,17 +38,17 @@ import type {
 
 // ─── Re-exports (preserve external API for tests + providers) ──────
 
+export type { CustomNameStorage } from "./CustomNameRegistry";
+export { truncateSnapshotBuffer } from "./SnapshotPersistence";
 export type {
   HeadlessFactory,
   HeadlessTerminalLike,
+  MemoryMetrics,
   SerializeAddonFactory,
   SerializeAddonLike,
   SessionState,
   TerminalSession,
-  MemoryMetrics,
 } from "./TerminalSession";
-export type { CustomNameStorage } from "./CustomNameRegistry";
-export { truncateSnapshotBuffer } from "./SnapshotPersistence";
 
 // ─── Constants ──────────────────────────────────────────────────────
 
@@ -726,11 +726,7 @@ export class SessionManager {
    * See design.md D14. Replaces the implicit `sessionsPendingDestroy` set
    * from .reviews/round-4.md [B1].
    */
-  private transitionState(
-    sessionId: string,
-    from: SessionState | readonly SessionState[],
-    to: SessionState,
-  ): boolean {
+  private transitionState(sessionId: string, from: SessionState | readonly SessionState[], to: SessionState): boolean {
     const session = this.sessions.get(sessionId);
     if (!session) return false;
     const allowed = Array.isArray(from) ? from : [from as SessionState];
@@ -817,10 +813,13 @@ export class SessionManager {
     }
     this.operationQueue = this.operationQueue
       .then(async () => {
-        // Iterate the captured list, NOT the live viewSessions map.
-        for (const sid of doomedIds) {
-          await this.performDestroy(sid);
-        }
+        // performDestroy is per-session and never throws (every internal op
+        // is wrapped in try/catch). Sessions are independent — kill in
+        // parallel rather than serial so a 20-tab view tears down in one
+        // setTimeout(0) instead of N. Use the captured doomedIds list (not
+        // the live viewSessions map) so sessions created between sync-
+        // enqueue and async-execute are NOT swept (R5.W3).
+        await Promise.all(doomedIds.map((sid) => this.performDestroy(sid)));
       })
       .catch((err) => {
         console.error("[AnyWhere Terminal] DestroyAllForView operation failed:", err);

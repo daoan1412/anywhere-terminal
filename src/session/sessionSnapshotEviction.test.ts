@@ -116,12 +116,8 @@ describe("evictIndex", () => {
       const rootId = `root-${r}`;
       const baseAt = NOW - 1000 - (6 - r) * 10_000; // root-0 oldest, root-6 newest
       entries.push(meta(rootId, { snapshotAt: baseAt, isSplitPane: false, rootTabId: rootId }));
-      entries.push(
-        meta(`${rootId}-p1`, { snapshotAt: baseAt + 100, isSplitPane: true, rootTabId: rootId }),
-      );
-      entries.push(
-        meta(`${rootId}-p2`, { snapshotAt: baseAt + 200, isSplitPane: true, rootTabId: rootId }),
-      );
+      entries.push(meta(`${rootId}-p1`, { snapshotAt: baseAt + 100, isSplitPane: true, rootTabId: rootId }));
+      entries.push(meta(`${rootId}-p2`, { snapshotAt: baseAt + 200, isSplitPane: true, rootTabId: rootId }));
     }
     const result = evictIndex(indexOf(entries), NOW);
     const keptIds = new Set(Object.keys(result.kept.entries));

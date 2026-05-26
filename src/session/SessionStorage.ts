@@ -52,12 +52,12 @@ export class SessionStorage {
    * fire-and-forget async sidecar write landed AFTER a sync sidecar write
    * and left the on-disk state stale relative to deactivate.
    */
-  private sidecarGen: number = 0;
+  private sidecarGen = 0;
   /**
    * Monotonic temp-id counter — each in-flight write picks a unique temp
    * path so concurrent async writers cannot clobber each other's spool.
    */
-  private tempCounter: number = 0;
+  private tempCounter = 0;
 
   constructor(
     private readonly workspaceState: vscode.Memento,
@@ -87,10 +87,7 @@ export class SessionStorage {
    * `migrateMementoIndexToSidecar`) copies legacy Memento payloads into the
    * sidecar so upgraded users don't lose their first-session restore.
    */
-  loadIndexDetailed():
-    | { kind: "valid"; index: SessionSnapshotsIndex }
-    | { kind: "missing" }
-    | { kind: "unsupported" } {
+  loadIndexDetailed(): { kind: "valid"; index: SessionSnapshotsIndex } | { kind: "missing" } | { kind: "unsupported" } {
     const sidecar = this.indexSidecarPath();
     if (!this.fs.existsSync(sidecar)) return { kind: "missing" };
     try {

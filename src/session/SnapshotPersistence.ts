@@ -387,12 +387,7 @@ export class SnapshotPersistence {
 
   /** Internal current-state guard for async flushes. Used in commitLiveSnapshot. */
   private isStillCurrent(storage: SessionStorage, generation: number): boolean {
-    return (
-      this.restoreEnabled &&
-      this.storage === storage &&
-      this._persistGeneration === generation &&
-      !this._disposed
-    );
+    return this.restoreEnabled && this.storage === storage && this._persistGeneration === generation && !this._disposed;
   }
 
   // ─── PTY event hooks ────────────────────────────────────────────
@@ -431,7 +426,10 @@ export class SnapshotPersistence {
         resolve();
       }
     });
-    this.writeBarriers.set(session.id, prior.then(() => writePromise));
+    this.writeBarriers.set(
+      session.id,
+      prior.then(() => writePromise),
+    );
     this.schedulePersist(session.id);
   }
 
@@ -561,10 +559,10 @@ export class SnapshotPersistence {
     const generation = this._persistGeneration;
     const ids = Array.from(this._pendingSessions);
     this._pendingSessions.clear();
-    for (const id of ids) {
-      if (!this.isStillCurrent(storage, generation)) return;
-      await this.commitLiveSnapshot(id);
-    }
+    // Sessions are independent — kick off all commits in parallel.
+    // commitLiveSnapshot internally re-checks isStillCurrent post-await so
+    // invalidation mid-flight is safe even without the per-iteration guard.
+    await Promise.all(ids.map((id) => this.commitLiveSnapshot(id)));
     if (!this.isStillCurrent(storage, generation)) return;
     // Apply eviction before persisting the index.
     const merged: SessionSnapshotsIndex = { version: 1, entries: { ...this._snapshotIndex } };

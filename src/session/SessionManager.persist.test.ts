@@ -287,12 +287,8 @@ describe("SessionManager debounced persistence", () => {
     // dropSession before the async commit lands).
     const idxCalls = storage.commitIndexAsync.mock.calls;
     const syncCalls = storage.commitIndexSync.mock.calls;
-    const lastAsync = idxCalls[idxCalls.length - 1]?.[0] as
-      | { entries: Record<string, unknown> }
-      | undefined;
-    const lastSync = syncCalls[syncCalls.length - 1]?.[0] as
-      | { entries: Record<string, unknown> }
-      | undefined;
+    const lastAsync = idxCalls[idxCalls.length - 1]?.[0] as { entries: Record<string, unknown> } | undefined;
+    const lastSync = syncCalls[syncCalls.length - 1]?.[0] as { entries: Record<string, unknown> } | undefined;
     if (lastAsync) expect(lastAsync.entries[id]).toBeUndefined();
     if (lastSync) expect(lastSync.entries[id]).toBeUndefined();
     // dropSession (from cleanupSession with state="destroying") calls
