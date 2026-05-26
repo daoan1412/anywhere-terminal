@@ -827,7 +827,19 @@ export type ExtensionToWebViewMessage =
   | RevealInFileTreeMessage
   | SetPanelIdMessage
   | RestoreFromSnapshotMessage
-  | RequestScrollbackDumpMessage;
+  | RequestScrollbackDumpMessage
+  | FlashPaneMessage;
+
+/**
+ * Extension → Webview. Visual feedback for title-bar "export" click — briefly
+ * flashes the `.split-leaf[data-session-id=sessionId]` element so the user
+ * confirms which pane will be exported. No-op when the leaf isn't mounted
+ * (inactive tab, editor location with no matching session).
+ */
+export interface FlashPaneMessage {
+  type: "flashPane";
+  sessionId: string;
+}
 
 /**
  * Extension → Webview. Tells the editor webview the panelId VS Code will use

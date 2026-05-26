@@ -439,6 +439,18 @@ const routeMessage = createMessageRouter({
   onRequestScrollbackDump(msg) {
     handleScrollbackDump(msg);
   },
+  onFlashPane(msg) {
+    // Visual confirmation for title-bar export click. Adds `.export-flash`
+    // to the matching split-leaf; CSS animation auto-fades. We force a
+    // reflow between remove + re-add so a rapid second click restarts the
+    // animation (same pattern as onInsertPathEffect above).
+    const leaf = document.querySelector<HTMLElement>(`.split-leaf[data-session-id="${CSS.escape(msg.sessionId)}"]`);
+    if (!leaf) return;
+    leaf.classList.remove("export-flash");
+    void leaf.offsetWidth;
+    leaf.classList.add("export-flash");
+    leaf.addEventListener("animationend", () => leaf.classList.remove("export-flash"), { once: true });
+  },
   onRestoreFromSnapshot(msg) {
     // Replay a persisted snapshot into an xterm instance. The typical sequence
     // when triggered cross-restart is: `init` arrives first → factory creates

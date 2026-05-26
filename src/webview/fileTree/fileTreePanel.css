@@ -241,6 +241,35 @@
 }
 
 /* ============================================================
+ * Split pane — export flash
+ * Brief inset-outline pulse on the .split-leaf the user clicked
+ * "Export" against from the title bar (single message: flashPane).
+ * `position: relative` is required so the ::after pseudo can sit
+ * over the xterm canvas without disturbing layout. ============================================================ */
+
+.split-leaf {
+  position: relative;
+}
+
+.split-leaf.export-flash::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  border: 2px solid var(--vscode-focusBorder, #007fd4);
+  box-shadow: 0 0 0 1px var(--vscode-focusBorder, #007fd4) inset;
+  border-radius: 2px;
+  animation: anywhere-export-flash 700ms ease-out forwards;
+  z-index: 10;
+}
+
+@keyframes anywhere-export-flash {
+  0% { opacity: 0; }
+  20% { opacity: 1; }
+  100% { opacity: 0; }
+}
+
+/* ============================================================
  * Empty state
  * ============================================================ */
 

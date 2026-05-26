@@ -14,6 +14,7 @@ import type {
   ExtensionToWebViewMessage,
   FilePreviewResultMessage,
   FileTreeSearchResponseMessage,
+  FlashPaneMessage,
   FsChangesInvalidatedMessage,
   FsRehydrateMessage,
   GitStatusChangedMessage,
@@ -85,6 +86,7 @@ export interface MessageHandlers {
   onRestoreFromSnapshot(msg: RestoreFromSnapshotMessage): void;
   // ── Export terminal session (export-terminal-session) ──
   onRequestScrollbackDump(msg: RequestScrollbackDumpMessage): void;
+  onFlashPane(msg: FlashPaneMessage): void;
 }
 
 // ─── Factory ────────────────────────────────────────────────────────
@@ -194,6 +196,9 @@ export function createMessageRouter(handlers: MessageHandlers): (msg: ExtensionT
         break;
       case "requestScrollbackDump":
         handlers.onRequestScrollbackDump(msg);
+        break;
+      case "flashPane":
+        handlers.onFlashPane(msg);
         break;
       case "init":
         // init is handled directly by main.ts — not routed

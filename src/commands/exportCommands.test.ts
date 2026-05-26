@@ -13,6 +13,7 @@ import {
   exportCommand,
   exportLastCommand,
   type ExportCommandDeps,
+  formatOutputPreview,
   formatRelativeTime,
   type VscodeSurface,
 } from "./exportCommands";
@@ -348,5 +349,26 @@ describe("formatRelativeTime", () => {
   });
   it("clamps negative diffs to 'just now'", () => {
     expect(formatRelativeTime(now + 5000, now)).toBe("just now");
+  });
+});
+
+describe("formatOutputPreview", () => {
+  it("returns '(no output)' for empty input", () => {
+    expect(formatOutputPreview("")).toBe("(no output)");
+  });
+  it("returns '(no output)' when only blank lines remain after trim", () => {
+    expect(formatOutputPreview("   \n\n   \n")).toBe("(no output)");
+  });
+  it("strips ANSI sequences before previewing", () => {
+    expect(formatOutputPreview("\x1b[31mhello\x1b[0m world")).toBe("hello world");
+  });
+  it("joins first two non-blank lines with ' ⏎ '", () => {
+    expect(formatOutputPreview("foo\n\nbar\nbaz")).toBe("foo ⏎ bar");
+  });
+  it("truncates each line at PREVIEW_LINE_CHARS", () => {
+    const long = "x".repeat(200);
+    const out = formatOutputPreview(long);
+    // 99 chars + ellipsis = 100 chars
+    expect(out).toMatch(/^x{99}…$/);
   });
 });

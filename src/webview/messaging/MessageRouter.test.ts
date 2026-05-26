@@ -40,6 +40,7 @@ function createMockHandlers(): MessageHandlers {
     onSetPanelId: vi.fn(),
     onRestoreFromSnapshot: vi.fn(),
     onRequestScrollbackDump: vi.fn(),
+    onFlashPane: vi.fn(),
   };
 }
 

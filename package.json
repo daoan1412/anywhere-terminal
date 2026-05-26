@@ -327,15 +327,28 @@
       },
       {
         "command": "anywhereTerminal.exportBuffer",
-        "title": "AnyWhere Terminal: Export Buffer to File…"
+        "category": "AnyWhere Terminal",
+        "title": "Export Buffer to File…"
       },
       {
         "command": "anywhereTerminal.exportLastCommand",
-        "title": "AnyWhere Terminal: Export Last Command Output…"
+        "category": "AnyWhere Terminal",
+        "title": "Export Last Command Output…"
       },
       {
         "command": "anywhereTerminal.exportCommand",
-        "title": "AnyWhere Terminal: Export Command…"
+        "category": "AnyWhere Terminal",
+        "title": "Export Command…"
+      },
+      {
+        "command": "anywhereTerminal.exportPick.sidebar",
+        "title": "AnyWhere Terminal: Export… (Sidebar)",
+        "icon": "$(save-as)"
+      },
+      {
+        "command": "anywhereTerminal.exportPick.panel",
+        "title": "AnyWhere Terminal: Export… (Panel)",
+        "icon": "$(save-as)"
       }
     ],
     "menus": {
@@ -371,12 +384,12 @@
           "group": "navigation"
         },
         {
-          "command": "anywhereTerminal.killTerminal.sidebar",
+          "command": "anywhereTerminal.exportPick.sidebar",
           "when": "view == anywhereTerminal.sidebar",
           "group": "navigation"
         },
         {
-          "command": "anywhereTerminal.killTerminal.panel",
+          "command": "anywhereTerminal.exportPick.panel",
           "when": "view == anywhereTerminal.panel",
           "group": "navigation"
         },
@@ -426,6 +439,21 @@
           "command": "anywhereTerminal.ctx.revealInFileTree",
           "when": "webviewSection == 'splitPane'",
           "group": "navigation@1"
+        },
+        {
+          "command": "anywhereTerminal.exportLastCommand",
+          "when": "webviewSection == 'splitPane'",
+          "group": "export@1"
+        },
+        {
+          "command": "anywhereTerminal.exportCommand",
+          "when": "webviewSection == 'splitPane'",
+          "group": "export@2"
+        },
+        {
+          "command": "anywhereTerminal.exportBuffer",
+          "when": "webviewSection == 'splitPane'",
+          "group": "export@3"
         }
       ],
       "explorer/context": [
@@ -501,6 +529,14 @@
         },
         {
           "command": "anywhereTerminal.toggleFileTree.panel",
+          "when": "false"
+        },
+        {
+          "command": "anywhereTerminal.exportPick.sidebar",
+          "when": "false"
+        },
+        {
+          "command": "anywhereTerminal.exportPick.panel",
           "when": "false"
         }
       ]

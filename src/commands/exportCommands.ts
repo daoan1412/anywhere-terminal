@@ -8,6 +8,7 @@
 //   asimov/changes/export-terminal-session/specs/terminal-session-export/spec.md
 //   asimov/changes/export-terminal-session/design.md D6, D7, D8
 
+import stripAnsi from "strip-ansi";
 import * as vscode from "vscode";
 import type { SessionManager } from "../session/SessionManager";
 import type { TrackedCommand } from "../session/TrackedCommand";
@@ -48,7 +49,7 @@ export interface ExportCommandDeps {
   readmeShellIntegrationUrl: string;
 }
 
-const NO_FOCUS_TOAST = "AnyWhere Terminal: focus a terminal session before exporting.";
+export const NO_FOCUS_TOAST = "AnyWhere Terminal: focus a terminal session before exporting.";
 const NO_TRACKED_TOAST =
   "AnyWhere Terminal: no tracked commands yet. Commands track from window reload onward and require shell integration — see Help.";
 const HELP_LABEL = "Help";
@@ -138,14 +139,43 @@ interface CommandQuickPickItem extends vscode.QuickPickItem {
   cmd: TrackedCommand;
 }
 
+/** Preview lines pulled from `cmd.output` to render under each quickpick item. */
+const PREVIEW_LINES = 2;
+/** Cap per preview line so wide outputs don't overflow the quickpick row. */
+const PREVIEW_LINE_CHARS = 100;
+
 function toQuickPickItem(cmd: TrackedCommand): CommandQuickPickItem {
   const labelSource = cmd.commandLine || "(command line not recorded)";
   // Truncate at 80 chars per spec.
   const label = labelSource.length > 80 ? `${labelSource.slice(0, 79)}…` : labelSource;
   const exit = cmd.exitCode === null ? "?" : String(cmd.exitCode);
   const cwd = cmd.cwd ?? "?";
-  const detail = `exit ${exit} · ${cwd} · ${formatRelativeTime(cmd.endedAt, Date.now())}`;
-  return { label, detail, cmd };
+  // Metadata (exit/cwd/age) → description column (rendered next to label).
+  // Output preview → detail (rendered wrapped below). This puts the most
+  // information in the most useful place: scanning is via labels, choosing
+  // a specific historical command leans on the preview lines.
+  const description = `exit ${exit} · ${cwd} · ${formatRelativeTime(cmd.endedAt, Date.now())}`;
+  const detail = formatOutputPreview(cmd.output);
+  return { label, description, detail, cmd };
+}
+
+/**
+ * Build a single-line, ANSI-stripped preview of the first non-blank output
+ * lines of a tracked command. Returns "(no output)" when there's nothing
+ * useful to show — the quickpick still renders the metadata description.
+ */
+export function formatOutputPreview(output: string): string {
+  if (!output) return "(no output)";
+  const stripped = stripAnsi(output);
+  const lines: string[] = [];
+  for (const raw of stripped.split(/\r?\n/)) {
+    const line = raw.trim();
+    if (!line) continue;
+    lines.push(line.length > PREVIEW_LINE_CHARS ? `${line.slice(0, PREVIEW_LINE_CHARS - 1)}…` : line);
+    if (lines.length >= PREVIEW_LINES) break;
+  }
+  if (lines.length === 0) return "(no output)";
+  return lines.join(" ⏎ ");
 }
 
 /**

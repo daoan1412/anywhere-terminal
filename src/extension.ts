@@ -9,7 +9,7 @@ import { resolveRenameTargetTabId } from "./providers/resolveRenameTarget";
 import { TerminalEditorProvider } from "./providers/TerminalEditorProvider";
 import { TerminalPanelSerializer } from "./providers/TerminalPanelSerializer";
 import { TerminalViewProvider } from "./providers/TerminalViewProvider";
-import { exportBuffer, exportCommand, exportLastCommand } from "./commands/exportCommands";
+import { exportBuffer, exportCommand, exportLastCommand, NO_FOCUS_TOAST } from "./commands/exportCommands";
 import { loadNodePty } from "./pty/PtyManager";
 import { SessionManager } from "./session/SessionManager";
 import { SessionStorage } from "./session/SessionStorage";
@@ -197,13 +197,15 @@ export function activate(context: vscode.ExtensionContext) {
   };
 
   // Helper: assemble the dependency bag for the export commands. Resolved
-  // lazily so the closure picks up the latest focused provider at click time.
+  // lazily so the closure picks up the latest target sessionId at click time.
+  // The caller decides whether sessionId comes from a right-click ctx
+  // (`ctx.paneSessionId`) or the focused provider's active session.
   const buildExportDeps = (
-    getProvider: () => TerminalViewProvider,
+    getSessionId: () => string | undefined,
     sm: SessionManager,
   ) => ({
     sessionManager: sm,
-    getFocusedSessionId: () => getProvider().getActiveSessionId(),
+    getFocusedSessionId: getSessionId,
     getSessionName: (sessionId: string) => sm.getSession(sessionId)?.customName ?? sm.getSession(sessionId)?.name ?? "terminal",
     vsc: {
       showSaveDialog: (opts: vscode.SaveDialogOptions) => vscode.window.showSaveDialog(opts),
@@ -320,14 +322,24 @@ export function activate(context: vscode.ExtensionContext) {
     }),
     // ─── Export Terminal Session ──────────────────────────────────
     // See: asimov/changes/export-terminal-session/specs/terminal-session-export/spec.md
-    vscode.commands.registerCommand("anywhereTerminal.exportBuffer", () =>
-      exportBuffer(buildExportDeps(getFocusedProvider, sessionManager)),
+    // The 3 commands are reachable from both Command Palette and the webview
+    // right-click context menu (see package.json `menus.webview/context`). The
+    // ctx arg carries the right-clicked pane's sessionId; falls back to the
+    // focused provider's active session for Command Palette invocations.
+    vscode.commands.registerCommand("anywhereTerminal.exportBuffer", (ctx?: { paneSessionId?: string }) =>
+      exportBuffer(
+        buildExportDeps(() => ctx?.paneSessionId ?? getFocusedProvider().getActiveSessionId(), sessionManager),
+      ),
     ),
-    vscode.commands.registerCommand("anywhereTerminal.exportLastCommand", () =>
-      exportLastCommand(buildExportDeps(getFocusedProvider, sessionManager)),
+    vscode.commands.registerCommand("anywhereTerminal.exportLastCommand", (ctx?: { paneSessionId?: string }) =>
+      exportLastCommand(
+        buildExportDeps(() => ctx?.paneSessionId ?? getFocusedProvider().getActiveSessionId(), sessionManager),
+      ),
     ),
-    vscode.commands.registerCommand("anywhereTerminal.exportCommand", () =>
-      exportCommand(buildExportDeps(getFocusedProvider, sessionManager)),
+    vscode.commands.registerCommand("anywhereTerminal.exportCommand", (ctx?: { paneSessionId?: string }) =>
+      exportCommand(
+        buildExportDeps(() => ctx?.paneSessionId ?? getFocusedProvider().getActiveSessionId(), sessionManager),
+      ),
     ),
     vscode.commands.registerCommand("anywhereTerminal.setFileTreePosition", async () => {
       const view = getFocusedProvider().view;
@@ -365,7 +377,56 @@ export function activate(context: vscode.ExtensionContext) {
           void provider.view.webview.postMessage({ type: "toggle-file-tree" });
         }
       }),
+      // Title-bar "Export…" button — single icon that opens a quickpick of the
+      // three real export commands. We flash the active pane first so the user
+      // visually confirms which pane will be exported (the title bar applies
+      // to whichever pane is currently active in THIS view).
+      vscode.commands.registerCommand(`anywhereTerminal.exportPick.${loc}`, () => runExportPick(provider)),
     );
+  }
+
+  /**
+   * Helper backing the per-loc `exportPick` commands. Resolves the active
+   * session of `provider`, posts a `flashPane` message so the webview pulses
+   * the matching split-leaf, then opens a quickpick to choose between the
+   * three concrete export entry points. Passing `paneSessionId` through the
+   * downstream command keeps the right pane targeted if focus shifts during
+   * the quickpick.
+   */
+  function runExportPick(provider: TerminalViewProvider): void {
+    const sessionId = provider.getActiveSessionId();
+    if (!sessionId) {
+      void vscode.window.showWarningMessage(NO_FOCUS_TOAST);
+      return;
+    }
+    const view = provider.view;
+    if (view) {
+      safePostMessage(view.webview, { type: "flashPane", sessionId });
+    }
+    type PickItem = vscode.QuickPickItem & { commandId: string };
+    const items: PickItem[] = [
+      {
+        label: "$(history) Export Last Command Output…",
+        description: "Most-recent completed command",
+        commandId: "anywhereTerminal.exportLastCommand",
+      },
+      {
+        label: "$(list-selection) Export Command…",
+        description: "Pick from tracked commands",
+        commandId: "anywhereTerminal.exportCommand",
+      },
+      {
+        label: "$(file) Export Buffer to File…",
+        description: "Whole visible scrollback",
+        commandId: "anywhereTerminal.exportBuffer",
+      },
+    ];
+    void vscode.window
+      .showQuickPick(items, { placeHolder: "Export…", matchOnDescription: true })
+      .then((picked) => {
+        if (!picked) return;
+        return vscode.commands.executeCommand(picked.commandId, { paneSessionId: sessionId });
+      });
   }
 
   // ─── Webview Context Menu Commands ────────────────────────────────
