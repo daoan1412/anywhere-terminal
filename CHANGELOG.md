@@ -4,7 +4,17 @@ All notable changes to **AnyWhere Terminal** are documented in this file.
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [0.12.2] — 2026-05-25
+## [Unreleased]
+
+### Added
+
+- **Terminal sessions now survive window reload and full VS Code restart.** Sidebar, panel, and editor terminals are restored with their scrollback content, names, working directories, and split-pane layouts. On Cmd+R the underlying shell keeps running; on a full restart the prior session restores read-only with a divider and a fresh shell is spawned beneath it. Exited shells (`exit`, ^D, crash) are preserved read-only so the last visible state is recoverable. Controlled by `anywhereTerminal.sessionRestore.enabled` (default on); flipping it off purges all persisted snapshots.
+
+### Changed
+
+- **Editor terminal Cmd+R no longer kills the underlying PTY.** Closing an editor tab now schedules a 5-second grace-period destroy that VS Code's `WebviewPanelSerializer` cancels when the panel revives. Closing the tab without revival still tears down the PTY as before.
+
+
 
 ### Changed
 
