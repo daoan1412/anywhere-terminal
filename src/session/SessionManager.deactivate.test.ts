@@ -161,7 +161,7 @@ describe("SessionManager flushSnapshotsSync + flushIndexAwaited", () => {
     sm.dispose();
   });
 
-  it("flushIndexAwaited awaits both index and live-panels writes", async () => {
+  it("flushIndexAwaited writes live-panels (Memento) + syncs sidecar (D17)", async () => {
     const fx = makeFactories();
     const storage = makeStorageMock();
     const sm = new SessionManager(undefined, {
@@ -174,8 +174,10 @@ describe("SessionManager flushSnapshotsSync + flushIndexAwaited", () => {
     mockPtySessions[0].onData?.("x");
     sm.flushSnapshotsSync();
     await sm.flushIndexAwaited();
-    expect(storage.writeIndexAwaited).toHaveBeenCalledTimes(1);
+    // Live-panels still go to Memento (small + churnier — no dual-source bug
+    // class). Snapshot index goes to the sidecar via commitIndexSync.
     expect(storage.writeLivePanelsAwaited).toHaveBeenCalledTimes(1);
+    expect(storage.commitIndexSync).toHaveBeenCalled();
     sm.dispose();
   });
 
@@ -218,6 +220,7 @@ describe("SessionManager flushSnapshotsSync + flushIndexAwaited", () => {
     mockPtySessions[0].onData?.("x");
     sm.dispose();
     expect(storage.commitBufferSync).not.toHaveBeenCalled();
-    expect(storage.writeIndexAwaited).not.toHaveBeenCalled();
+    expect(storage.commitIndexSync).not.toHaveBeenCalled();
+    expect(storage.writeLivePanelsAwaited).not.toHaveBeenCalled();
   });
 });

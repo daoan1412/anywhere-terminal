@@ -653,7 +653,16 @@ export class SnapshotPersistence {
         /* best-effort */
       }
     }
-    await this.storage.writeIndexAwaited(kept);
+    // Sidecar is the single source of truth (D17). The sync sidecar
+    // commit fired by flushSnapshotsSync already persisted this state;
+    // here we just guarantee eviction + drops applied are reflected on
+    // disk for the (rare) case where flushIndexAwaited is called without
+    // a prior flushSnapshotsSync.
+    try {
+      this.storage.commitIndexSync(kept);
+    } catch (err) {
+      console.error("[AnyWhere Terminal] flushIndexAwaited commitIndexSync failed:", err);
+    }
   }
 
   // ─── Hydrate-on-activate ────────────────────────────────────────

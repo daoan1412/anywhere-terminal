@@ -63,12 +63,15 @@ export function activate(context: vscode.ExtensionContext) {
   // uses the live-panels lookup to map an unindexed buffer file back to its
   // owning editor panel rather than defaulting to sidebar. See round-1 W2.
   if (restoreEnabled) {
+    // One-time migration: copy legacy Memento snapshot index → sidecar so
+    // upgraded users keep their restore on the first activate post-upgrade.
+    // Idempotent no-op if the sidecar already exists. See design.md D17.
+    sessionStorage.migrateMementoIndexToSidecar();
     sessionManager.hydrateLivePanels(sessionStorage.loadLivePanels());
     // Hydrate reads its own typed index via loadIndexDetailed so it can
     // distinguish "missing" (orphan recovery OK) from "unsupported"
-    // (discard entire restore set). Older code passed loadIndex() here —
-    // that variant collapses both cases to undefined and made hydrate run
-    // orphan recovery on an unsupported sidecar. See .reviews/round-4.md [W3].
+    // (discard entire restore set). The sidecar is the single source of
+    // truth (D17) — no Memento fallback.
     sessionManager.hydrateFromSnapshots();
   } else {
     // Setting disabled — purge any leftover persistence from a prior session.

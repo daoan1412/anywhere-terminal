@@ -140,7 +140,7 @@ describe("SessionStorage", () => {
     vi.useRealTimers();
   });
 
-  it("round-trips index + live-panels via workspaceState", async () => {
+  it("round-trips snapshot index via sidecar; live-panels via workspaceState (D17)", async () => {
     const mem = makeFakeMemento();
     const { fs } = makeFakeFs();
     const s = new SessionStorage(mem as unknown as vscode.Memento, STORAGE_URI, fs);
@@ -150,7 +150,7 @@ describe("SessionStorage", () => {
       version: 1,
       panels: [{ panelId: "p1", sessionIds: ["s1"], createdAt: 1, updatedAt: 2 }],
     };
-    await s.writeIndexAwaited(index);
+    s.commitIndexSync(index);
     await s.writeLivePanelsAwaited(live);
 
     const reread = new SessionStorage(mem as unknown as vscode.Memento, STORAGE_URI, fs);
@@ -158,31 +158,13 @@ describe("SessionStorage", () => {
     expect(reread.loadLivePanels()).toEqual(live);
   });
 
-  it("scheduleIndexWrite coalesces N calls into 1 workspaceState.update", () => {
-    const mem = makeFakeMemento();
-    const { fs } = makeFakeFs();
-    const s = new SessionStorage(mem as unknown as vscode.Memento, STORAGE_URI, fs);
-
-    for (let i = 0; i < 50; i++) {
-      s.scheduleIndexWrite({ version: 1, entries: { s1: makeMeta("s1", { snapshotAt: i }) } });
-    }
-    expect(mem.update).not.toHaveBeenCalled();
-    vi.advanceTimersByTime(1000);
-
-    expect(mem.update).toHaveBeenCalledTimes(1);
-    expect(mem.update).toHaveBeenCalledWith(SESSION_SNAPSHOTS_INDEX_KEY, {
-      version: 1,
-      entries: { s1: makeMeta("s1", { snapshotAt: 49 }) },
-    });
-  });
-
-  it("writeBufferFileSync and writeBufferFileAsync produce identical files", async () => {
+  it("commitBufferSync and commitBufferAsync produce identical files", async () => {
     const mem = makeFakeMemento();
     const { fs, files } = makeFakeFs();
     const s = new SessionStorage(mem as unknown as vscode.Memento, STORAGE_URI, fs);
 
-    s.writeBufferFileSync("sync1", "DATA");
-    await s.writeBufferFileAsync("async1", "DATA");
+    s.commitBufferSync("sync1", "DATA");
+    await s.commitBufferAsync("async1", "DATA", s.currentBufferGen("async1"));
 
     expect(files.get(bufferFile("sync1"))).toBe("DATA");
     expect(files.get(bufferFile("async1"))).toBe("DATA");
@@ -193,18 +175,18 @@ describe("SessionStorage", () => {
     const mem = makeFakeMemento();
     const { fs } = makeFakeFs();
     const s = new SessionStorage(mem as unknown as vscode.Memento, STORAGE_URI, fs);
-    s.writeBufferFileSync("alpha", "A");
-    s.writeBufferFileSync("beta", "B");
+    s.commitBufferSync("alpha", "A");
+    s.commitBufferSync("beta", "B");
     expect(s.listBufferFiles().sort()).toEqual(["alpha", "beta"]);
   });
 
-  it("unlinkBufferFile removes only the named file", () => {
+  it("dropBuffer removes only the named file", () => {
     const mem = makeFakeMemento();
     const { fs } = makeFakeFs();
     const s = new SessionStorage(mem as unknown as vscode.Memento, STORAGE_URI, fs);
-    s.writeBufferFileSync("alpha", "A");
-    s.writeBufferFileSync("beta", "B");
-    s.unlinkBufferFile("alpha");
+    s.commitBufferSync("alpha", "A");
+    s.commitBufferSync("beta", "B");
+    s.dropBuffer("alpha");
     expect(s.listBufferFiles()).toEqual(["beta"]);
     expect(s.readBufferFile("alpha")).toBeNull();
   });
@@ -219,7 +201,7 @@ describe("SessionStorage", () => {
     });
     const { fs } = makeFakeFs();
     const s = new SessionStorage(mem as unknown as vscode.Memento, STORAGE_URI, fs);
-    s.writeBufferFileSync("s1", "DATA");
+    s.commitBufferSync("s1", "DATA");
 
     await s.purge();
     expect(mem.get(SESSION_SNAPSHOTS_INDEX_KEY)).toBeUndefined();
@@ -227,17 +209,47 @@ describe("SessionStorage", () => {
     expect(s.listBufferFiles()).toEqual([]);
   });
 
-  it("scheduled index write is cancelled by writeIndexAwaited", async () => {
-    const mem = makeFakeMemento();
+  it("migrateMementoIndexToSidecar copies legacy Memento payload + clears it", () => {
+    const legacyIndex: SessionSnapshotsIndex = {
+      version: 1,
+      entries: { s_legacy: makeMeta("s_legacy") },
+    };
+    const mem = makeFakeMemento({
+      [SESSION_SNAPSHOTS_INDEX_KEY]: legacyIndex,
+    });
     const { fs } = makeFakeFs();
     const s = new SessionStorage(mem as unknown as vscode.Memento, STORAGE_URI, fs);
 
-    s.scheduleIndexWrite({ version: 1, entries: { s1: makeMeta("s1") } });
-    await s.writeIndexAwaited({ version: 1, entries: {} });
-    vi.advanceTimersByTime(2000);
+    s.migrateMementoIndexToSidecar();
 
-    expect(mem.update).toHaveBeenCalledTimes(1);
-    expect(mem.update).toHaveBeenLastCalledWith(SESSION_SNAPSHOTS_INDEX_KEY, { version: 1, entries: {} });
+    // Sidecar now has the legacy payload.
+    const detailed = s.loadIndexDetailed();
+    expect(detailed.kind).toBe("valid");
+    if (detailed.kind === "valid") {
+      expect(detailed.index).toEqual(legacyIndex);
+    }
+    // Memento entry cleared.
+    expect(mem.get(SESSION_SNAPSHOTS_INDEX_KEY)).toBeUndefined();
+  });
+
+  it("migrateMementoIndexToSidecar is a no-op when sidecar already exists", () => {
+    const sidecarIndex: SessionSnapshotsIndex = { version: 1, entries: { s_new: makeMeta("s_new") } };
+    const legacyIndex: SessionSnapshotsIndex = { version: 1, entries: { s_legacy: makeMeta("s_legacy") } };
+    const mem = makeFakeMemento({
+      [SESSION_SNAPSHOTS_INDEX_KEY]: legacyIndex,
+    });
+    const { fs } = makeFakeFs();
+    const s = new SessionStorage(mem as unknown as vscode.Memento, STORAGE_URI, fs);
+    // Seed sidecar via the new API.
+    s.commitIndexSync(sidecarIndex);
+
+    s.migrateMementoIndexToSidecar();
+
+    // Sidecar untouched, Memento untouched (legacy data preserved for a
+    // potential downgrade — though we don't expose that anymore).
+    const detailed = s.loadIndexDetailed();
+    expect(detailed.kind).toBe("valid");
+    if (detailed.kind === "valid") expect(detailed.index).toEqual(sidecarIndex);
   });
 
   // ───────────────────────────────────────────────────────────────────
@@ -263,9 +275,9 @@ describe("SessionStorage", () => {
 
     const { fs } = makeFakeFs();
     const s = new SessionStorage(mem as unknown as vscode.Memento, STORAGE_URI, fs);
-    s.writeBufferFileSync("s1", "DATA");
+    s.commitBufferSync("s1", "DATA");
     // Also seed a sidecar — flushSnapshotsSync writes one at deactivate.
-    s.writeIndexSync({ version: 1, entries: { s1: makeMeta("s1") } });
+    s.commitIndexSync({ version: 1, entries: { s1: makeMeta("s1") } });
 
     // Caller treats purge as fire-and-forget; swallow the error so the test
     // simulates production (`void this.storage.purge()`).
@@ -293,7 +305,7 @@ describe("SessionStorage", () => {
     });
     const { fs } = makeFakeFs();
     const s = new SessionStorage(mem as unknown as vscode.Memento, STORAGE_URI, fs);
-    s.writeBufferFileSync("s1", "DATA");
+    s.commitBufferSync("s1", "DATA");
 
     await s.purge();
 

@@ -36,8 +36,6 @@ const INDEX_DEBOUNCE_MS = 1000;
 
 export class SessionStorage {
   private readonly snapshotsDir: string;
-  private indexTimer: NodeJS.Timeout | null = null;
-  private pendingIndex: SessionSnapshotsIndex | null = null;
 
   /**
    * Per-buffer generation counter. Bumped by sync writers AND drops BEFORE
@@ -83,53 +81,74 @@ export class SessionStorage {
 
   /**
    * Detailed load — distinguishes "no index present" from "present but the
-   * version is unsupported". Hydrate MUST consult this variant so it can
-   * gate orphan recovery on the `missing` case only; an `unsupported` index
-   * is authoritative-and-rejected — the entire restore set is discarded per
-   * round-1 W1 and .reviews/round-4.md [W3].
+   * version is unsupported". Reads the SIDECAR ONLY (design.md D17) — the
+   * Memento path was dropped to eliminate the dual-source bug class that
+   * round-5 surfaced. One-time migration on activate (see
+   * `migrateMementoIndexToSidecar`) copies legacy Memento payloads into the
+   * sidecar so upgraded users don't lose their first-session restore.
    */
   loadIndexDetailed():
     | { kind: "valid"; index: SessionSnapshotsIndex }
     | { kind: "missing" }
     | { kind: "unsupported" } {
     const sidecar = this.indexSidecarPath();
-    if (this.fs.existsSync(sidecar)) {
-      try {
-        const raw = this.fs.readFileSync(sidecar, "utf8");
-        const parsed = JSON.parse(raw) as Partial<SessionSnapshotsIndex>;
-        if (parsed && typeof parsed === "object") {
-          if (parsed.version === 1 && parsed.entries && typeof parsed.entries === "object") {
-            return { kind: "valid", index: parsed as SessionSnapshotsIndex };
-          }
-          // Sidecar present but version we don't understand — authoritative
-          // rejection. Do NOT fall through to Memento (would be stale relative
-          // to whatever wrote the sidecar) and do NOT run orphan recovery
-          // (corrupted state is discarded per spec).
-          return { kind: "unsupported" };
+    if (!this.fs.existsSync(sidecar)) return { kind: "missing" };
+    try {
+      const raw = this.fs.readFileSync(sidecar, "utf8");
+      const parsed = JSON.parse(raw) as Partial<SessionSnapshotsIndex>;
+      if (parsed && typeof parsed === "object") {
+        if (parsed.version === 1 && parsed.entries && typeof parsed.entries === "object") {
+          return { kind: "valid", index: parsed as SessionSnapshotsIndex };
         }
-      } catch {
-        // Torn-write / unreadable sidecar — fall through to Memento as legacy
-        // recovery. This is "missing" not "unsupported": we have no signal
-        // about which version was intended.
+        // Sidecar present but version we don't understand — authoritative
+        // rejection. Corrupted state is discarded per spec; no orphan
+        // recovery runs in this case.
+        return { kind: "unsupported" };
       }
+    } catch {
+      // Torn-write / unreadable sidecar — treat as missing so orphan
+      // recovery can still salvage individual buffer files. No fallback
+      // to Memento (D17: sidecar is the single source of truth).
     }
-    const mem = this.workspaceState.get<SessionSnapshotsIndex>(SESSION_SNAPSHOTS_INDEX_KEY);
-    if (mem === undefined) return { kind: "missing" };
-    if (mem && typeof mem === "object" && mem.version === 1 && mem.entries) {
-      return { kind: "valid", index: mem };
-    }
-    return { kind: "unsupported" };
+    return { kind: "missing" };
   }
 
   /**
-   * Synchronously persist the index to a sidecar file at
-   * `<storageUri>/snapshots/index.json`. Used by `flushSnapshotsSync` during
-   * deactivate so the index survives the Memento `update()` cancellation that
-   * VS Code raises while the extension host shuts down.
+   * One-time activate-time migration: if no sidecar exists yet and a
+   * legacy Memento snapshot index is present, copy it to the sidecar
+   * (sync) and delete the Memento entry. After this, all reads + writes
+   * go through the sidecar only. See design.md D17.
+   *
+   * Idempotent: if the sidecar already exists or no Memento payload is
+   * present, this is a silent no-op. Caller (extension.activate) invokes
+   * this before any hydrate.
    */
-  writeIndexSync(index: SessionSnapshotsIndex): void {
-    this.ensureSnapshotsDir();
-    this.fs.writeFileSync(this.indexSidecarPath(), JSON.stringify(index));
+  migrateMementoIndexToSidecar(): void {
+    if (this.fs.existsSync(this.indexSidecarPath())) return;
+    const mem = this.workspaceState.get<SessionSnapshotsIndex>(SESSION_SNAPSHOTS_INDEX_KEY);
+    if (!mem || typeof mem !== "object") return;
+    if (mem.version !== 1 || !mem.entries) {
+      // Unsupported legacy payload — drop the Memento entry; nothing to migrate.
+      try {
+        void this.workspaceState.update(SESSION_SNAPSHOTS_INDEX_KEY, undefined);
+      } catch {
+        /* best-effort */
+      }
+      return;
+    }
+    try {
+      this.commitIndexSync(mem);
+    } catch (err) {
+      console.error("[AnyWhere Terminal] migrateMementoIndexToSidecar commitIndexSync failed:", err);
+      return;
+    }
+    // Best-effort drop the legacy Memento entry — even if it fails
+    // (Canceled mid-shutdown), the sidecar is now authoritative.
+    try {
+      void this.workspaceState.update(SESSION_SNAPSHOTS_INDEX_KEY, undefined);
+    } catch {
+      /* best-effort */
+    }
   }
 
   loadLivePanels(): LiveEditorPanelsRecord | undefined {
@@ -173,11 +192,6 @@ export class SessionStorage {
     return path.join(this.snapshotsDir, "index.json");
   }
 
-  private async writeIndexFile(index: SessionSnapshotsIndex): Promise<void> {
-    await this.fs.promises.mkdir(this.snapshotsDir, { recursive: true });
-    await this.fs.promises.writeFile(this.indexSidecarPath(), JSON.stringify(index));
-  }
-
   readBufferFile(sessionId: string): string | null {
     let file: string;
     try {
@@ -196,37 +210,6 @@ export class SessionStorage {
     }
   }
 
-  writeBufferFileSync(sessionId: string, data: string): void {
-    // Validate before mkdirSync so a poisoned sessionId never even creates the
-    // dir or writes a partial path. assertSafeSessionId throws on rejection.
-    const file = this.bufferFilePath(sessionId);
-    this.ensureSnapshotsDir();
-    this.fs.writeFileSync(file, data);
-  }
-
-  async writeBufferFileAsync(sessionId: string, data: string): Promise<void> {
-    const file = this.bufferFilePath(sessionId);
-    await this.fs.promises.mkdir(this.snapshotsDir, { recursive: true });
-    await this.fs.promises.writeFile(file, data);
-  }
-
-  unlinkBufferFile(sessionId: string): void {
-    let file: string;
-    try {
-      file = this.bufferFilePath(sessionId);
-    } catch (err) {
-      console.warn("[AnyWhere Terminal] unlinkBufferFile rejected unsafe sessionId:", err);
-      return;
-    }
-    try {
-      if (this.fs.existsSync(file)) {
-        this.fs.unlinkSync(file);
-      }
-    } catch {
-      // best-effort; partial deletes are tolerated.
-    }
-  }
-
   listBufferFiles(): string[] {
     try {
       if (!this.fs.existsSync(this.snapshotsDir)) {
@@ -239,26 +222,6 @@ export class SessionStorage {
     } catch {
       return [];
     }
-  }
-
-  scheduleIndexWrite(index: SessionSnapshotsIndex): void {
-    this.pendingIndex = index;
-    if (this.indexTimer) {
-      return;
-    }
-    this.indexTimer = setTimeout(() => {
-      this.indexTimer = null;
-      const toWrite = this.pendingIndex;
-      this.pendingIndex = null;
-      if (!toWrite) {
-        return;
-      }
-      // Fire-and-forget; failure surfaces in dev logs, not a crash.
-      void this.writeIndexFile(toWrite).catch((err) => {
-        console.error("[AnyWhere Terminal] writeIndexFile failed:", err);
-      });
-      void this.workspaceState.update(SESSION_SNAPSHOTS_INDEX_KEY, toWrite);
-    }, INDEX_DEBOUNCE_MS);
   }
 
   // ─── Transactional commit API (design.md D16) ──────────────────────
@@ -439,21 +402,11 @@ export class SessionStorage {
   }
 
   cancelPendingIndex(): void {
-    if (this.indexTimer) {
-      clearTimeout(this.indexTimer);
-      this.indexTimer = null;
-    }
-    this.pendingIndex = null;
     if (this.livePanelsTimer) {
       clearTimeout(this.livePanelsTimer);
       this.livePanelsTimer = null;
     }
     this.pendingLivePanels = null;
-  }
-
-  async writeIndexAwaited(index: SessionSnapshotsIndex): Promise<void> {
-    this.cancelPendingIndex();
-    await this.workspaceState.update(SESSION_SNAPSHOTS_INDEX_KEY, index);
   }
 
   async writeLivePanelsAwaited(record: LiveEditorPanelsRecord): Promise<void> {
@@ -484,7 +437,19 @@ export class SessionStorage {
     } catch {
       // best-effort cleanup
     }
-    await this.workspaceState.update(SESSION_SNAPSHOTS_INDEX_KEY, undefined);
-    await this.workspaceState.update(LIVE_EDITOR_PANELS_KEY, undefined);
+    // Each Memento update is independently try/awaited so a Canceled on the
+    // first does not block the second. The sidecar is the source of truth
+    // (D17) and is already cleared above; Memento entries are best-effort.
+    // See .reviews/round-5.md [W2].
+    try {
+      await this.workspaceState.update(SESSION_SNAPSHOTS_INDEX_KEY, undefined);
+    } catch {
+      /* best-effort */
+    }
+    try {
+      await this.workspaceState.update(LIVE_EDITOR_PANELS_KEY, undefined);
+    } catch {
+      /* best-effort */
+    }
   }
 }

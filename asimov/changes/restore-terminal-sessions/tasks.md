@@ -382,7 +382,7 @@ Order: R-1 → R-2 / R-3 (parallelizable, different files) → R-4 → R-5 → R
     6. Remove `sessionsPendingDestroy` field.
     7. Update existing tests that referenced `sessionsPendingDestroy` (search-and-replace).
 
-- [ ] R-2 Define intentful SnapshotPersistence command API
+- [x] R-2 Define intentful SnapshotPersistence command API
   - **Deps**: R-1
   - **Refs**: design.md D15, .reviews/round-5.md
   - **Scope**:
@@ -399,7 +399,7 @@ Order: R-1 → R-2 / R-3 (parallelizable, different files) → R-4 → R-5 → R
     4. Delete the old methods.
     5. Remove `_sessionEpochs` field and its `bumpEpoch` helper.
 
-- [ ] R-3 Add per-artifact generation + temp-file + atomic rename to SessionStorage
+- [x] R-3 Add per-artifact generation + temp-file + atomic rename to SessionStorage
   - **Deps**: (parallel with R-2 — different file)
   - **Refs**: design.md D16, .reviews/round-5.md [B1] [B2]
   - **Scope**:
@@ -416,7 +416,7 @@ Order: R-1 → R-2 / R-3 (parallelizable, different files) → R-4 → R-5 → R
     5. Extend hydrateFromSnapshots orphan-cleanup step 4 to unlink `*.tmp.*` files.
     6. Write RED tests for: stale async after sync; stale async after drop; rename atomicity (same-fs invariant).
 
-- [ ] R-4 Drop Memento dual-write for snapshot index (sidecar single source-of-truth)
+- [x] R-4 Drop Memento dual-write for snapshot index (sidecar single source-of-truth)
   - **Deps**: R-3
   - **Refs**: design.md D17, .reviews/round-5.md [W2]
   - **Scope**:
@@ -434,7 +434,7 @@ Order: R-1 → R-2 / R-3 (parallelizable, different files) → R-4 → R-5 → R
     4. Delete `writeIndexAwaited` (and its caller in SnapshotPersistence.flushIndexAwaited — replaced by sync commit at deactivate).
     5. Update `purge()` to clear only the Memento livePanels entry + rmSync the snapshot dir. Wrap remaining Memento updates in try/catch (closes R5.W2).
 
-- [ ] R-5 Migrate SessionManager dispatch to state-machine + intentful API
+- [x] R-5 Migrate SessionManager dispatch to state-machine + intentful API
   - **Deps**: R-1, R-2, R-3, R-4
   - **Refs**: design.md D14-D17
   - **Scope**:
@@ -448,7 +448,7 @@ Order: R-1 → R-2 / R-3 (parallelizable, different files) → R-4 → R-5 → R
     2. For each: identify the current state at call time, replace with the intent-named command.
     3. Add invariant tests (state-incompatible call → assertion error).
 
-- [ ] R-6 Migrate flushPending + flushSnapshotsSync to use transactional commits
+- [x] R-6 Migrate flushPending + flushSnapshotsSync to use transactional commits
   - **Deps**: R-2, R-3
   - **Refs**: design.md D15, D16
   - **Scope**:
