@@ -153,12 +153,16 @@ export class SessionManager {
       // session ids back to their owning panel (round-1 W2).
       editorPanels: this.editorPanels,
     });
-    // Default exit-hook → SYNC immediate persist so the exit snapshot is
-    // durable BEFORE cleanupSession runs (which previously raced — the async
-    // flush couldn't complete in time and the D13 read-only snapshot was
-    // unlinked by detachSession). See .reviews/round-4.md [B3]. Tests
-    // override `onShellExited` directly.
-    this.onShellExited = (sessionId) => this.snapshots.flushSessionImmediateSync(sessionId);
+    // Default exit-hook → intentful commitExitSnapshot (sync). The exit
+    // snapshot is durable BEFORE cleanupSession runs; cleanupSession then
+    // dispatches releaseRuntimeOnly (state === "exited-preserved") so the
+    // just-committed snapshot survives for D13 read-only restore. Tests
+    // override `onShellExited` directly. See design.md D15.
+    this.onShellExited = (sessionId) => {
+      const session = this.sessions.get(sessionId);
+      if (!session) return;
+      this.snapshots.commitExitSnapshot(sessionId, session.exitCode ?? null);
+    };
   }
 
   /** Test/inspection helper — current value of the restore-enabled flag. */
@@ -628,7 +632,7 @@ export class SessionManager {
     if (!session) return;
     session.scrollbackCache = [];
     session.scrollbackSize = 0;
-    this.snapshots.resetMirror(sessionId);
+    this.snapshots.commitClearSnapshot(sessionId);
   }
 
   /** Handle ack message for a session's output buffer. Silent no-op for unknown session IDs. */
@@ -876,15 +880,16 @@ export class SessionManager {
           /* best-effort */
         }
       }
-      // Branch on lifecycle state — design.md D14. "destroying" means the
-      // user explicitly destroyed (or queued a destroy still mid-flight at
-      // deactivate-time); we MUST drop the snapshot. "exited-preserved" and
-      // "live" both preserve the mirror so the next activate restores the
-      // user's terminals (D13 read-only for exited, full-replay for live).
+      // Branch on lifecycle state — design.md D14+D15. "destroying" means
+      // the user explicitly destroyed (or queued a destroy still mid-flight
+      // at deactivate-time); we MUST drop the snapshot. "exited-preserved"
+      // and "live" both preserve the on-disk state so the next activate
+      // restores the user's terminals (D13 read-only for exited, full
+      // replay for live) — runtime mirror is released, disk untouched.
       if (session.state === "destroying") {
-        this.snapshots.detachSession(id);
+        this.snapshots.dropSession(id);
       } else {
-        this.snapshots.releaseMirror(id);
+        this.snapshots.releaseRuntimeOnly(id);
       }
     }
 
@@ -944,23 +949,23 @@ export class SessionManager {
       }
     }
 
-    // Branch on lifecycle state — design.md D14. "destroying" means the user
-    // explicitly destroyed; we drop the snapshot. "exited-preserved" means a
-    // natural shell exit (`exit`, ^D, crash); the sync exit-flush has already
-    // persisted the snapshot via onShellExited, so releaseMirror only disposes
-    // the runtime mirror — the persisted snapshot survives for D13 read-only
-    // restore. "live" here would be a contract violation (cleanupSession is
-    // only called from performDestroy or post-exit transition); fall through
-    // to releaseMirror as a safe default + log.
+    // Branch on lifecycle state — design.md D14+D15. "destroying" means the
+    // user explicitly destroyed; we dispatch dropSession. "exited-preserved"
+    // means a natural shell exit (`exit`, ^D, crash); the sync exit commit
+    // already persisted the snapshot via onShellExited → commitExitSnapshot,
+    // so releaseRuntimeOnly disposes only the runtime mirror — the persisted
+    // snapshot survives for D13 read-only restore. "live" here would be a
+    // contract violation (cleanupSession runs only from performDestroy or
+    // post-exit transition); fall through to releaseRuntimeOnly + log.
     if (session.state === "destroying") {
-      this.snapshots.detachSession(sessionId);
+      this.snapshots.dropSession(sessionId);
     } else if (session.state === "exited-preserved") {
-      this.snapshots.releaseMirror(sessionId);
+      this.snapshots.releaseRuntimeOnly(sessionId);
     } else {
       console.error(
-        `[AnyWhere Terminal] cleanupSession called for ${sessionId} in unexpected state '${session.state}' — defaulting to releaseMirror`,
+        `[AnyWhere Terminal] cleanupSession called for ${sessionId} in unexpected state '${session.state}' — defaulting to releaseRuntimeOnly`,
       );
-      this.snapshots.releaseMirror(sessionId);
+      this.snapshots.releaseRuntimeOnly(sessionId);
     }
     // Tombstone the state before deleting from the map. Useful for debugging
     // and for any in-flight callback that still holds a reference.

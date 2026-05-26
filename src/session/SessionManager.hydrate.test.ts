@@ -78,17 +78,36 @@ function meta(sessionId: string, overrides: Partial<SessionSnapshotMetadata> = {
 
 function makeStorageMock(initial: { buffers?: Record<string, string> } = {}) {
   const buffers = new Map(Object.entries(initial.buffers ?? {}));
+  const bufferGens = new Map<string, number>();
+  let sidecarGen = 0;
   return {
     readBufferFile: vi.fn((id: string) => (buffers.has(id) ? buffers.get(id)! : null)),
     listBufferFiles: vi.fn(() => Array.from(buffers.keys())),
-    unlinkBufferFile: vi.fn((id: string) => {
-      buffers.delete(id);
-    }),
     bufferFilePath: (id: string) => `/tmp/${id}.snapshot.ans`,
     bufferFileRelativePath: (id: string) => `snapshots/${id}.snapshot.ans`,
-    writeBufferFileAsync: vi.fn(async () => {}),
-    writeBufferFileSync: vi.fn(),
-    scheduleIndexWrite: vi.fn(),
+    commitBufferSync: vi.fn((id: string, data: string) => {
+      buffers.set(id, data);
+      bufferGens.set(id, (bufferGens.get(id) ?? 0) + 1);
+    }),
+    commitBufferAsync: vi.fn(async (id: string, data: string, capturedGen: number) => {
+      if ((bufferGens.get(id) ?? 0) !== capturedGen) return "stale-skipped" as const;
+      buffers.set(id, data);
+      return "renamed" as const;
+    }),
+    commitIndexSync: vi.fn(() => {
+      sidecarGen += 1;
+    }),
+    commitIndexAsync: vi.fn(async (_idx: unknown, capturedGen: number) => {
+      if (sidecarGen !== capturedGen) return "stale-skipped" as const;
+      return "renamed" as const;
+    }),
+    dropBuffer: vi.fn((id: string) => {
+      buffers.delete(id);
+      bufferGens.set(id, (bufferGens.get(id) ?? 0) + 1);
+    }),
+    currentBufferGen: vi.fn((id: string) => bufferGens.get(id) ?? 0),
+    currentSidecarGen: vi.fn(() => sidecarGen),
+    cleanupOrphanTemps: vi.fn(),
     scheduleLivePanelsWrite: vi.fn(),
     writeIndexAwaited: vi.fn(async () => {}),
     writeLivePanelsAwaited: vi.fn(async () => {}),
@@ -157,7 +176,7 @@ describe("SessionManager.hydrateFromSnapshots", () => {
 
     const all = sm.consumeSnapshotsForLocation("sidebar");
     expect(new Set(all.map((s) => s.metadata.sessionId))).toEqual(new Set(["S1", "orphan_X"]));
-    expect(storage.unlinkBufferFile).not.toHaveBeenCalledWith("orphan_X");
+    expect(storage.dropBuffer).not.toHaveBeenCalledWith("orphan_X");
     sm.dispose();
   });
 

@@ -95,21 +95,41 @@ function mockWebview(): MessageSender {
 }
 
 function makeStorageMock() {
-  const writeBufferFileAsync = vi.fn(async (_id: string, _data: string) => {});
-  const writeBufferFileSync = vi.fn();
-  const scheduleIndexWrite = vi.fn();
-  const unlinkBufferFile = vi.fn();
+  const bufferGens = new Map<string, number>();
+  let sidecarGen = 0;
+  const commitBufferSync = vi.fn((id: string, _data: string) => {
+    bufferGens.set(id, (bufferGens.get(id) ?? 0) + 1);
+  });
+  const commitBufferAsync = vi.fn(async (id: string, _data: string, capturedGen: number) => {
+    if ((bufferGens.get(id) ?? 0) !== capturedGen) return "stale-skipped" as const;
+    return "renamed" as const;
+  });
+  const commitIndexSync = vi.fn((_idx: unknown) => {
+    sidecarGen += 1;
+  });
+  const commitIndexAsync = vi.fn(async (_idx: unknown, capturedGen: number) => {
+    if (sidecarGen !== capturedGen) return "stale-skipped" as const;
+    return "renamed" as const;
+  });
+  const dropBuffer = vi.fn((id: string) => {
+    bufferGens.set(id, (bufferGens.get(id) ?? 0) + 1);
+  });
+  const currentBufferGen = vi.fn((id: string) => bufferGens.get(id) ?? 0);
+  const currentSidecarGen = vi.fn(() => sidecarGen);
+  const cleanupOrphanTemps = vi.fn();
   const writeIndexAwaited = vi.fn(async () => {});
   const writeLivePanelsAwaited = vi.fn(async () => {});
-  const writeIndexSync = vi.fn();
   return {
-    writeBufferFileAsync,
-    writeBufferFileSync,
-    scheduleIndexWrite,
-    unlinkBufferFile,
+    commitBufferSync,
+    commitBufferAsync,
+    commitIndexSync,
+    commitIndexAsync,
+    dropBuffer,
+    currentBufferGen,
+    currentSidecarGen,
+    cleanupOrphanTemps,
     writeIndexAwaited,
     writeLivePanelsAwaited,
-    writeIndexSync,
     readBufferFile: () => null,
     listBufferFiles: () => [],
     loadIndex: () => undefined,
@@ -212,7 +232,7 @@ describe("SessionManager dispose vs queued destroy (round-4 [B1])", () => {
     // unlink. Pre-fix: releaseMirror preserved the entry + buffer file.
     const remaining = sm.getSnapshotIndexEntries();
     expect(remaining[id]).toBeUndefined();
-    expect(storage.unlinkBufferFile).toHaveBeenCalledWith(id);
+    expect(storage.dropBuffer).toHaveBeenCalledWith(id);
   });
 
   it("a destroyAllForView queued before dispose must also drop snapshots, not preserve them", async () => {
@@ -242,8 +262,8 @@ describe("SessionManager dispose vs queued destroy (round-4 [B1])", () => {
     const remaining = sm.getSnapshotIndexEntries();
     expect(remaining[a]).toBeUndefined();
     expect(remaining[b]).toBeUndefined();
-    expect(storage.unlinkBufferFile).toHaveBeenCalledWith(a);
-    expect(storage.unlinkBufferFile).toHaveBeenCalledWith(b);
+    expect(storage.dropBuffer).toHaveBeenCalledWith(a);
+    expect(storage.dropBuffer).toHaveBeenCalledWith(b);
   });
 });
 
@@ -260,13 +280,21 @@ describe("SnapshotPersistence flushPending re-entry vs clearScrollback (round-4 
     const fx = makeFactories();
     const storage = makeStorageMock();
 
-    // Per-id queue of {resolve, data} so we control completion order.
-    const pending: Array<{ resolve: () => void; data: string }> = [];
-    storage.writeBufferFileAsync.mockImplementation(async (_id: string, data: string) => {
-      await new Promise<void>((resolve) => {
-        pending.push({ resolve, data });
-      });
-    });
+    // Per-id queue so we control completion order. Each call captures
+    // (id, data, capturedGen) and exposes a resolver that the test invokes
+    // to settle the async commit with "renamed" or "stale-skipped".
+    const pending: Array<{
+      resolve: (outcome: "renamed" | "stale-skipped") => void;
+      id: string;
+      data: string;
+      capturedGen: number;
+    }> = [];
+    storage.commitBufferAsync.mockImplementation(
+      (id: string, data: string, capturedGen: number) =>
+        new Promise<"renamed" | "stale-skipped">((resolve) => {
+          pending.push({ resolve, id, data, capturedGen });
+        }),
+    );
 
     const sm = new SessionManager(undefined, {
       restoreEnabled: true,
@@ -287,31 +315,24 @@ describe("SnapshotPersistence flushPending re-entry vs clearScrollback (round-4 
     expect(pending.length).toBe(1);
     expect(pending[0].data).toBe("PRE_CLEAR_BUFFER");
 
-    // Now clearScrollback fires while the pre-clear async write is still HELD.
-    // resetMirror chains the RIS, flushSessionImmediate → flushPending (call B).
+    // clearScrollback fires while the pre-clear async commit is still HELD.
+    // After R-2, commitClearSnapshot does the work SYNC (commitBufferSync +
+    // commitIndexSync) — no second commitBufferAsync call. The pre-clear
+    // captured-gen is invalidated by commitBufferSync's gen bump.
     fx.setNextSerialize("");
     sm.clearScrollback(id);
-    // Drain microtasks until call B reaches its own writeBufferFileAsync await.
     await vi.advanceTimersByTimeAsync(0);
-    await vi.advanceTimersByTimeAsync(0);
-    expect(pending.length).toBe(2);
-    expect(pending[1].data).toBe("");
+    expect(pending.length).toBe(1); // still only the one pre-clear async
 
-    // Force the BUG ordering: resolve the post-clear write FIRST (call B finishes),
-    // then the stale pre-clear write (call A finishes). Pre-fix, call A
-    // re-assigns _snapshotIndex[id] = stale pre-clear metadata after B already
-    // wrote the cleared entry — and the stale buffer payload on disk is the
-    // "last write wins" pre-clear content.
-    pending[1].resolve();
-    await vi.advanceTimersByTimeAsync(0);
-    await vi.advanceTimersByTimeAsync(0);
-    pending[0].resolve();
-    await vi.advanceTimersByTimeAsync(0);
+    // Resolve the stale pre-clear async with "stale-skipped" — what the real
+    // storage's post-write check would return given commitBufferSync bumped
+    // the gen during our await. commitLiveSnapshot sees outcome !== "renamed"
+    // and skips the _snapshotIndex update, so the cleared metadata stands.
+    pending[0].resolve("stale-skipped");
     await vi.advanceTimersByTimeAsync(0);
     await vi.advanceTimersByTimeAsync(0);
 
-    // The final index entry MUST reflect the cleared snapshot (empty buffer).
-    // Pre-fix: this is "PRE_CLEAR_BUFFER" because A's late assignment wins.
+    // The final index entry reflects the cleared snapshot (bufferBytes:0).
     const idx = sm.getSnapshotIndexEntries();
     expect(idx[id]).toBeDefined();
     expect(idx[id].bufferBytes).toBe(0);
@@ -355,10 +376,10 @@ describe("SessionManager pty.onExit preserves exited-shell snapshot (round-4 [B3
     expect(idx[id]?.exitCode).toBe(0);
 
     // The buffer file MUST NOT have been unlinked by the cleanup path.
-    expect(storage.unlinkBufferFile).not.toHaveBeenCalledWith(id);
+    expect(storage.dropBuffer).not.toHaveBeenCalledWith(id);
     // The exit snapshot MUST have been written (sync, since the async path
     // would race with cleanupSession). Pre-fix this never happens.
-    expect(storage.writeBufferFileSync).toHaveBeenCalledWith(id, expect.any(String));
+    expect(storage.commitBufferSync).toHaveBeenCalledWith(id, expect.any(String));
 
     sm.dispose();
   });
@@ -388,7 +409,7 @@ describe("SessionManager pty.onExit preserves exited-shell snapshot (round-4 [B3
     // The exit snapshot must NOT have been unlinked at any point in the
     // deactivate path. Pre-fix the unlink fires inside cleanupSession even
     // before deactivate begins.
-    expect(storage.unlinkBufferFile).not.toHaveBeenCalledWith(id);
+    expect(storage.dropBuffer).not.toHaveBeenCalledWith(id);
   });
 });
 
@@ -469,7 +490,7 @@ describe("SessionManager session lifecycle state machine (R-1, D14)", () => {
     // snapshot must have been preserved (verified by the existing B3 test).
     // What we add here: the dispatch decision was driven by the state machine,
     // not by sessionsPendingDestroy.has() — assert no unlink fired.
-    expect(storage.unlinkBufferFile).not.toHaveBeenCalledWith(id);
+    expect(storage.dropBuffer).not.toHaveBeenCalledWith(id);
     sm.dispose();
   });
 

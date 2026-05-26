@@ -74,11 +74,29 @@ function mockWebview(): MessageSender {
 }
 
 function makeStorageMock() {
+  const bufferGens = new Map<string, number>();
+  let sidecarGen = 0;
   return {
-    writeBufferFileAsync: vi.fn(async () => {}),
-    writeBufferFileSync: vi.fn(),
-    scheduleIndexWrite: vi.fn(),
-    unlinkBufferFile: vi.fn(),
+    commitBufferSync: vi.fn((id: string, _data: string) => {
+      bufferGens.set(id, (bufferGens.get(id) ?? 0) + 1);
+    }),
+    commitBufferAsync: vi.fn(async (id: string, _data: string, capturedGen: number) => {
+      if ((bufferGens.get(id) ?? 0) !== capturedGen) return "stale-skipped" as const;
+      return "renamed" as const;
+    }),
+    commitIndexSync: vi.fn(() => {
+      sidecarGen += 1;
+    }),
+    commitIndexAsync: vi.fn(async (_idx: unknown, capturedGen: number) => {
+      if (sidecarGen !== capturedGen) return "stale-skipped" as const;
+      return "renamed" as const;
+    }),
+    dropBuffer: vi.fn((id: string) => {
+      bufferGens.set(id, (bufferGens.get(id) ?? 0) + 1);
+    }),
+    currentBufferGen: vi.fn((id: string) => bufferGens.get(id) ?? 0),
+    currentSidecarGen: vi.fn(() => sidecarGen),
+    cleanupOrphanTemps: vi.fn(),
     writeIndexAwaited: vi.fn(async () => {}),
     writeLivePanelsAwaited: vi.fn(async () => {}),
     readBufferFile: () => null,
@@ -137,9 +155,9 @@ describe("SessionManager flushSnapshotsSync + flushIndexAwaited", () => {
     mockPtySessions[0].onData?.("aa");
     mockPtySessions[1].onData?.("bb");
     sm.flushSnapshotsSync();
-    expect(storage.writeBufferFileSync).toHaveBeenCalledTimes(2);
-    expect(storage.writeBufferFileSync).toHaveBeenCalledWith(a, "BUFFER");
-    expect(storage.writeBufferFileSync).toHaveBeenCalledWith(b, "BUFFER");
+    expect(storage.commitBufferSync).toHaveBeenCalledTimes(2);
+    expect(storage.commitBufferSync).toHaveBeenCalledWith(a, "BUFFER");
+    expect(storage.commitBufferSync).toHaveBeenCalledWith(b, "BUFFER");
     sm.dispose();
   });
 
@@ -172,7 +190,7 @@ describe("SessionManager flushSnapshotsSync + flushIndexAwaited", () => {
     });
     sm.dispose();
     sm.flushSnapshotsSync();
-    expect(storage.writeBufferFileSync).not.toHaveBeenCalled();
+    expect(storage.commitBufferSync).not.toHaveBeenCalled();
   });
 
   it("dispose is idempotent — second call is a no-op", () => {
@@ -199,7 +217,7 @@ describe("SessionManager flushSnapshotsSync + flushIndexAwaited", () => {
     sm.createSession("sidebar", mockWebview());
     mockPtySessions[0].onData?.("x");
     sm.dispose();
-    expect(storage.writeBufferFileSync).not.toHaveBeenCalled();
+    expect(storage.commitBufferSync).not.toHaveBeenCalled();
     expect(storage.writeIndexAwaited).not.toHaveBeenCalled();
   });
 });

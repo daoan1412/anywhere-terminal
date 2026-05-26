@@ -85,17 +85,41 @@ function mockWebview(): MessageSender {
 }
 
 function makeStorageMock() {
-  const writeBufferFileAsync = vi.fn(async (_id: string, _data: string) => {});
-  const scheduleIndexWrite = vi.fn();
-  const unlinkBufferFile = vi.fn();
-  const writeBufferFileSync = vi.fn();
+  // Per-artifact generation tracked like the real transactional storage.
+  // Sync writers + drops bump first; async writers check capturedGen.
+  const bufferGens = new Map<string, number>();
+  let sidecarGen = 0;
+  const commitBufferSync = vi.fn((id: string, _data: string) => {
+    bufferGens.set(id, (bufferGens.get(id) ?? 0) + 1);
+  });
+  const commitBufferAsync = vi.fn(async (id: string, _data: string, capturedGen: number) => {
+    if ((bufferGens.get(id) ?? 0) !== capturedGen) return "stale-skipped" as const;
+    return "renamed" as const;
+  });
+  const dropBuffer = vi.fn((id: string) => {
+    bufferGens.set(id, (bufferGens.get(id) ?? 0) + 1);
+  });
+  const commitIndexSync = vi.fn((_idx: unknown) => {
+    sidecarGen += 1;
+  });
+  const commitIndexAsync = vi.fn(async (_idx: unknown, capturedGen: number) => {
+    if (sidecarGen !== capturedGen) return "stale-skipped" as const;
+    return "renamed" as const;
+  });
+  const currentBufferGen = vi.fn((id: string) => bufferGens.get(id) ?? 0);
+  const currentSidecarGen = vi.fn(() => sidecarGen);
+  const cleanupOrphanTemps = vi.fn();
   const writeIndexAwaited = vi.fn(async () => {});
   const writeLivePanelsAwaited = vi.fn(async () => {});
   return {
-    writeBufferFileAsync,
-    writeBufferFileSync,
-    scheduleIndexWrite,
-    unlinkBufferFile,
+    commitBufferSync,
+    commitBufferAsync,
+    commitIndexSync,
+    commitIndexAsync,
+    dropBuffer,
+    currentBufferGen,
+    currentSidecarGen,
+    cleanupOrphanTemps,
     writeIndexAwaited,
     writeLivePanelsAwaited,
     readBufferFile: () => null,
@@ -160,13 +184,13 @@ describe("SessionManager debounced persistence", () => {
     for (let i = 0; i < 50; i++) {
       mockPtySessions[0].onData?.(`chunk-${i}`);
     }
-    expect(storage.writeBufferFileAsync).not.toHaveBeenCalled();
-    expect(storage.scheduleIndexWrite).not.toHaveBeenCalled();
+    expect(storage.commitBufferAsync).not.toHaveBeenCalled();
+    expect(storage.commitIndexAsync).not.toHaveBeenCalled();
 
     await vi.advanceTimersByTimeAsync(1000);
 
-    expect(storage.writeBufferFileAsync).toHaveBeenCalledTimes(1);
-    expect(storage.scheduleIndexWrite).toHaveBeenCalledTimes(1);
+    expect(storage.commitBufferAsync).toHaveBeenCalledTimes(1);
+    expect(storage.commitIndexAsync).toHaveBeenCalledTimes(1);
     sm.dispose();
   });
 
@@ -182,14 +206,14 @@ describe("SessionManager debounced persistence", () => {
     const id = sm.createSession("sidebar", mockWebview());
     mockPtySessions[0].onData?.("seed");
     await vi.advanceTimersByTimeAsync(1000);
-    storage.writeBufferFileAsync.mockClear();
-    storage.scheduleIndexWrite.mockClear();
+    storage.commitBufferAsync.mockClear();
+    storage.commitIndexAsync.mockClear();
 
     sm.renameSession(id, "build");
     await vi.advanceTimersByTimeAsync(1000);
 
-    expect(storage.writeBufferFileAsync).toHaveBeenCalledTimes(1);
-    expect(storage.scheduleIndexWrite).toHaveBeenCalledTimes(1);
+    expect(storage.commitBufferAsync).toHaveBeenCalledTimes(1);
+    expect(storage.commitIndexAsync).toHaveBeenCalledTimes(1);
     sm.dispose();
   });
 
@@ -205,14 +229,14 @@ describe("SessionManager debounced persistence", () => {
     const id = sm.createSession("sidebar", mockWebview());
     mockPtySessions[0].onData?.("seed");
     await vi.advanceTimersByTimeAsync(1000);
-    storage.writeBufferFileAsync.mockClear();
-    storage.scheduleIndexWrite.mockClear();
+    storage.commitBufferAsync.mockClear();
+    storage.commitIndexAsync.mockClear();
 
     sm.setCurrentCwd(id, "/home/user/proj");
     await vi.advanceTimersByTimeAsync(1000);
 
-    expect(storage.writeBufferFileAsync).toHaveBeenCalledTimes(1);
-    expect(storage.scheduleIndexWrite).toHaveBeenCalledTimes(1);
+    expect(storage.commitBufferAsync).toHaveBeenCalledTimes(1);
+    expect(storage.commitIndexAsync).toHaveBeenCalledTimes(1);
     sm.dispose();
   });
 
@@ -221,15 +245,15 @@ describe("SessionManager debounced persistence", () => {
     // fires. The pre-W3 code path would then synchronously re-insert the index
     // entry after detachSession had just dropped it — resurrecting a ghost.
     const fx = makeFactories();
-    let resolveWrite: () => void = () => {};
-    const writePromise = new Promise<void>((resolve) => {
+    let resolveWrite: (outcome: "renamed" | "stale-skipped") => void = () => {};
+    const writePromise = new Promise<"renamed" | "stale-skipped">((resolve) => {
       resolveWrite = resolve;
     });
     const storage = makeStorageMock();
-    // Slow writeBufferFileAsync — held until we explicitly resolve it.
-    storage.writeBufferFileAsync.mockImplementation(async () => {
-      await writePromise;
-    });
+    // Slow commitBufferAsync — held until we explicitly resolve it. Resolve
+    // with "stale-skipped" since dropSession bumps the buffer gen during the
+    // await; the real storage would return stale-skipped post-write check.
+    storage.commitBufferAsync.mockImplementation(() => writePromise);
 
     const sm = new SessionManager(undefined, {
       restoreEnabled: true,
@@ -253,22 +277,28 @@ describe("SessionManager debounced persistence", () => {
     // would resurrect the entry. Post-W3: the per-session liveness re-check
     // (`if (!this.getSession(id)) { unlinkBufferFile(id); continue; }`) skips
     // the assignment AND unlinks the just-written ghost file.
-    resolveWrite();
+    resolveWrite("stale-skipped");
     await Promise.resolve();
     await Promise.resolve();
     await vi.advanceTimersByTimeAsync(50);
 
-    // The index write that flushPending schedules at the end should NOT
-    // contain the destroyed session.
-    const calls = storage.scheduleIndexWrite.mock.calls;
-    const lastCall = calls[calls.length - 1];
-    if (lastCall) {
-      const idx = lastCall[0] as { entries: Record<string, unknown> };
-      expect(idx.entries[id]).toBeUndefined();
-    }
-    // The file MUST be unlinked twice: once by detachSession, once by the
-    // post-await ghost-cleanup. Vitest's mock counts both calls.
-    expect(storage.unlinkBufferFile).toHaveBeenCalledWith(id);
+    // The async index commit at end-of-flush should NOT contain the
+    // destroyed session (in-mem index dropped + on-disk dropped via
+    // dropSession before the async commit lands).
+    const idxCalls = storage.commitIndexAsync.mock.calls;
+    const syncCalls = storage.commitIndexSync.mock.calls;
+    const lastAsync = idxCalls[idxCalls.length - 1]?.[0] as
+      | { entries: Record<string, unknown> }
+      | undefined;
+    const lastSync = syncCalls[syncCalls.length - 1]?.[0] as
+      | { entries: Record<string, unknown> }
+      | undefined;
+    if (lastAsync) expect(lastAsync.entries[id]).toBeUndefined();
+    if (lastSync) expect(lastSync.entries[id]).toBeUndefined();
+    // dropSession (from cleanupSession with state="destroying") calls
+    // storage.dropBuffer — the in-flight async commit returns stale-skipped
+    // and never touches the canonical path.
+    expect(storage.dropBuffer).toHaveBeenCalledWith(id);
     sm.dispose();
   });
 
@@ -318,16 +348,18 @@ describe("SessionManager debounced persistence", () => {
     // Confirm the precondition: no headless mirror on the exited session.
     expect(sm.getSession(id)?.headless).toBeUndefined();
 
-    storage.unlinkBufferFile.mockClear();
-    storage.scheduleIndexWrite.mockClear();
+    storage.dropBuffer.mockClear();
+    storage.commitIndexAsync.mockClear();
+    storage.commitIndexSync.mockClear();
 
     sm.clearScrollback(id);
 
-    // The persisted buffer file MUST be unlinked.
-    expect(storage.unlinkBufferFile).toHaveBeenCalledWith(id);
-    // Index rewrite scheduled (without this session's entry).
-    expect(storage.scheduleIndexWrite).toHaveBeenCalled();
-    const lastIndexCall = storage.scheduleIndexWrite.mock.calls.at(-1)?.[0] as
+    // No-mirror branch of commitClearSnapshot: drop the buffer + sync sidecar
+    // commit. See design.md D15 (commitClearSnapshot replaces resetMirror
+    // + purgePersistedSnapshot).
+    expect(storage.dropBuffer).toHaveBeenCalledWith(id);
+    expect(storage.commitIndexSync).toHaveBeenCalled();
+    const lastIndexCall = storage.commitIndexSync.mock.calls.at(-1)?.[0] as
       | { entries: Record<string, unknown> }
       | undefined;
     expect(lastIndexCall?.entries[id]).toBeUndefined();
@@ -349,8 +381,8 @@ describe("SessionManager debounced persistence", () => {
     }
     await vi.advanceTimersByTimeAsync(2000);
 
-    expect(storage.writeBufferFileAsync).not.toHaveBeenCalled();
-    expect(storage.scheduleIndexWrite).not.toHaveBeenCalled();
+    expect(storage.commitBufferAsync).not.toHaveBeenCalled();
+    expect(storage.commitIndexAsync).not.toHaveBeenCalled();
     sm.dispose();
   });
 });

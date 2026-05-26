@@ -65,6 +65,14 @@ function makeFakeFs() {
         }
       }
     }),
+    renameSync: vi.fn((from: string, to: string) => {
+      const v = files.get(from);
+      if (v === undefined) {
+        throw new Error(`ENOENT: ${from}`);
+      }
+      files.set(to, v);
+      files.delete(from);
+    }),
     promises: {
       writeFile,
       readFile: async (f) => {
@@ -80,6 +88,14 @@ function makeFakeFs() {
       }),
       unlink: vi.fn(async (f) => {
         files.delete(f);
+      }),
+      rename: vi.fn(async (from: string, to: string) => {
+        const v = files.get(from);
+        if (v === undefined) {
+          throw new Error(`ENOENT: ${from}`);
+        }
+        files.set(to, v);
+        files.delete(from);
       }),
     },
   };
@@ -284,5 +300,171 @@ describe("SessionStorage", () => {
     expect(mem.get(SESSION_SNAPSHOTS_INDEX_KEY)).toBeUndefined();
     expect(mem.get(LIVE_EDITOR_PANELS_KEY)).toBeUndefined();
     expect(s.listBufferFiles()).toEqual([]);
+  });
+
+  // ───────────────────────────────────────────────────────────────────
+  // [R-3] Transactional commit invariants (design.md D16).
+  // Goal: a stale async commit (whose captured-gen was invalidated by a
+  // sync write or drop while it awaited) MUST NOT touch the canonical
+  // path — only its own temp file.
+  // ───────────────────────────────────────────────────────────────────
+
+  describe("transactional commit API (R-3, D16)", () => {
+    it("commitBufferSync writes via temp + atomic rename — no temp file survives", async () => {
+      const mem = makeFakeMemento();
+      const { fs, files } = makeFakeFs();
+      const s = new SessionStorage(mem as unknown as vscode.Memento, STORAGE_URI, fs);
+      s.commitBufferSync("alpha", "DATA");
+      expect(files.get(bufferFile("alpha"))).toBe("DATA");
+      // No `.tmp.` artifact left over.
+      const allFiles = [...files.keys()].filter((k) => k.startsWith(SNAPS_DIR));
+      expect(allFiles.filter((k) => k.includes(".tmp."))).toEqual([]);
+    });
+
+    it("commitBufferAsync writes via temp + atomic rename", async () => {
+      const mem = makeFakeMemento();
+      const { fs, files } = makeFakeFs();
+      const s = new SessionStorage(mem as unknown as vscode.Memento, STORAGE_URI, fs);
+      const gen = s.currentBufferGen("alpha");
+      await s.commitBufferAsync("alpha", "DATA", gen);
+      expect(files.get(bufferFile("alpha"))).toBe("DATA");
+      const allFiles = [...files.keys()].filter((k) => k.startsWith(SNAPS_DIR));
+      expect(allFiles.filter((k) => k.includes(".tmp."))).toEqual([]);
+    });
+
+    it("stale commitBufferAsync after a sync write does NOT overwrite the canonical (R5.B1 fix verified at storage layer)", async () => {
+      const mem = makeFakeMemento();
+      const { fs, files } = makeFakeFs();
+
+      // Hold the async write so we control completion order.
+      let releaseAsync: () => void = () => {};
+      const heldPromise = new Promise<void>((resolve) => {
+        releaseAsync = resolve;
+      });
+      const realWriteFile = fs.promises.writeFile;
+      fs.promises.writeFile = vi.fn(async (f: string, d: string) => {
+        await heldPromise;
+        return realWriteFile(f, d);
+      });
+
+      const s = new SessionStorage(mem as unknown as vscode.Memento, STORAGE_URI, fs);
+
+      // Capture pre-gen, kick async write (held in promises.writeFile).
+      const capturedGen = s.currentBufferGen("alpha");
+      const asyncCommit = s.commitBufferAsync("alpha", "ASYNC_STALE", capturedGen);
+
+      // Sync writer lands FIRST — bumps gen and writes canonical synchronously.
+      s.commitBufferSync("alpha", "SYNC_FRESH");
+      expect(files.get(bufferFile("alpha"))).toBe("SYNC_FRESH");
+
+      // Release the async write. It re-checks the gen, finds mismatch, unlinks
+      // ONLY its temp. The canonical must still show SYNC_FRESH.
+      releaseAsync();
+      await asyncCommit;
+      expect(files.get(bufferFile("alpha"))).toBe("SYNC_FRESH");
+
+      // No temp file left over.
+      const allFiles = [...files.keys()].filter((k) => k.startsWith(SNAPS_DIR));
+      expect(allFiles.filter((k) => k.includes(".tmp."))).toEqual([]);
+    });
+
+    it("stale commitBufferAsync after a dropBuffer does NOT recreate the canonical", async () => {
+      const mem = makeFakeMemento();
+      const { fs, files } = makeFakeFs();
+
+      let releaseAsync: () => void = () => {};
+      const heldPromise = new Promise<void>((resolve) => {
+        releaseAsync = resolve;
+      });
+      const realWriteFile = fs.promises.writeFile;
+      fs.promises.writeFile = vi.fn(async (f: string, d: string) => {
+        await heldPromise;
+        return realWriteFile(f, d);
+      });
+
+      const s = new SessionStorage(mem as unknown as vscode.Memento, STORAGE_URI, fs);
+      // Seed an existing canonical.
+      s.commitBufferSync("alpha", "INITIAL");
+      const capturedGen = s.currentBufferGen("alpha");
+
+      const asyncCommit = s.commitBufferAsync("alpha", "ASYNC_STALE", capturedGen);
+
+      // Drop bumps the gen and unlinks the canonical SYNCHRONOUSLY.
+      s.dropBuffer("alpha");
+      expect(files.get(bufferFile("alpha"))).toBeUndefined();
+
+      // Release the async write. It must NOT recreate the canonical.
+      releaseAsync();
+      await asyncCommit;
+      expect(files.get(bufferFile("alpha"))).toBeUndefined();
+
+      const allFiles = [...files.keys()].filter((k) => k.startsWith(SNAPS_DIR));
+      expect(allFiles.filter((k) => k.includes(".tmp."))).toEqual([]);
+    });
+
+    it("commitIndexSync writes the sidecar atomically via temp + rename", () => {
+      const mem = makeFakeMemento();
+      const { fs, files } = makeFakeFs();
+      const s = new SessionStorage(mem as unknown as vscode.Memento, STORAGE_URI, fs);
+      const idx: SessionSnapshotsIndex = { version: 1, entries: { s1: makeMeta("s1") } };
+      s.commitIndexSync(idx);
+      expect(JSON.parse(files.get(`${SNAPS_DIR}/index.json`) ?? "")).toEqual(idx);
+      const allFiles = [...files.keys()].filter((k) => k.startsWith(SNAPS_DIR));
+      expect(allFiles.filter((k) => k.includes(".tmp."))).toEqual([]);
+    });
+
+    it("stale commitIndexAsync after commitIndexSync does NOT overwrite the sidecar (R5.B2 fix verified)", async () => {
+      const mem = makeFakeMemento();
+      const { fs, files } = makeFakeFs();
+
+      let releaseAsync: () => void = () => {};
+      const heldPromise = new Promise<void>((resolve) => {
+        releaseAsync = resolve;
+      });
+      const realWriteFile = fs.promises.writeFile;
+      fs.promises.writeFile = vi.fn(async (f: string, d: string) => {
+        await heldPromise;
+        return realWriteFile(f, d);
+      });
+
+      const s = new SessionStorage(mem as unknown as vscode.Memento, STORAGE_URI, fs);
+      const stale: SessionSnapshotsIndex = {
+        version: 1,
+        entries: { s1: makeMeta("s1", { snapshotAt: 1 }) },
+      };
+      const fresh: SessionSnapshotsIndex = {
+        version: 1,
+        entries: { s1: makeMeta("s1", { snapshotAt: 999 }) },
+      };
+
+      const capturedGen = s.currentSidecarGen();
+      const asyncCommit = s.commitIndexAsync(stale, capturedGen);
+      s.commitIndexSync(fresh);
+      expect(JSON.parse(files.get(`${SNAPS_DIR}/index.json`) ?? "")).toEqual(fresh);
+
+      releaseAsync();
+      await asyncCommit;
+      // The sidecar must still reflect the SYNC write — stale async lost.
+      expect(JSON.parse(files.get(`${SNAPS_DIR}/index.json`) ?? "")).toEqual(fresh);
+
+      const allFiles = [...files.keys()].filter((k) => k.startsWith(SNAPS_DIR));
+      expect(allFiles.filter((k) => k.includes(".tmp."))).toEqual([]);
+    });
+
+    it("cleanupOrphanTemps removes leftover *.tmp.* files from a prior crashed write", () => {
+      const mem = makeFakeMemento();
+      const { fs, files } = makeFakeFs();
+      const s = new SessionStorage(mem as unknown as vscode.Memento, STORAGE_URI, fs);
+      // Seed a canonical + a stray temp.
+      s.commitBufferSync("alpha", "DATA");
+      // Simulate orphan: write directly to a temp path.
+      files.set(`${SNAPS_DIR}/alpha.snapshot.ans.tmp.999`, "STALE");
+      expect(files.get(`${SNAPS_DIR}/alpha.snapshot.ans.tmp.999`)).toBe("STALE");
+
+      s.cleanupOrphanTemps();
+
+      expect(files.get(`${SNAPS_DIR}/alpha.snapshot.ans.tmp.999`)).toBeUndefined();
+      expect(files.get(bufferFile("alpha"))).toBe("DATA");
+    });
   });
 });

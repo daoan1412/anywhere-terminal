@@ -21,12 +21,14 @@ export interface FsLike {
   existsSync: (file: string) => boolean;
   unlinkSync: (file: string) => void;
   readdirSync: (dir: string) => string[];
+  renameSync: (from: string, to: string) => void;
   rmSync?: (dir: string, options?: { recursive?: boolean; force?: boolean }) => void;
   promises: {
     writeFile: (file: string, data: string) => Promise<void>;
     readFile: (file: string, encoding: "utf8") => Promise<string>;
     mkdir: (dir: string, options?: { recursive?: boolean }) => Promise<unknown>;
     unlink: (file: string) => Promise<void>;
+    rename: (from: string, to: string) => Promise<void>;
   };
 }
 
@@ -36,6 +38,28 @@ export class SessionStorage {
   private readonly snapshotsDir: string;
   private indexTimer: NodeJS.Timeout | null = null;
   private pendingIndex: SessionSnapshotsIndex | null = null;
+
+  /**
+   * Per-buffer generation counter. Bumped by sync writers AND drops BEFORE
+   * the disk op. Async writers capture the gen before serializing and check
+   * it on rename — mismatch means a sync/drop won the race; the async result
+   * is stale and writes only to its temp file, NEVER touching the canonical
+   * path. Eliminates the R5.B1 race where stale unlinks deleted live data.
+   * See design.md D16.
+   */
+  private bufferGens: Map<string, number> = new Map();
+  /**
+   * Sidecar generation counter. Same semantics as bufferGens but for the
+   * shared `<snapshotsDir>/index.json` artifact. Eliminates R5.B2 where a
+   * fire-and-forget async sidecar write landed AFTER a sync sidecar write
+   * and left the on-disk state stale relative to deactivate.
+   */
+  private sidecarGen: number = 0;
+  /**
+   * Monotonic temp-id counter — each in-flight write picks a unique temp
+   * path so concurrent async writers cannot clobber each other's spool.
+   */
+  private tempCounter: number = 0;
 
   constructor(
     private readonly workspaceState: vscode.Memento,
@@ -236,6 +260,164 @@ export class SessionStorage {
       void this.workspaceState.update(SESSION_SNAPSHOTS_INDEX_KEY, toWrite);
     }, INDEX_DEBOUNCE_MS);
   }
+
+  // ─── Transactional commit API (design.md D16) ──────────────────────
+  //
+  // Sync writers / drops bump the per-artifact generation BEFORE the disk
+  // op. Async writers capture-then-act-then-recheck — if the gen moved
+  // during their await, they unlink their temp file ONLY (never canonical).
+  // All writes go through `<canonical>.tmp.<n>` + `renameSync` / `rename`
+  // for atomicity on the same filesystem.
+
+  /** Snapshot the current buffer generation for `id` — pass to commitBufferAsync later. */
+  currentBufferGen(sessionId: string): number {
+    return this.bufferGens.get(sessionId) ?? 0;
+  }
+
+  /** Snapshot the current sidecar generation — pass to commitIndexAsync later. */
+  currentSidecarGen(): number {
+    return this.sidecarGen;
+  }
+
+  private nextTempId(): number {
+    return ++this.tempCounter;
+  }
+
+  private tempPath(canonical: string, tempId: number): string {
+    return `${canonical}.tmp.${tempId}`;
+  }
+
+  private bumpBufferGen(sessionId: string): number {
+    const next = (this.bufferGens.get(sessionId) ?? 0) + 1;
+    this.bufferGens.set(sessionId, next);
+    return next;
+  }
+
+  /**
+   * Synchronously commit a buffer snapshot. Bumps gen FIRST so any in-flight
+   * async writer sees the mismatch on its post-write check and unlinks only
+   * its temp.
+   */
+  commitBufferSync(sessionId: string, data: string): void {
+    const canonical = this.bufferFilePath(sessionId);
+    this.bumpBufferGen(sessionId);
+    this.ensureSnapshotsDir();
+    const temp = this.tempPath(canonical, this.nextTempId());
+    this.fs.writeFileSync(temp, data);
+    this.fs.renameSync(temp, canonical);
+  }
+
+  /**
+   * Async commit a buffer snapshot. Caller must pass the gen they captured
+   * before serializing. Two checkpoints (pre-write + pre-rename) ensure a
+   * stale write never reaches the canonical path. Returns the outcome so
+   * the caller can skip the in-memory index update on stale results.
+   */
+  async commitBufferAsync(
+    sessionId: string,
+    data: string,
+    capturedGen: number,
+  ): Promise<"renamed" | "stale-skipped" | "stale-post-write"> {
+    // Pre-write check: if the gen already advanced past `capturedGen`,
+    // someone else's sync write / drop won the race before we even mkdir'd.
+    if ((this.bufferGens.get(sessionId) ?? 0) !== capturedGen) return "stale-skipped";
+    const canonical = this.bufferFilePath(sessionId);
+    await this.fs.promises.mkdir(this.snapshotsDir, { recursive: true });
+    const temp = this.tempPath(canonical, this.nextTempId());
+    await this.fs.promises.writeFile(temp, data);
+    // Post-write, pre-rename check: a sync writer / drop may have run
+    // during our await. Mismatch → clean up the temp and bail; never
+    // overwrite the canonical with our stale data.
+    if ((this.bufferGens.get(sessionId) ?? 0) !== capturedGen) {
+      try {
+        await this.fs.promises.unlink(temp);
+      } catch {
+        /* best-effort */
+      }
+      return "stale-post-write";
+    }
+    await this.fs.promises.rename(temp, canonical);
+    return "renamed";
+  }
+
+  /**
+   * Drop a session's buffer file. Bumps the gen so any in-flight async
+   * writer sees the mismatch and unlinks its temp only — preventing the
+   * R5.B1 race where the async stale unlink targeted the canonical path.
+   */
+  dropBuffer(sessionId: string): void {
+    this.bumpBufferGen(sessionId);
+    let canonical: string;
+    try {
+      canonical = this.bufferFilePath(sessionId);
+    } catch (err) {
+      console.warn("[AnyWhere Terminal] dropBuffer rejected unsafe sessionId:", err);
+      return;
+    }
+    try {
+      if (this.fs.existsSync(canonical)) {
+        this.fs.unlinkSync(canonical);
+      }
+    } catch {
+      /* best-effort */
+    }
+  }
+
+  /** Synchronously commit the snapshot index sidecar. Bumps sidecarGen first. */
+  commitIndexSync(index: SessionSnapshotsIndex): void {
+    this.sidecarGen += 1;
+    this.ensureSnapshotsDir();
+    const canonical = this.indexSidecarPath();
+    const temp = this.tempPath(canonical, this.nextTempId());
+    this.fs.writeFileSync(temp, JSON.stringify(index));
+    this.fs.renameSync(temp, canonical);
+  }
+
+  /** Async commit the snapshot index sidecar with a generation check. */
+  async commitIndexAsync(
+    index: SessionSnapshotsIndex,
+    capturedGen: number,
+  ): Promise<"renamed" | "stale-skipped" | "stale-post-write"> {
+    if (this.sidecarGen !== capturedGen) return "stale-skipped";
+    await this.fs.promises.mkdir(this.snapshotsDir, { recursive: true });
+    const canonical = this.indexSidecarPath();
+    const temp = this.tempPath(canonical, this.nextTempId());
+    await this.fs.promises.writeFile(temp, JSON.stringify(index));
+    if (this.sidecarGen !== capturedGen) {
+      try {
+        await this.fs.promises.unlink(temp);
+      } catch {
+        /* best-effort */
+      }
+      return "stale-post-write";
+    }
+    await this.fs.promises.rename(temp, canonical);
+    return "renamed";
+  }
+
+  /**
+   * Best-effort cleanup of stray `*.tmp.*` files in the snapshots dir.
+   * Called from hydrate after activate to remove any temp file that was
+   * left orphaned by a process crash mid-rename. See design.md D16.
+   */
+  cleanupOrphanTemps(): void {
+    try {
+      if (!this.fs.existsSync(this.snapshotsDir)) return;
+      for (const name of this.fs.readdirSync(this.snapshotsDir)) {
+        if (name.includes(".tmp.")) {
+          try {
+            this.fs.unlinkSync(path.join(this.snapshotsDir, name));
+          } catch {
+            /* best-effort */
+          }
+        }
+      }
+    } catch {
+      /* best-effort */
+    }
+  }
+
+  // ─── Legacy timers (kept until R-4 drops Memento dual-write) ────────
 
   private livePanelsTimer: NodeJS.Timeout | null = null;
   private pendingLivePanels: LiveEditorPanelsRecord | null = null;

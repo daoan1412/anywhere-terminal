@@ -119,18 +119,6 @@ export class SnapshotPersistence {
    */
   private _persistGeneration = 0;
 
-  /**
-   * Per-session epoch token. Bumped by any destructive op that invalidates
-   * an in-flight snapshot write: `detachSession`, `resetMirror`,
-   * `purgePersistedSnapshot`, `flushSessionImmediateSync`. `flushPending`
-   * captures the epoch BEFORE serializing the buffer; after the await on
-   * `writeBufferFileAsync` it re-checks — if the epoch advanced, the just-
-   * written buffer is stale (e.g. clearScrollback fired while we were mid-
-   * write), so we unlink the ghost file and skip the index assignment.
-   * See `.reviews/round-4.md` [B2].
-   */
-  private _sessionEpochs = new Map<string, number>();
-
   /** Latest snapshot metadata, indexed by sessionId. Used to compose the persisted index. */
   private _snapshotIndex: Record<string, SessionSnapshotMetadata> = {};
 
@@ -218,67 +206,193 @@ export class SnapshotPersistence {
     }
   }
 
-  /**
-   * Called by SessionManager.cleanupSession. Disposes the headless mirror +
-   * SerializeAddon, removes the index entry, unlinks the buffer file, and
-   * schedules an index rewrite so the dropped entry doesn't linger.
-   *
-   * Always bumps the per-session epoch — any in-flight async flush that
-   * captured the prior epoch will detect the mismatch after its
-   * writeBufferFileAsync await and unlink the ghost write rather than
-   * resurrect this session's index entry.
-   */
-  detachSession(sessionId: string): void {
-    const session = this.getSession(sessionId);
-    if (session) this.disposeMirrorFor(session);
+  // ─── Intentful command API (design.md D15) ─────────────────────────
+  //
+  // Every snapshot-touching action below names a user-INTENT (commitLive,
+  // commitExit, commitClear, dropSession, releaseRuntimeOnly) rather than a
+  // cleanup gesture. All writes flow through the transactional storage
+  // commit API (design.md D16) — sync writers + drops bump the per-artifact
+  // generation; async writers capture-check-rename, so stale results never
+  // touch the canonical path. Replaces the round-4/5 patch stack
+  // (`detachSession`, `releaseMirror`, `resetMirror`, `purgePersistedSnapshot`,
+  // `flushSessionImmediateSync`, `_sessionEpochs`).
 
-    this.bumpEpoch(sessionId);
-    this._pendingSessions.delete(sessionId);
-    this.writeBarriers.delete(sessionId);
-    if (this._snapshotIndex[sessionId]) {
-      delete this._snapshotIndex[sessionId];
-      if (this.storage) {
-        try {
-          this.storage.unlinkBufferFile(sessionId);
-        } catch {
-          /* best-effort */
-        }
-        this.storage.scheduleIndexWrite({ version: 1, entries: { ...this._snapshotIndex } });
-      }
-    } else if (this.storage) {
-      // No index entry (never flushed), but a buffer file MAY exist if a
-      // sync exit-snapshot raced ahead. Best-effort unlink so deactivate
-      // doesn't leave a ghost file behind for orphan recovery.
-      try {
-        this.storage.unlinkBufferFile(sessionId);
-      } catch {
-        /* best-effort */
-      }
+  /**
+   * Async commit of the current live mirror buffer. Driven by the debounce
+   * timer in `flushPending`; also exposed for tests. Captures the buffer
+   * generation BEFORE serializing; the underlying transactional commit will
+   * abort cleanly (no touch to canonical) if a sync writer or `dropSession`
+   * landed during our serialize/write. Updates `_snapshotIndex[id]` ONLY on
+   * a successful rename so the in-memory metadata stays consistent with the
+   * on-disk canonical file.
+   */
+  async commitLiveSnapshot(id: string): Promise<void> {
+    if (this._disposed || !this.restoreEnabled || !this.storage) return;
+    const storage = this.storage;
+    const generation = this._persistGeneration;
+    const session = this.getSession(id);
+    if (!session) {
+      // Session destroyed before commit landed — drop the in-mem entry.
+      // The on-disk side is owned by dropSession (which has already run or
+      // will run before deactivate completes).
+      delete this._snapshotIndex[id];
+      return;
+    }
+    await this.awaitWriteBarrier(id);
+    if (!this.isStillCurrent(storage, generation)) return;
+    const result = this.generateSnapshotMetadata(id);
+    if (!result) return;
+    const capturedGen = storage.currentBufferGen(id);
+    let outcome: "renamed" | "stale-skipped" | "stale-post-write";
+    try {
+      outcome = await storage.commitBufferAsync(id, result.buffer, capturedGen);
+    } catch (err) {
+      console.error("[AnyWhere Terminal] commitLiveSnapshot commitBufferAsync failed:", err);
+      return;
+    }
+    if (!this.isStillCurrent(storage, generation)) return;
+    if (outcome !== "renamed") return;
+    // Liveness re-check: a destroy may have run during our await. Don't
+    // re-insert metadata for a session the user already killed.
+    if (!this.getSession(id)) return;
+    this._snapshotIndex[id] = result.metadata;
+  }
+
+  /**
+   * SYNC commit of the exit snapshot. Called from `pty.onExit` for non-
+   * killed exits (design.md D13). Sets `shellExited: true, exitCode` on the
+   * session, serializes the frozen mirror, sync-writes the canonical buffer
+   * + sidecar via the transactional storage API.
+   */
+  commitExitSnapshot(id: string, exitCode: number | null): void {
+    if (this._disposed || !this.restoreEnabled || !this.storage) return;
+    const session = this.getSession(id);
+    if (!session) return;
+    session.shellExited = true;
+    session.exitCode = exitCode;
+    this._pendingSessions.delete(id);
+    const result = this.generateSnapshotMetadata(id);
+    if (!result) return;
+    try {
+      this.storage.commitBufferSync(id, result.buffer);
+    } catch (err) {
+      console.error("[AnyWhere Terminal] commitExitSnapshot commitBufferSync failed:", err);
+      return;
+    }
+    this._snapshotIndex[id] = result.metadata;
+    try {
+      this.storage.commitIndexSync({ version: 1, entries: { ...this._snapshotIndex } });
+    } catch (err) {
+      console.error("[AnyWhere Terminal] commitExitSnapshot commitIndexSync failed:", err);
     }
   }
 
   /**
-   * Release just the runtime mirror resources (headless terminal + serialize
-   * addon + in-memory queues) WITHOUT unlinking the on-disk buffer file or
-   * dropping the index entry. Use during extension `deactivate` so the just-
-   * persisted snapshots survive to the next activate.
-   *
-   * Distinct from `detachSession`, which is the per-session destruction path
-   * (user closes tab → snapshot deliberately removed). Conflating the two
-   * caused the cross-restart-restore failure: `dispose()` was calling
-   * `detachSession` and unlinking every buffer file we'd just written in
-   * `flushSnapshotsSync` milliseconds earlier.
+   * SYNC commit of a cleared snapshot — the privacy boundary for
+   * `clearScrollback` / Cmd+K. For mirror-backed sessions: RIS the mirror so
+   * future commitLiveSnapshot serializes empty, then sync-write an empty
+   * canonical buffer + bufferBytes=0 metadata. For mirror-less restored-
+   * exited sessions: drop the canonical buffer + index entry entirely.
+   * Replaces the round-4 `resetMirror` + `purgePersistedSnapshot` unification.
    */
-  releaseMirror(sessionId: string): void {
-    const session = this.getSession(sessionId);
+  commitClearSnapshot(id: string): void {
+    if (this._disposed || !this.restoreEnabled || !this.storage) return;
+    const session = this.getSession(id);
+    if (!session) return;
+    this._pendingSessions.delete(id);
+    if (!session.headless) {
+      // No mirror to RIS — drop entirely (privacy boundary for restored
+      // exited sessions cleared via Cmd+K).
+      delete this._snapshotIndex[id];
+      this.storage.dropBuffer(id);
+      try {
+        this.storage.commitIndexSync({ version: 1, entries: { ...this._snapshotIndex } });
+      } catch (err) {
+        console.error("[AnyWhere Terminal] commitClearSnapshot (no-mirror) commitIndexSync failed:", err);
+      }
+      return;
+    }
+    // RIS the mirror (fire-and-forget — xterm.js write is async). Subsequent
+    // commitLiveSnapshot serializes will reflect the empty state once the
+    // write callback parses.
+    try {
+      session.headless.write("\x1bc", () => {});
+    } catch (err) {
+      console.error("[AnyWhere Terminal] commitClearSnapshot RIS failed:", err);
+    }
+    // Sync-commit an empty canonical so a window close immediately after Cmd+K
+    // doesn't preserve the pre-clear content. We can't await the RIS parse
+    // sync; overwrite with literal empty bytes.
+    const metadata = this.generateSnapshotMetadata(id)?.metadata;
+    try {
+      this.storage.commitBufferSync(id, "");
+    } catch (err) {
+      console.error("[AnyWhere Terminal] commitClearSnapshot commitBufferSync failed:", err);
+      return;
+    }
+    if (metadata) {
+      this._snapshotIndex[id] = { ...metadata, bufferBytes: 0 };
+    }
+    try {
+      this.storage.commitIndexSync({ version: 1, entries: { ...this._snapshotIndex } });
+    } catch (err) {
+      console.error("[AnyWhere Terminal] commitClearSnapshot commitIndexSync failed:", err);
+    }
+  }
+
+  /**
+   * Destructive: the user explicitly destroyed the session. Dispose the
+   * runtime mirror, drop the canonical buffer (which bumps the per-buffer
+   * generation so any in-flight async commit unlinks its temp ONLY), drop
+   * the index entry, sync the sidecar.
+   */
+  dropSession(id: string): void {
+    const session = this.getSession(id);
     if (session) this.disposeMirrorFor(session);
-    this._pendingSessions.delete(sessionId);
-    this.writeBarriers.delete(sessionId);
-    // Bump epoch so any in-flight async write that captured the prior epoch
-    // is invalidated — otherwise a late writeBufferFileAsync completion
-    // could resurrect a snapshot whose mirror we just disposed.
-    this.bumpEpoch(sessionId);
-    // Intentionally NOT touching _snapshotIndex or the on-disk buffer file.
+    this._pendingSessions.delete(id);
+    this.writeBarriers.delete(id);
+    const hadEntry = this._snapshotIndex[id] !== undefined;
+    delete this._snapshotIndex[id];
+    if (!this.storage) return;
+    this.storage.dropBuffer(id);
+    if (!hadEntry && this._disposed) return;
+    try {
+      this.storage.commitIndexSync({ version: 1, entries: { ...this._snapshotIndex } });
+    } catch (err) {
+      console.error("[AnyWhere Terminal] dropSession commitIndexSync failed:", err);
+    }
+  }
+
+  /**
+   * Shutdown of a live or exited-preserved session — dispose runtime
+   * resources only (headless terminal + SerializeAddon). NEVER touches disk:
+   * the just-committed snapshot survives to the next activate. Use during
+   * `extension.deactivate` for sessions whose state machine reports `live`
+   * or `exited-preserved`.
+   *
+   * Any in-flight async commit started before this is invalidated by the
+   * generation bump on its next disk op (the prior commitLive/commitExit
+   * call already advanced the gen; releaseRuntimeOnly itself does not need
+   * to touch storage).
+   */
+  releaseRuntimeOnly(id: string): void {
+    const session = this.getSession(id);
+    if (session) this.disposeMirrorFor(session);
+    this._pendingSessions.delete(id);
+    this.writeBarriers.delete(id);
+    // Intentionally NOT touching _snapshotIndex or storage — the on-disk
+    // state is owned by the latest commitLive/commitExit/commitClear call
+    // and must survive to the next activate (D13 read-only + cross-restart).
+  }
+
+  /** Internal current-state guard for async flushes. Used in commitLiveSnapshot. */
+  private isStillCurrent(storage: SessionStorage, generation: number): boolean {
+    return (
+      this.restoreEnabled &&
+      this.storage === storage &&
+      this._persistGeneration === generation &&
+      !this._disposed
+    );
   }
 
   // ─── PTY event hooks ────────────────────────────────────────────
@@ -332,90 +446,10 @@ export class SnapshotPersistence {
   }
 
   /**
-   * Reset the headless mirror to empty (RIS — `\x1bc`). Used by
-   * `SessionManager.clearScrollback` so a user-triggered clear is also a
-   * persistence boundary — the next snapshot reflects an empty buffer rather
-   * than restoring the just-cleared content after a restart. See round-1 B2.
-   *
-   * When the session has no headless mirror (restored exited sessions skip
-   * mirror seeding — see `attachSession`), there is nothing to RIS into. We
-   * still MUST honor the privacy contract: directly purge the persisted
-   * buffer file and the index entry so the next restart doesn't resurrect
-   * the cleared content. See round-2 [B1].
-   */
-  resetMirror(sessionId: string): void {
-    if (!this.restoreEnabled) return;
-    const session = this.getSession(sessionId);
-    if (!session) return;
-
-    // Bump epoch FIRST so an in-flight pre-clear flush is invalidated by the
-    // time its writeBufferFileAsync resolves. Without this, the late stale
-    // write could overwrite the cleared metadata. See .reviews/round-4.md [B2].
-    this.bumpEpoch(sessionId);
-
-    if (!session.headless) {
-      this.purgePersistedSnapshot(sessionId);
-      return;
-    }
-
-    // RIS (Reset to Initial State) clears the buffer, scrollback, and modes.
-    // Track it in the barrier chain so the next serialize sees the empty state.
-    const prior = this.writeBarriers.get(sessionId) ?? Promise.resolve();
-    const resetPromise = new Promise<void>((resolve) => {
-      try {
-        // biome-ignore lint/style/noNonNullAssertion: checked above
-        session.headless!.write("\x1bc", () => resolve());
-      } catch (err) {
-        console.error("[AnyWhere Terminal] Headless mirror reset failed:", err);
-        resolve();
-      }
-    });
-    this.writeBarriers.set(sessionId, prior.then(() => resetPromise));
-    // Persist immediately so the cleared state survives a quick window close.
-    void this.flushSessionImmediate(sessionId);
-  }
-
-  /**
-   * Drop the persisted snapshot for a still-alive session — unlinks the buffer
-   * file and removes the index entry, leaving the session itself untouched.
-   * Distinct from `detachSession` which is the destruction path. Used by
-   * `resetMirror` on no-mirror sessions so a `Cmd+K` on a restored-exited
-   * terminal still acts as a privacy boundary. See round-2 [B1].
-   */
-  private purgePersistedSnapshot(sessionId: string): void {
-    if (!this.storage) return;
-    // Bump epoch so any in-flight async write that captured the prior epoch
-    // unlinks the ghost file post-write rather than re-inserting an index entry.
-    this.bumpEpoch(sessionId);
-    this._pendingSessions.delete(sessionId);
-    if (this._snapshotIndex[sessionId]) {
-      delete this._snapshotIndex[sessionId];
-    }
-    try {
-      this.storage.unlinkBufferFile(sessionId);
-    } catch {
-      /* best-effort */
-    }
-    this.storage.scheduleIndexWrite({ version: 1, entries: { ...this._snapshotIndex } });
-    // Keep sidecar in sync — privacy boundary requires no on-disk trail of the
-    // cleared session even if the Memento update is later Canceled. See
-    // .reviews/round-4.md D2 (was suppressed; cheap to fix alongside B2).
-    try {
-      this.storage.writeIndexSync({ version: 1, entries: { ...this._snapshotIndex } });
-    } catch {
-      /* best-effort */
-    }
-  }
-
-  /** Increment the per-session epoch token. See `_sessionEpochs`. */
-  private bumpEpoch(sessionId: string): void {
-    this._sessionEpochs.set(sessionId, (this._sessionEpochs.get(sessionId) ?? 0) + 1);
-  }
-
-  /**
-   * Record an exit code on the session and freeze the mirror. Caller (SessionManager)
-   * is responsible for firing the `onShellExited` hook (which by default kicks an
-   * immediate flush).
+   * Record an exit code on the session and freeze the mirror. Thin helper
+   * kept for backward compat with tests that prefer to record-then-flush
+   * separately. SessionManager's `pty.onExit` calls `commitExitSnapshot`
+   * directly, which subsumes this.
    */
   recordExit(session: TerminalSession, exitCode: number | null): void {
     session.shellExited = true;
@@ -516,146 +550,42 @@ export class SnapshotPersistence {
   }
 
   /**
-   * SYNCHRONOUSLY persist a single session's snapshot. Captures the current
-   * mirror state via SerializeAddon, writes the buffer file via the sync fs
-   * API, updates `_snapshotIndex` and the sync sidecar. Used by the default
-   * shell-exit hook so the exit snapshot is durable BEFORE cleanupSession
-   * runs (which previously raced — the async flush couldn't complete before
-   * cleanupSession unlinked the file). See .reviews/round-4.md [B3].
-   *
-   * Returns early when restore is disabled, storage is unset, or the session
-   * has no headless mirror (nothing to serialize).
-   */
-  flushSessionImmediateSync(sessionId: string): void {
-    if (this._disposed || !this.restoreEnabled || !this.storage) return;
-    this._pendingSessions.delete(sessionId);
-    // Bump the epoch up front so any in-flight async write for this session
-    // (e.g. a pending debounced flush) is invalidated by the time it returns.
-    this.bumpEpoch(sessionId);
-    const result = this.generateSnapshotMetadata(sessionId);
-    if (!result) return;
-    try {
-      this.storage.writeBufferFileSync(sessionId, result.buffer);
-    } catch (err) {
-      console.error("[AnyWhere Terminal] flushSessionImmediateSync writeBufferFileSync failed:", err);
-      return;
-    }
-    this._snapshotIndex[sessionId] = result.metadata;
-    // Persist the index synchronously via sidecar so a sudden window close
-    // immediately after exit doesn't lose this entry. The awaited Memento
-    // update would race with shutdown's Memento cancellation.
-    try {
-      this.storage.writeIndexSync({ version: 1, entries: { ...this._snapshotIndex } });
-    } catch (err) {
-      console.error("[AnyWhere Terminal] flushSessionImmediateSync writeIndexSync failed:", err);
-    }
-  }
-
-  /**
-   * Drain `_pendingSessions`: regenerate each snapshot, write its buffer file
-   * (async), apply eviction, and schedule the index write. Errors per session
-   * are swallowed and logged so a single broken session can't poison the rest.
-   *
-   * Generation guard: if `setRestoreEnabled(false)` (or storage swap) lands
-   * mid-flush, the captured `generation` no longer matches the live one and
-   * the flush aborts cleanly — preventing a stale write from resurrecting
-   * a snapshot the purge just deleted. See `.reviews/round-1.md` W9.
+   * Drain `_pendingSessions`: call `commitLiveSnapshot` for each, then apply
+   * eviction and async-commit the index sidecar. The transactional commit
+   * API (D16) ensures stale writes never reach canonical — no more per-
+   * session epoch token needed. See design.md D15+D16.
    */
   private async flushPending(): Promise<void> {
-    if (!this.storage || !this.restoreEnabled) return;
+    if (this._disposed || !this.storage || !this.restoreEnabled) return;
     const storage = this.storage;
     const generation = this._persistGeneration;
-    const isStillCurrent = () =>
-      this.restoreEnabled && this.storage === storage && this._persistGeneration === generation;
     const ids = Array.from(this._pendingSessions);
     this._pendingSessions.clear();
     for (const id of ids) {
-      if (!isStillCurrent()) return;
-      const session = this.getSession(id);
-      if (!session) {
-        // Session destroyed before flush — drop its index entry + buffer file.
-        delete this._snapshotIndex[id];
-        try {
-          storage.unlinkBufferFile(id);
-        } catch {
-          /* best-effort */
-        }
-        continue;
-      }
-      // Capture the per-session epoch BEFORE serialize/write. resetMirror /
-      // detachSession / releaseMirror / purgePersistedSnapshot /
-      // flushSessionImmediateSync all bump the epoch — if any of them fires
-      // while we're mid-await, the post-write check below detects the
-      // mismatch and unlinks our (now stale) write rather than overwriting
-      // the newer state. See .reviews/round-4.md [B2].
-      const capturedEpoch = this._sessionEpochs.get(id) ?? 0;
-      // Wait for any in-flight headless writes to be parsed before serialize.
-      // See round-1 B1.
-      await this.awaitWriteBarrier(id);
-      if (!isStillCurrent()) return;
-      const result = this.generateSnapshotMetadata(id);
-      if (!result) continue;
-      try {
-        await storage.writeBufferFileAsync(id, result.buffer);
-      } catch (err) {
-        if (!isStillCurrent()) return;
-        console.error("[AnyWhere Terminal] writeBufferFileAsync failed:", err);
-        continue;
-      }
-      if (!isStillCurrent()) {
-        // Persistence was invalidated mid-await — unlink the just-written file.
-        try {
-          storage.unlinkBufferFile(id);
-        } catch {
-          /* best-effort */
-        }
-        return;
-      }
-      // Per-session epoch re-check: a destructive op (resetMirror, detach,
-      // releaseMirror, sync exit-flush) may have bumped the epoch DURING our
-      // writeBufferFileAsync await. Our captured buffer is now stale relative
-      // to the newer post-op state. Unlink the ghost file we just wrote and
-      // skip the metadata assignment so the newer state stays authoritative.
-      // See .reviews/round-4.md [B2].
-      const currentEpoch = this._sessionEpochs.get(id) ?? 0;
-      if (currentEpoch !== capturedEpoch) {
-        try {
-          storage.unlinkBufferFile(id);
-        } catch {
-          /* best-effort */
-        }
-        continue;
-      }
-      // Per-session liveness re-check: detachSession may have run during the
-      // writeBufferFileAsync await above (session destroyed mid-flush). The
-      // global generation guard does NOT cover per-session destroys — it's
-      // only bumped on setRestoreEnabled. Without this check, the assignment
-      // below resurrects an index entry detachSession just dropped, and the
-      // file we just wrote becomes a ghost snapshot for a session the user
-      // already killed. See round-2 [W3].
-      if (!this.getSession(id)) {
-        try {
-          storage.unlinkBufferFile(id);
-        } catch {
-          /* best-effort */
-        }
-        continue;
-      }
-      this._snapshotIndex[id] = result.metadata;
+      if (!this.isStillCurrent(storage, generation)) return;
+      await this.commitLiveSnapshot(id);
     }
-    if (!isStillCurrent()) return;
+    if (!this.isStillCurrent(storage, generation)) return;
     // Apply eviction before persisting the index.
     const merged: SessionSnapshotsIndex = { version: 1, entries: { ...this._snapshotIndex } };
     const { kept, dropped } = evictIndex(merged, Date.now());
     this._snapshotIndex = { ...kept.entries };
     for (const sid of dropped) {
       try {
-        storage.unlinkBufferFile(sid);
+        storage.dropBuffer(sid);
       } catch {
         /* best-effort */
       }
     }
-    storage.scheduleIndexWrite(kept);
+    // Async commit of the sidecar via the transactional API. If a sync
+    // sidecar commit lands during our await, the post-write check unlinks
+    // our temp only — canonical reflects whatever the sync writer wrote.
+    const capturedSidecarGen = storage.currentSidecarGen();
+    try {
+      await storage.commitIndexAsync(kept, capturedSidecarGen);
+    } catch (err) {
+      console.error("[AnyWhere Terminal] flushPending commitIndexAsync failed:", err);
+    }
   }
 
   /** Test/inspection helper — the latest in-memory snapshot index. */
@@ -680,33 +610,29 @@ export class SnapshotPersistence {
       const result = this.generateSnapshotMetadata(id);
       if (!result) continue;
       try {
-        this.storage.writeBufferFileSync(id, result.buffer);
+        this.storage.commitBufferSync(id, result.buffer);
       } catch (err) {
-        console.error("[AnyWhere Terminal] writeBufferFileSync failed:", err);
+        console.error("[AnyWhere Terminal] flushSnapshotsSync commitBufferSync failed:", err);
         continue;
       }
       this._snapshotIndex[id] = result.metadata;
     }
-    // Persist the index synchronously alongside the buffer files. VS Code's
-    // `Memento.update()` returns a cancelled Thenable when the ext host is
-    // shutting down — without this sidecar, the index update silently dies and
-    // the next activate sees a stale index referencing prior-session ids whose
-    // files are no longer on disk. The sidecar is the authoritative source on
-    // load; Memento is the legacy fallback. See `SessionStorage.loadIndex`.
+    // Sync sidecar commit via the transactional API. The temp+rename path
+    // guarantees a torn-write here cannot corrupt the canonical sidecar.
     try {
       const merged: SessionSnapshotsIndex = { version: 1, entries: { ...this._snapshotIndex } };
       const { kept, dropped } = evictIndex(merged, Date.now());
       for (const sid of dropped) {
         try {
-          this.storage.unlinkBufferFile(sid);
+          this.storage.dropBuffer(sid);
         } catch {
           /* best-effort */
         }
       }
       this._snapshotIndex = { ...kept.entries };
-      this.storage.writeIndexSync(kept);
+      this.storage.commitIndexSync(kept);
     } catch (err) {
-      console.error("[AnyWhere Terminal] writeIndexSync failed:", err);
+      console.error("[AnyWhere Terminal] flushSnapshotsSync commitIndexSync failed:", err);
     }
   }
 
@@ -722,7 +648,7 @@ export class SnapshotPersistence {
     this._snapshotIndex = { ...kept.entries };
     for (const sid of dropped) {
       try {
-        this.storage.unlinkBufferFile(sid);
+        this.storage.dropBuffer(sid);
       } catch {
         /* best-effort */
       }
@@ -854,17 +780,19 @@ export class SnapshotPersistence {
     }
 
     // Step 4 — Orphan cleanup. Any buffer file not referenced by the surviving
-    // index must be unlinked.
+    // index must be unlinked. Also remove any stray `*.tmp.*` artifacts left
+    // by a process crash mid-rename (design.md D16).
     const surviving = new Set(Object.keys(indexAfterEviction));
     for (const sessionId of this.storage.listBufferFiles()) {
       if (!surviving.has(sessionId)) {
         try {
-          this.storage.unlinkBufferFile(sessionId);
+          this.storage.dropBuffer(sessionId);
         } catch {
           /* best-effort */
         }
       }
     }
+    this.storage.cleanupOrphanTemps();
 
     // Step 5 — Stage in memory.
     this._pendingSnapshots.clear();
@@ -930,7 +858,8 @@ export class SnapshotPersistence {
     }
     this._pendingSessions.clear();
     // Disposal of per-session mirrors is performed by SessionManager via
-    // detachSession during cleanupSession (called as it tears down each PTY).
+    // dropSession / releaseRuntimeOnly during cleanupSession + dispose
+    // (called as it tears down each PTY).
   }
 
   // ─── Private helpers ────────────────────────────────────────────

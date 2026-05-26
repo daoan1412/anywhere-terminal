@@ -80,11 +80,29 @@ function mockWebview(): MessageSender {
 }
 
 function makeStorageMock() {
+  const bufferGens = new Map<string, number>();
+  let sidecarGen = 0;
   return {
-    writeBufferFileAsync: vi.fn(async () => {}),
-    writeBufferFileSync: vi.fn(),
-    scheduleIndexWrite: vi.fn(),
-    unlinkBufferFile: vi.fn(),
+    commitBufferSync: vi.fn((id: string) => {
+      bufferGens.set(id, (bufferGens.get(id) ?? 0) + 1);
+    }),
+    commitBufferAsync: vi.fn(async (id: string, _data: string, capturedGen: number) => {
+      if ((bufferGens.get(id) ?? 0) !== capturedGen) return "stale-skipped" as const;
+      return "renamed" as const;
+    }),
+    commitIndexSync: vi.fn(() => {
+      sidecarGen += 1;
+    }),
+    commitIndexAsync: vi.fn(async (_idx: unknown, capturedGen: number) => {
+      if (sidecarGen !== capturedGen) return "stale-skipped" as const;
+      return "renamed" as const;
+    }),
+    dropBuffer: vi.fn((id: string) => {
+      bufferGens.set(id, (bufferGens.get(id) ?? 0) + 1);
+    }),
+    currentBufferGen: vi.fn((id: string) => bufferGens.get(id) ?? 0),
+    currentSidecarGen: vi.fn(() => sidecarGen),
+    cleanupOrphanTemps: vi.fn(),
     writeIndexAwaited: vi.fn(async () => {}),
     writeLivePanelsAwaited: vi.fn(async () => {}),
     readBufferFile: () => null,
@@ -173,7 +191,7 @@ describe("SessionManager.setRestoreEnabled", () => {
     mockPtySessions[0].onData?.("after");
     await vi.advanceTimersByTimeAsync(2000);
     expect(fx.builtHeadless).toHaveLength(1);
-    expect(storage.writeBufferFileAsync).not.toHaveBeenCalled();
+    expect(storage.commitBufferAsync).not.toHaveBeenCalled();
     sm.dispose();
   });
 
@@ -181,10 +199,10 @@ describe("SessionManager.setRestoreEnabled", () => {
     const fx = makeFactories();
     const storage = makeStorageMock();
     let resolveWrite: (() => void) | undefined;
-    storage.writeBufferFileAsync.mockImplementation(
+    storage.commitBufferAsync.mockImplementation(
       () =>
-        new Promise<void>((resolve) => {
-          resolveWrite = resolve;
+        new Promise<"renamed" | "stale-skipped">((resolve) => {
+          resolveWrite = () => resolve("renamed");
         }),
     );
     const sm = new SessionManager(undefined, {
@@ -197,15 +215,18 @@ describe("SessionManager.setRestoreEnabled", () => {
     mockPtySessions[0].onData?.("seed");
 
     await vi.advanceTimersByTimeAsync(1000);
-    expect(storage.writeBufferFileAsync).toHaveBeenCalledWith(id, "X");
+    expect(storage.commitBufferAsync).toHaveBeenCalledWith(id, "X", 0);
 
     sm.setRestoreEnabled(false);
     resolveWrite?.();
     await Promise.resolve();
     await Promise.resolve();
 
-    expect(storage.unlinkBufferFile).toHaveBeenCalledWith(id);
-    expect(storage.scheduleIndexWrite).not.toHaveBeenCalled();
+    // After setRestoreEnabled(false), storage.purge is called (which clears
+    // the buffer + sidecar). Subsequent index writes don't fire because the
+    // persist pipeline is disabled.
+    expect(storage.purge).toHaveBeenCalled();
+    expect(storage.commitIndexAsync).not.toHaveBeenCalled();
     sm.dispose();
   });
 
