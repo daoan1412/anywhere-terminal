@@ -354,3 +354,142 @@
     - Verify: manual matrix above
   - **Plan**:
     1. Execute each row, record observed behavior in the change's Revision Log.
+
+---
+
+## Redesign Phase — round-5 BLOCK driven refactor
+
+These tasks implement D14-D18 from `design.md`. They REPLACE the patch-stack lifecycle (sessionsPendingDestroy + epoch token + ad-hoc sync flush + dual-source index) with a state-machine + intentful command API + transactional storage. The bug pattern (cross-method temporal coupling between flush/exit/destroy/clear) is eliminated at root.
+
+Order: R-1 → R-2 / R-3 (parallelizable, different files) → R-4 → R-5 → R-6 → R-7 → R-8.
+
+- [ ] R-1 Introduce per-session lifecycle state enum + transitions in SessionManager
+  - **Deps**: (none — first task)
+  - **Refs**: design.md D14, .reviews/round-5.md [B1] [W3]
+  - **Scope**:
+    - `src/session/SessionManager.ts`
+    - `src/session/TerminalSession.ts` (extend `TerminalSession` interface with `state: SessionState`)
+    - `src/session/SessionManager.shutdownLifecycle.test.ts` (extend with state-transition tests)
+  - **Acceptance**:
+    - Outcome: `type SessionState = "live" | "exited-preserved" | "destroying" | "disposed"` defined and stored per-session. SessionManager exposes a private `transitionState(id, from, to)` helper that enforces valid transitions (throws on illegal). Each transition site (createSession → live, destroySession → destroying, pty.onExit non-killed → exited-preserved, cleanupSession → disposed) records the new state synchronously. `sessionsPendingDestroy` set is REMOVED and replaced by `state === "destroying"` checks.
+    - Verify: unit src/session/SessionManager.shutdownLifecycle.test.ts
+  - **Plan**:
+    1. Add `SessionState` union to TerminalSession.
+    2. Initialize `state: "live"` in createSession.
+    3. Add `transitionState` helper with assertion + error log on invalid transition.
+    4. Replace `sessionsPendingDestroy.add(id)` calls with `transitionState(id, "live", "destroying")`.
+    5. Replace `sessionsPendingDestroy.has(id)` checks in dispose/cleanupSession with `session.state === "destroying"`.
+    6. Remove `sessionsPendingDestroy` field.
+    7. Update existing tests that referenced `sessionsPendingDestroy` (search-and-replace).
+
+- [ ] R-2 Define intentful SnapshotPersistence command API
+  - **Deps**: R-1
+  - **Refs**: design.md D15, .reviews/round-5.md
+  - **Scope**:
+    - `src/session/SnapshotPersistence.ts`
+    - `src/session/SessionManager.ts` (call sites)
+    - `src/session/SessionManager.shutdownLifecycle.test.ts` (assert new method names)
+  - **Acceptance**:
+    - Outcome: SnapshotPersistence exposes exactly 5 public commands: `commitLiveSnapshot`, `commitExitSnapshot`, `commitClearSnapshot`, `dropSession`, `releaseRuntimeOnly`. The old methods (`detachSession`, `releaseMirror`, `resetMirror`, `purgePersistedSnapshot`, `flushSessionImmediateSync`) are removed. Internal `flushPending` and `flushSnapshotsSync` are thin wrappers over `commitLiveSnapshot`. The per-session `_sessionEpochs` field is REMOVED (replaced by R-3's per-artifact generation).
+    - Verify: unit src/session/SessionManager.shutdownLifecycle.test.ts
+  - **Plan**:
+    1. Add 5 new methods alongside the old ones (initially delegating).
+    2. Migrate call sites in SessionManager one-by-one (cleanupSession, onShellExited, clearScrollback, dispose, setRestoreEnabled, destroySession queue completion).
+    3. Update tests to call the new methods.
+    4. Delete the old methods.
+    5. Remove `_sessionEpochs` field and its `bumpEpoch` helper.
+
+- [ ] R-3 Add per-artifact generation + temp-file + atomic rename to SessionStorage
+  - **Deps**: (parallel with R-2 — different file)
+  - **Refs**: design.md D16, .reviews/round-5.md [B1] [B2]
+  - **Scope**:
+    - `src/session/SessionStorage.ts`
+    - `src/session/SessionStorage.test.ts` (extend: temp-cleanup + generation-race tests)
+  - **Acceptance**:
+    - Outcome: SessionStorage exposes `commitBufferAsync(id, data, capturedGen)`, `commitBufferSync(id, data)`, `dropBuffer(id)`, `commitIndexAsync(index, capturedGen)`, `commitIndexSync(index)`, `currentBufferGen(id)`, `currentSidecarGen()`. Old methods (`writeBufferFileAsync`, `writeBufferFileSync`, `writeIndexSync`, `scheduleIndexWrite`, `writeIndexFile`, `unlinkBufferFile`) are removed. All writes go through temp + rename. Stale async writers unlink TEMP only. New test asserts: stale async commit does NOT touch canonical path even if a sync writer completed in between.
+    - Verify: unit src/session/SessionStorage.test.ts
+  - **Plan**:
+    1. Add `bufferGen: Map<string, number>` + `sidecarGen: number` fields.
+    2. Implement temp + rename helpers (same-fs guarantee).
+    3. Add commit + drop API per D16 pseudocode.
+    4. Remove old methods + their fs-promise wrappers.
+    5. Extend hydrateFromSnapshots orphan-cleanup step 4 to unlink `*.tmp.*` files.
+    6. Write RED tests for: stale async after sync; stale async after drop; rename atomicity (same-fs invariant).
+
+- [ ] R-4 Drop Memento dual-write for snapshot index (sidecar single source-of-truth)
+  - **Deps**: R-3
+  - **Refs**: design.md D17, .reviews/round-5.md [W2]
+  - **Scope**:
+    - `src/session/SessionStorage.ts`
+    - `src/session/SnapshotPersistence.ts`
+    - `src/extension.ts` (activate path)
+    - `src/session/SessionStorage.test.ts` (NEW: migration test)
+  - **Acceptance**:
+    - Outcome: `loadIndexDetailed` reads sidecar ONLY. `writeIndexAwaited` (Memento) removed for the snapshot key. Migration: on activate, if `<storageUri>/snapshots/index.json` missing AND Memento has data, copy Memento → sidecar (sync) + delete Memento entry. Subsequent runs ignore Memento for the snapshot index. LIVE_EDITOR_PANELS_KEY stays in Memento (smaller, churnier, no dual-source bug).
+    - Verify: unit src/session/SessionStorage.test.ts
+  - **Plan**:
+    1. Add migration helper `migrateMementoIndexToSidecar` in SessionStorage.
+    2. Call from extension.activate before hydrate.
+    3. Remove the Memento branches from loadIndexDetailed.
+    4. Delete `writeIndexAwaited` (and its caller in SnapshotPersistence.flushIndexAwaited — replaced by sync commit at deactivate).
+    5. Update `purge()` to clear only the Memento livePanels entry + rmSync the snapshot dir. Wrap remaining Memento updates in try/catch (closes R5.W2).
+
+- [ ] R-5 Migrate SessionManager dispatch to state-machine + intentful API
+  - **Deps**: R-1, R-2, R-3, R-4
+  - **Refs**: design.md D14-D17
+  - **Scope**:
+    - `src/session/SessionManager.ts`
+    - `src/extension.ts` (deactivate path may simplify)
+  - **Acceptance**:
+    - Outcome: every snapshot-touching code path in SessionManager dispatches via the state machine. Specifically: `pty.onExit` (non-killed) → `commitExitSnapshot` → transition to exited-preserved; `clearScrollback` → `commitClearSnapshot`; `destroySession` queue completion → `dropSession`; `dispose()` walks state map (live → releaseRuntimeOnly, exited-preserved → releaseRuntimeOnly, destroying → dropSession). Code reads top-to-bottom with explicit intent.
+    - Verify: unit src/session/SessionManager.shutdownLifecycle.test.ts
+  - **Plan**:
+    1. Audit every snapshot.* call site in SessionManager.
+    2. For each: identify the current state at call time, replace with the intent-named command.
+    3. Add invariant tests (state-incompatible call → assertion error).
+
+- [ ] R-6 Migrate flushPending + flushSnapshotsSync to use transactional commits
+  - **Deps**: R-2, R-3
+  - **Refs**: design.md D15, D16
+  - **Scope**:
+    - `src/session/SnapshotPersistence.ts`
+  - **Acceptance**:
+    - Outcome: `flushPending` becomes a thin loop over `_pendingSessions` calling `commitLiveSnapshot(id)` for each. The captured-epoch + post-write check is gone (subsumed by D16's per-artifact generation in storage). `flushSnapshotsSync` becomes a sync loop calling `commitBufferSync` + a single `commitIndexSync` at the end. The whole `flushIndexAwaited` Memento path is removed (D17).
+    - Verify: unit src/session/SessionManager.persist.test.ts
+  - **Plan**:
+    1. Rewrite flushPending using commitLiveSnapshot.
+    2. Rewrite flushSnapshotsSync using commitBufferSync + commitIndexSync.
+    3. Delete flushIndexAwaited.
+    4. Update extension.deactivate to drop the awaited step.
+
+- [ ] R-7 Extend state-machine + invariant test coverage
+  - **Deps**: R-5, R-6
+  - **Refs**: design.md D18, .reviews/round-5.md
+  - **Scope**:
+    - `src/session/SessionManager.shutdownLifecycle.test.ts`
+    - `src/session/SessionStorage.test.ts`
+  - **Acceptance**:
+    - Outcome: tests added for each redesign invariant:
+      - state-machine: illegal transition throws/asserts
+      - storage: stale async commit unlinks ONLY temp, never canonical (R5.B1 fix verified at storage layer)
+      - storage: sidecar generation race — sync sidecar wins over stale async, asserted by post-state inspection (R5.B2 fix verified)
+      - migration: Memento-only fresh load → sidecar populated, Memento cleared (D17)
+      - destroyAllForView race: session added between sync-enqueue + async-execute correctly gets `dropSession` not `releaseRuntimeOnly` (R5.W3 fix)
+      - purge resilience: both Memento updates wrapped in try/catch so first Canceled doesn't block second (R5.W2 fix)
+    - Verify: unit src/session/SessionManager.shutdownLifecycle.test.ts
+  - **Plan**:
+    1. Per invariant: write a focused test that would FAIL without the redesign + passes with it.
+    2. Run full suite after each.
+
+- [ ] R-8 Verify gate + round 6 review
+  - **Deps**: R-7
+  - **Refs**: .reviews/round-5.md, design.md D18
+  - **Scope**: (verification only, no production files)
+  - **Acceptance**:
+    - Outcome: `pnpm run check-types` clean. `pnpm run test:unit` 100% pass with new invariant tests. Manual EDH smoke documenting: 1) yarn-test + Cmd+R Phase A revive; 2) full restart Phase B revive; 3) clear+Cmd+R (privacy boundary); 4) toggle-off + quit + activate (purge boundary). Invoke `/asimov-review` for round 6 with rebuttals for any deferred suggestions.
+    - Verify: manual round 6 verdict APPROVE OR documented BLOCKs explicitly accepted
+  - **Plan**:
+    1. Run check-types + tests.
+    2. Execute EDH smoke + record observations.
+    3. Spawn /asimov-review with round-5 context.
+    4. Triage findings.

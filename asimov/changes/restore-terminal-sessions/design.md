@@ -396,3 +396,133 @@ Webview-side, `setPanelId` is handled by `WebviewStateStore.updateState({ panelI
 | Buffer files written to `storageUri` not cleaned up on uninstall | Orphan disk usage when extension removed | `context.storageUri` is workspace-scoped under VS Code's `globalStorage`/`workspaceStorage` directories and VS Code cleans the directory on extension uninstall. Documented expected behavior. |
 | Synchronous `fs.writeFileSync` blocks deactivate event loop | Up to ~20 MB sync write on shutdown | Bounded by the 20-snapshot cap × 1 MB/file. Modern SSDs complete this in <500 ms — well under VS Code's 6 s kill budget. Mitigation: parallel writes via `Promise.all` of async writes are an option if profiling shows this exceeds budget, but the sync path's failure mode (block) is preferable to the async one (lost data). |
 | Two-step deactivate flush is killed between buffer-write and index-write | Index lost; buffers orphan | D6 hydrate fallback reconstructs minimal index entries from buffer files (`viewLocation` from live-panels record when available, sensible defaults otherwise). Acceptable degraded restore. |
+
+---
+
+## Redesign Phase (D14-D18, driven by round-5 BLOCK + oracle architecture verdict)
+
+**Motivation**: Five review rounds across this change produced a recurring same-shape bug class — cross-method temporal coupling where a method-local fix introduces an identical bug in an adjacent code path:
+
+- R3 missed: `SessionManager.dispose() → detachSession → unlinks file flushSnapshotsSync just wrote`
+- R4 found + fixed via `releaseMirror` split + sync sidecar; then R4 fixes themselves introduced:
+- R5 found: `epoch-unlink in flushPending → deletes file flushSessionImmediateSync just wrote (D13 violation)`
+- R5 found: `async sidecar write in scheduleIndexWrite → overwrites sync flushSnapshotsSync sidecar`
+
+Oracle's diagnosis: *"This is no longer a sound boundary; it is a patch stack. SessionManager and SnapshotPersistence are sharing lifecycle intent through scattered fields (sessionsPendingDestroy, epochs, release/detach naming) but storage still has no transactional commit model and stale writers still target canonical paths."*
+
+The redesign replaces the patch stack with three structural changes (D14, D15, D16) plus a source-of-truth simplification (D17) and a process gate (D18). After redesign, the bug-shape is eliminated at root: no stale writer can touch a canonical artifact, and every lifecycle transition has explicit intent that storage can act on transactionally.
+
+### D14: Per-session lifecycle state machine in SessionManager
+
+Each session occupies exactly ONE of four states, transitioned via explicit methods:
+
+| State | Meaning | Persistence semantics |
+|---|---|---|
+| `live` | PTY alive, mirror writable | Debounced commits via `commitLiveSnapshot` |
+| `exited-preserved` | Shell exited naturally; mirror frozen | Sync exit commit already written; index entry preserved for D13 read-only restore |
+| `destroying` | User-initiated destroy in flight (queued or executing) | Future commits suppressed; final transition drops disk state |
+| `disposed` | Session removed from `sessions` map | Snapshot fate already committed (preserved OR dropped per prior state) |
+
+Transitions:
+- `live → exited-preserved`: triggered by `pty.onExit` (non-killed path). SessionManager calls `snapshots.commitExitSnapshot(id, exitCode)` synchronously, then routes cleanupSession through `releaseRuntimeOnly`.
+- `live → destroying`: triggered by `destroySession` / `destroyAllForView` / `setRestoreEnabled(false)`. State recorded synchronously BEFORE enqueue (replaces ad-hoc `sessionsPendingDestroy` set with first-class state).
+- `destroying → disposed`: `performDestroy` completes → `snapshots.dropSession(id)` (destructive).
+- `exited-preserved → disposed`: `dispose()` walks `sessions` map; for sessions in this state, calls `snapshots.releaseRuntimeOnly(id)` (preserve disk state).
+- `live → disposed` (rare — extension shutdown of a still-live session): `dispose()` → `snapshots.releaseRuntimeOnly(id)` (preserve disk state for next activate's restore).
+
+**Invariant**: SessionManager NEVER calls a persistence method without first knowing the current state. Conditional cleanup based on flag-sniffing (the round-4 pattern with `sessionsPendingDestroy.has(id)` + `session.shellExited`) is replaced by explicit state-driven dispatch.
+
+### D15: Intentful SnapshotPersistence API — commands, not cleanup gestures
+
+Replace the current 5 methods (`detachSession`, `releaseMirror`, `resetMirror`, `purgePersistedSnapshot`, `flushSessionImmediateSync`) with 5 intentful commands keyed to user actions:
+
+| Method | When called | Behavior |
+|---|---|---|
+| `commitLiveSnapshot(id)` | Debounced from PTY data | Transactional write (D16): serialize mirror → temp file → rename. Updates in-memory index + schedules sidecar commit. |
+| `commitExitSnapshot(id, exitCode)` | SessionManager on `pty.onExit` (non-killed) | SYNC transactional write. Sets index `shellExited: true, exitCode`. Writes sidecar sync. |
+| `commitClearSnapshot(id)` | SessionManager on `clearScrollback` | SYNC transactional write of empty buffer (no-mirror path also routes here; replaces `resetMirror` + `purgePersistedSnapshot` unification). |
+| `dropSession(id)` | SessionManager on user destroy completion | Destructive: increment generation → unlink canonical buffer → drop index entry → write sidecar sync. |
+| `releaseRuntimeOnly(id)` | SessionManager on shutdown of live/exited-preserved sessions | Dispose headless + addon. NEVER touches disk. Generation bumped so any in-flight async commit unlinks its temp file. |
+
+Removed: `detachSession`, `releaseMirror`, `resetMirror`, `purgePersistedSnapshot`, `flushSessionImmediateSync` — all replaced by the above. Internal-only: `flushPending` (debounce drain) and `flushSnapshotsSync` (deactivate batch) become thin wrappers over `commitLiveSnapshot`.
+
+**Invariant**: every persistence method takes a user-INTENT name. `dropSession` cannot be confused with `releaseRuntimeOnly` because the names encode opposite semantics. The round-4 lesson (memory `feedback_api_naming_disambiguates_semantics`) is embedded in the API.
+
+### D16: Transactional storage commits — temp + per-artifact generation + atomic rename
+
+All writes (buffer + sidecar) flow through a single transactional commit path. SessionStorage tracks a per-artifact generation token; async writers capture the generation before write and either rename to canonical (if still current) OR unlink their temp file (if stale). The canonical path is touched ONLY by `rename` or by destructive commands.
+
+```ts
+class SessionStorage {
+  // Per-artifact monotonic generation. Sync writers AND destructive ops bump.
+  private bufferGen = new Map<string, number>();
+  private sidecarGen = 0;
+
+  // Async commit: temp + post-write rename-or-unlink. Stale → unlink TEMP only.
+  async commitBufferAsync(sessionId: string, data: string, capturedGen: number): Promise<"renamed" | "stale"> {
+    const tmp = `${this.bufferFilePath(sessionId)}.tmp.${crypto.randomUUID()}`;
+    await this.fs.promises.writeFile(tmp, data);
+    if ((this.bufferGen.get(sessionId) ?? 0) !== capturedGen) {
+      await this.fs.promises.unlink(tmp);
+      return "stale";
+    }
+    await this.fs.promises.rename(tmp, this.bufferFilePath(sessionId));
+    return "renamed";
+  }
+
+  // Sync commit: bumps generation, atomic via rename (same-fs).
+  commitBufferSync(sessionId: string, data: string): void {
+    this.bufferGen.set(sessionId, (this.bufferGen.get(sessionId) ?? 0) + 1);
+    const tmp = `${this.bufferFilePath(sessionId)}.tmp.sync`;
+    this.fs.writeFileSync(tmp, data);
+    this.fs.renameSync(tmp, this.bufferFilePath(sessionId));
+  }
+
+  // Drop: bumps generation, unlinks canonical only. In-flight async writers
+  // see generation mismatch and unlink their own TEMP.
+  dropBuffer(sessionId: string): void {
+    this.bufferGen.set(sessionId, (this.bufferGen.get(sessionId) ?? 0) + 1);
+    try { this.fs.unlinkSync(this.bufferFilePath(sessionId)); } catch {}
+  }
+
+  // Symmetric API for sidecar:
+  async commitIndexAsync(index: SessionSnapshotsIndex, capturedGen: number): Promise<"renamed" | "stale"> { ... }
+  commitIndexSync(index: SessionSnapshotsIndex): void { ... }
+}
+```
+
+**Invariant**: The canonical path is overwritten ONLY by `rename`. Stale writers never call `unlink(canonical)` — they unlink their TEMP only. This eliminates R5.B1 at the root.
+
+Per-artifact generation (not per-session) for sidecar correctly orders sidecar writes regardless of which session triggered them. This eliminates R5.B2 at the root.
+
+### D17: Sidecar `index.json` is the SINGLE source of truth — drop the Memento dual-write for snapshots
+
+The dual-source story (sidecar + Memento for the snapshot index) invited the same-shape bugs: one source updated, the other not. Going forward:
+
+- Sidecar `<storageUri>/snapshots/index.json` is THE persisted snapshot index. ALL reads + writes go here via the transactional API.
+- Memento `anywhereTerminal.sessionSnapshots.index` is DROPPED from the snapshot path.
+- One-time migration on first activate post-upgrade: if no sidecar exists but Memento has data, copy Memento → sidecar (sync), then delete Memento entry. Subsequent loads ignore Memento for the index.
+- `loadIndexDetailed` reads sidecar only. Returns `{kind: "valid"|"missing"|"unsupported"}` as in W3 fix. The `unsupported` branch is authoritative (no Memento fallback to obscure it).
+
+Live editor panels (`LIVE_EDITOR_PANELS_KEY` in Memento) stay in Memento — they're small, churnier, and don't carry the same dual-source bug class.
+
+### D18: Process gate — instrumentation parity with review for shutdown changes
+
+Documented retrospectively in `asimov/changes/restore-terminal-sessions/.reviews/round-4.md` and round-5.md: per-method code review consistently misses cross-method temporal coupling (R3 confirmed; R5 reconfirmed). The redesign reduces the bug surface but cannot eliminate it without complementary tests.
+
+Required artifacts before any future change touching `extension.deactivate` / `dispose()` chain / persistence commit paths is approved:
+1. State-machine tests encoding every transition + adversarial interleaving (extend `SessionManager.shutdownLifecycle.test.ts`)
+2. Fault-injection tests simulating `Memento.update()` Canceled (extend `SessionStorage.test.ts`)
+3. One end-to-end smoke (manual or Extension Development Host script) that exercises deactivate → activate with diagnostic logging written to a sync file appender
+
+## Redesign Risk Map
+
+| Component | Risk | Mitigation |
+|---|---|---|
+| Migration Memento → sidecar | Edge case: user downgrades the extension after sidecar-only writes; old code can't read sidecar | Documented one-way migration. Downgrade is a "user accepts data loss" scenario (consistent with VS Code's extension upgrade model). |
+| Temp file proliferation if process crashes mid-write | `<id>.snapshot.ans.tmp.<nonce>` files accumulate | `hydrateFromSnapshots` step 4 (orphan cleanup) extended to unlink any `*.tmp.*` files at startup. |
+| `fs.renameSync` not atomic on Windows across filesystem boundaries | Rename may fail on edge case (extension storage on different volume from temp) | Temp files written into the SAME directory as canonical — guaranteed same-fs rename. Documented invariant. |
+| Per-session generation map memory growth | Long-running session with many destroy/recreate cycles | Generations are scalar counters per session. Map entry persists only while session is registered; cleared on `dropSession`. |
+| State-machine misuse during refactor | A code path forgets to transition state before persistence call | TypeScript enforces: `SnapshotPersistence` command methods take a discriminated `state: SessionState` parameter; state-incompatible calls fail to compile. |
+| Refactor regression in untested paths (no-mirror sessions, hydrate orphan recovery) | Coverage gap | Round-4 tests already cover no-mirror clear (B1) + orphan recovery (R4.W3). Extend `SessionManager.shutdownLifecycle.test.ts` with redesign-specific invariants: temp-cleanup-on-stale, sidecar generation race, state-incompatible-call rejection. |
+| Round-4 fix code is removed during redesign (sessionsPendingDestroy, epoch token) | Risk of reintroducing the bugs those fixes covered | State machine subsumes both: `destroying` state subsumes `sessionsPendingDestroy`; per-artifact generation subsumes `_sessionEpochs`. Migration tests assert each round-4 RED test still passes against the redesigned API. |
