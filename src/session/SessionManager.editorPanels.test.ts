@@ -1,0 +1,158 @@
+// Live editor-panel registry tests.
+// See: asimov/changes/restore-terminal-sessions/design.md D10.
+
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { __resetAll, __setAppRoot, __setWorkspaceFolders } from "../test/__mocks__/vscode";
+
+vi.mock("../pty/processCwd", () => ({ queryProcessCwd: vi.fn(async () => undefined) }));
+vi.mock("../pty/PtyManager", () => ({
+  loadNodePty: vi.fn(() => ({ spawn: vi.fn() })),
+  detectShell: vi.fn(() => ({ shell: "/bin/zsh", args: ["--login"] })),
+  buildEnvironment: vi.fn(() => ({ PATH: "/usr/bin" })),
+  resolveWorkingDirectory: vi.fn(() => "/tmp"),
+}));
+vi.mock("../pty/PtySession", () => {
+  class MockPtySession {
+    id: string;
+    pid = 99000;
+    spawn = vi.fn();
+    write = vi.fn();
+    resize = vi.fn();
+    kill = vi.fn();
+    pause = vi.fn();
+    resume = vi.fn();
+    setCurrentCwdSink = vi.fn();
+    onData: any = undefined;
+    onExit: any = undefined;
+    constructor(id: string) {
+      this.id = id;
+    }
+  }
+  return { PtySession: MockPtySession };
+});
+vi.mock("./OutputBuffer", () => {
+  class MockOutputBuffer {
+    append = vi.fn();
+    dispose = vi.fn();
+    updateWebview = vi.fn();
+    pauseOutput = vi.fn();
+    resumeOutput = vi.fn();
+    handleAck = vi.fn();
+    flush = vi.fn();
+    bufferSize = 0;
+    unackedCharCount = 0;
+    constructor(
+      public _i: string,
+      public _w: unknown,
+      public _p: unknown,
+    ) {}
+  }
+  return { OutputBuffer: MockOutputBuffer };
+});
+
+import { SessionManager } from "./SessionManager";
+
+function makeStorageMock() {
+  const scheduleLivePanelsWrite = vi.fn();
+  return {
+    writeBufferFileAsync: vi.fn(async () => {}),
+    writeBufferFileSync: vi.fn(),
+    scheduleIndexWrite: vi.fn(),
+    scheduleLivePanelsWrite,
+    unlinkBufferFile: vi.fn(),
+    writeIndexAwaited: vi.fn(async () => {}),
+    writeLivePanelsAwaited: vi.fn(async () => {}),
+    readBufferFile: () => null,
+    listBufferFiles: () => [],
+    loadIndex: () => undefined,
+    loadLivePanels: () => undefined,
+    bufferFilePath: (id: string) => `/tmp/${id}`,
+    bufferFileRelativePath: (id: string) => `snapshots/${id}.snapshot.ans`,
+    cancelPendingIndex: vi.fn(),
+    purge: vi.fn(async () => {}),
+  };
+}
+
+beforeEach(() => {
+  __resetAll();
+  __setAppRoot("/mock/vscode/app");
+  __setWorkspaceFolders([{ uri: { fsPath: "/mock/workspace" } }]);
+  vi.clearAllMocks();
+});
+
+afterEach(() => {
+  vi.restoreAllMocks();
+});
+
+describe("SessionManager live editor-panels registry", () => {
+  it("register / attach / unregister update the in-memory map and schedule writes", () => {
+    const storage = makeStorageMock();
+    const sm = new SessionManager(undefined, {
+      restoreEnabled: true,
+      storage: storage as any,
+    });
+    sm.registerEditorPanel("P1");
+    sm.attachSessionToPanel("P1", "S1");
+    sm.attachSessionToPanel("P1", "S2");
+
+    const record = sm.getLiveEditorPanelsRecord();
+    expect(record.panels).toHaveLength(1);
+    expect(record.panels[0].panelId).toBe("P1");
+    expect(record.panels[0].sessionIds).toEqual(["S1", "S2"]);
+    expect(storage.scheduleLivePanelsWrite).toHaveBeenCalled();
+
+    sm.unregisterEditorPanel("P1");
+    expect(sm.getLiveEditorPanelsRecord().panels).toEqual([]);
+    sm.dispose();
+  });
+
+  it("register is idempotent", () => {
+    const storage = makeStorageMock();
+    const sm = new SessionManager(undefined, {
+      restoreEnabled: true,
+      storage: storage as any,
+    });
+    sm.registerEditorPanel("P1");
+    const first = sm.getLiveEditorPanelsRecord().panels[0];
+    sm.registerEditorPanel("P1");
+    const second = sm.getLiveEditorPanelsRecord().panels[0];
+    expect(second.createdAt).toBe(first.createdAt);
+    sm.dispose();
+  });
+
+  it("attach is idempotent", () => {
+    const storage = makeStorageMock();
+    const sm = new SessionManager(undefined, {
+      restoreEnabled: true,
+      storage: storage as any,
+    });
+    sm.registerEditorPanel("P1");
+    sm.attachSessionToPanel("P1", "S1");
+    sm.attachSessionToPanel("P1", "S1");
+    expect(sm.getLiveEditorPanelsRecord().panels[0].sessionIds).toEqual(["S1"]);
+    sm.dispose();
+  });
+
+  it("attach to unknown panelId is a silent no-op", () => {
+    const storage = makeStorageMock();
+    const sm = new SessionManager(undefined, {
+      restoreEnabled: true,
+      storage: storage as any,
+    });
+    expect(() => sm.attachSessionToPanel("never", "x")).not.toThrow();
+    expect(sm.getLiveEditorPanelsRecord().panels).toEqual([]);
+    sm.dispose();
+  });
+
+  it("does not call storage.scheduleLivePanelsWrite when restoreEnabled === false", () => {
+    const storage = makeStorageMock();
+    const sm = new SessionManager(undefined, {
+      restoreEnabled: false,
+      storage: storage as any,
+    });
+    sm.registerEditorPanel("P1");
+    sm.attachSessionToPanel("P1", "S1");
+    expect(storage.scheduleLivePanelsWrite).not.toHaveBeenCalled();
+    sm.dispose();
+  });
+});

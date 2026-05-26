@@ -127,7 +127,7 @@ afterEach(() => {
 });
 
 describe("TerminalViewProvider.onReady restore branch", () => {
-  it("creates sessions from staged snapshots and posts init + restoreFromSnapshot", () => {
+  it("creates sessions from staged snapshots and posts init + restoreFromSnapshot", async () => {
     const sm = new SessionManager(undefined, { restoreEnabled: true });
     sm.__stagePendingSnapshot(pendingSnap("S1", "sidebar"));
     const provider = new TerminalViewProvider({ fsPath: "/mock/ext" } as vscode.Uri, sm, "sidebar");
@@ -136,6 +136,10 @@ describe("TerminalViewProvider.onReady restore branch", () => {
     for (const h of messageHandlers) {
       h({ type: "ready" });
     }
+    // onReady is async now (round-2 [W4] fix awaits init before posting
+    // restoreFromSnapshot). Let the microtasks flush so the for-loop posts
+    // settle before assertions.
+    await new Promise<void>((resolve) => setTimeout(resolve, 0));
 
     const calls = postMessage.mock.calls.map((c) => c[0] as unknown) as Array<{
       type?: string;
@@ -146,6 +150,10 @@ describe("TerminalViewProvider.onReady restore branch", () => {
     expect(init).toBeDefined();
     expect(restore).toBeDefined();
     expect(restore!.tabId).toBe("S1");
+    // init must arrive BEFORE restoreFromSnapshot — the whole point of [W4].
+    const initIdx = calls.findIndex((m) => m?.type === "init");
+    const restoreIdx = calls.findIndex((m) => m?.type === "restoreFromSnapshot");
+    expect(initIdx).toBeLessThan(restoreIdx);
     expect(sm.getTabsForView(provider.getViewId())).toHaveLength(1);
     sm.dispose();
   });

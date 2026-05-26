@@ -138,6 +138,41 @@ describe("evictIndex", () => {
     expect(result.dropped.sort()).toEqual(["root-0", "root-0-p1", "root-0-p2"].sort());
   });
 
+  it("groups age check uses max(snapshotAt) — a dormant split child survives while sibling is fresh", () => {
+    // root-X has one stale child (older than the 7d cap on its own) and one
+    // fresh sibling. Pre-W1 logic would drop the stale child first (per-entry
+    // age), orphaning the group. Post-W1 the group's max(snapshotAt) is used,
+    // and since the sibling is fresh the WHOLE group survives.
+    const stale = meta("root-X-p1", {
+      snapshotAt: NOW - SNAPSHOT_MAX_AGE_MS - 60_000,
+      isSplitPane: true,
+      rootTabId: "root-X",
+    });
+    const fresh = meta("root-X", {
+      snapshotAt: NOW - 1000,
+      isSplitPane: false,
+      rootTabId: "root-X",
+    });
+    const result = evictIndex(indexOf([stale, fresh]), NOW);
+    expect(new Set(Object.keys(result.kept.entries))).toEqual(new Set(["root-X-p1", "root-X"]));
+    expect(result.dropped).toEqual([]);
+  });
+
+  it("groups size check drops the WHOLE group if any member is oversized", () => {
+    // truncateSnapshotBuffer caps writes at 1 MB, so an oversized entry is
+    // a corrupted-state safety signal. Round-2 W1: dropping just the oversized
+    // pane while keeping its sibling would orphan the layout — drop together.
+    const okPane = meta("root-Y", { isSplitPane: false, rootTabId: "root-Y" });
+    const oversizedPane = meta("root-Y-p1", {
+      bufferBytes: SNAPSHOT_MAX_BUFFER_BYTES + 1,
+      isSplitPane: true,
+      rootTabId: "root-Y",
+    });
+    const result = evictIndex(indexOf([okPane, oversizedPane]), NOW);
+    expect(Object.keys(result.kept.entries)).toEqual([]);
+    expect(result.dropped.sort()).toEqual(["root-Y", "root-Y-p1"].sort());
+  });
+
   it("admits groups in newest-first order using each group's max snapshotAt", () => {
     // Root A's freshest pane is 10ms newer than Root B's freshest. With a count
     // cap of 4 and two groups of 2 panes each, both groups fit (4 entries) —

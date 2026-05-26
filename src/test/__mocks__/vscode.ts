@@ -343,6 +343,9 @@ export const window = {
   registerWebviewViewProvider: (_viewType: string, _provider: unknown, _options?: unknown) => ({
     dispose: () => {},
   }),
+  registerWebviewPanelSerializer: (_viewType: string, _serializer: unknown) => ({
+    dispose: () => {},
+  }),
   get activeColorTheme(): { kind: number } {
     return _activeColorTheme;
   },

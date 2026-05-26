@@ -216,6 +216,124 @@ describe("SessionManager debounced persistence", () => {
     sm.dispose();
   });
 
+  it("destroy mid-flush does NOT resurrect the snapshot index entry (round-2 [W3])", async () => {
+    // Setup: a flush is mid-await on writeBufferFileAsync when destroySession
+    // fires. The pre-W3 code path would then synchronously re-insert the index
+    // entry after detachSession had just dropped it — resurrecting a ghost.
+    const fx = makeFactories();
+    let resolveWrite: () => void = () => {};
+    const writePromise = new Promise<void>((resolve) => {
+      resolveWrite = resolve;
+    });
+    const storage = makeStorageMock();
+    // Slow writeBufferFileAsync — held until we explicitly resolve it.
+    storage.writeBufferFileAsync.mockImplementation(async () => {
+      await writePromise;
+    });
+
+    const sm = new SessionManager(undefined, {
+      restoreEnabled: true,
+      headlessFactory: fx.headless,
+      serializeAddonFactory: fx.serialize,
+      storage: storage as any,
+    });
+    const id = sm.createSession("sidebar", mockWebview());
+    mockPtySessions[0].onData?.("hello");
+    // Kick the debounce so flushPending starts.
+    vi.advanceTimersByTime(1000);
+    // Hand control back so flushPending awaits writeBufferFileAsync.
+    await Promise.resolve();
+    await Promise.resolve();
+
+    // Destroy the session WHILE the async write is still in flight.
+    // detachSession will unlink the file and drop the index entry.
+    sm.destroySession(id);
+
+    // Now release the write. Pre-W3: line 466 (`_snapshotIndex[id] = result.metadata`)
+    // would resurrect the entry. Post-W3: the per-session liveness re-check
+    // (`if (!this.getSession(id)) { unlinkBufferFile(id); continue; }`) skips
+    // the assignment AND unlinks the just-written ghost file.
+    resolveWrite();
+    await Promise.resolve();
+    await Promise.resolve();
+    await vi.advanceTimersByTimeAsync(50);
+
+    // The index write that flushPending schedules at the end should NOT
+    // contain the destroyed session.
+    const calls = storage.scheduleIndexWrite.mock.calls;
+    const lastCall = calls[calls.length - 1];
+    if (lastCall) {
+      const idx = lastCall[0] as { entries: Record<string, unknown> };
+      expect(idx.entries[id]).toBeUndefined();
+    }
+    // The file MUST be unlinked twice: once by detachSession, once by the
+    // post-await ghost-cleanup. Vitest's mock counts both calls.
+    expect(storage.unlinkBufferFile).toHaveBeenCalledWith(id);
+    sm.dispose();
+  });
+
+  it("clearScrollback purges the persisted snapshot for a no-mirror restored-exited session (round-2 [B1])", async () => {
+    // Setup: createSession with restoreFrom.metadata.shellExited === true.
+    // attachSession skips headless-mirror seeding for exited sessions, so the
+    // resulting TerminalSession has no `headless` field. resetMirror's
+    // early-return on no-mirror previously left the persisted buffer + index
+    // entry intact — Cmd+K on a restored-exited tab then resurrected the
+    // cleared content on next restart. Post-B1: resetMirror routes through
+    // purgePersistedSnapshot, which unlinks the buffer + drops the index entry.
+    const fx = makeFactories();
+    const storage = makeStorageMock();
+    const sm = new SessionManager(undefined, {
+      restoreEnabled: true,
+      headlessFactory: fx.headless,
+      serializeAddonFactory: fx.serialize,
+      storage: storage as any,
+    });
+
+    const sessionId = "exited-session";
+    const id = sm.createSession("sidebar", mockWebview(), {
+      restoreFrom: {
+        metadata: {
+          sessionId,
+          viewLocation: "sidebar",
+          terminalNumber: 1,
+          customName: null,
+          shell: "/bin/zsh",
+          shellArgs: [],
+          cwd: "/tmp",
+          currentCwd: null,
+          cols: 80,
+          rows: 24,
+          bufferFile: `snapshots/${sessionId}.snapshot.ans`,
+          bufferBytes: 100,
+          isSplitPane: false,
+          rootTabId: sessionId,
+          snapshotAt: Date.now() - 1000,
+          shellExited: true,
+          exitCode: 0,
+        },
+        buffer: "stale content",
+      },
+    });
+
+    // Confirm the precondition: no headless mirror on the exited session.
+    expect(sm.getSession(id)?.headless).toBeUndefined();
+
+    storage.unlinkBufferFile.mockClear();
+    storage.scheduleIndexWrite.mockClear();
+
+    sm.clearScrollback(id);
+
+    // The persisted buffer file MUST be unlinked.
+    expect(storage.unlinkBufferFile).toHaveBeenCalledWith(id);
+    // Index rewrite scheduled (without this session's entry).
+    expect(storage.scheduleIndexWrite).toHaveBeenCalled();
+    const lastIndexCall = storage.scheduleIndexWrite.mock.calls.at(-1)?.[0] as
+      | { entries: Record<string, unknown> }
+      | undefined;
+    expect(lastIndexCall?.entries[id]).toBeUndefined();
+    sm.dispose();
+  });
+
   it("the setting kill-switch suppresses persistence", async () => {
     const fx = makeFactories();
     const storage = makeStorageMock();

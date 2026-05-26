@@ -249,6 +249,50 @@ describe("SessionManager: createSession", () => {
 
     sm.dispose();
   });
+
+  it("prefers persisted shell, args, and cwd when restoring from a snapshot", () => {
+    const sm = new SessionManager();
+    const webview = createMockWebview();
+
+    const id = sm.createSession("anywhereTerminal.sidebar", webview, {
+      shell: "/current/settings-shell",
+      shellArgs: ["--current"],
+      cwd: "/current/settings-cwd",
+      restoreFrom: {
+        metadata: {
+          sessionId: "RESTORED-SHELL-CWD",
+          viewLocation: "sidebar",
+          terminalNumber: 7,
+          customName: null,
+          shell: "/persisted/shell",
+          shellArgs: ["--persisted"],
+          cwd: "/persisted/cwd",
+          currentCwd: "/persisted/current-cwd",
+          cols: 80,
+          rows: 24,
+          bufferFile: "snapshots/RESTORED-SHELL-CWD.snapshot.ans",
+          bufferBytes: 3,
+          isSplitPane: false,
+          rootTabId: "RESTORED-SHELL-CWD",
+          snapshotAt: 1700000000000,
+          shellExited: false,
+          exitCode: null,
+        },
+        buffer: "BUF",
+      },
+    });
+
+    expect(id).toBe("RESTORED-SHELL-CWD");
+    expect(mockPtySessions[0].spawn).toHaveBeenCalledWith(
+      expect.anything(),
+      "/persisted/shell",
+      ["--persisted"],
+      expect.objectContaining({ cwd: "/persisted/cwd" }),
+    );
+    expect(sm.getCurrentCwd(id)).toBe("/persisted/current-cwd");
+
+    sm.dispose();
+  });
 });
 
 // ─── getInitialCwd ──────────────────────────────────────────────────
