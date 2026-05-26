@@ -2,6 +2,7 @@
 // See: docs/design/pty-manager.md#§5 (Graceful Shutdown)
 
 import { createOscParser, type OscParser } from "./oscParser";
+import type { ShellIntegrationSink } from "./ShellIntegrationEvents";
 import type { NodePtyModule, Pty, PtyForkOptions } from "./PtyManager";
 
 // ─── Constants ──────────────────────────────────────────────────────
@@ -62,6 +63,8 @@ export class PtySession {
   private readonly _oscParser: OscParser = createOscParser();
   /** Sink that receives parsed cwds. Set by SessionManager via setCurrentCwdSink. */
   private _setCurrentCwd: ((cwd: string) => void) | undefined;
+  /** Sink that receives ALL shell-integration events (including cwd). Set via setShellIntegrationSink. */
+  private _shellIntegrationSink: ShellIntegrationSink | undefined;
 
   get isAlive(): boolean {
     return this._isAlive;
@@ -94,6 +97,27 @@ export class PtySession {
    */
   setCurrentCwdSink(fn: ((cwd: string) => void) | undefined): void {
     this._setCurrentCwd = fn;
+  }
+
+  /**
+   * Register a callback that receives every parsed shell-integration event
+   * (cwd + A/B/C/D/E markers). The OSC parser is the source of truth; consumers
+   * (e.g. `TerminalSession` command tracking) wire here.
+   *
+   * Setting both this AND `setCurrentCwdSink` will deliver `cwd` events to
+   * BOTH sinks — callers must decide which they use.
+   */
+  setShellIntegrationSink(fn: ShellIntegrationSink | undefined): void {
+    this._shellIntegrationSink = fn;
+  }
+
+  /**
+   * Set the per-session nonce used by the OSC parser to validate OSC 633 `E`
+   * markers. The injector generates the nonce at PTY spawn time and supplies
+   * it here so the parser can reject `E` markers from untrusted output.
+   */
+  setShellIntegrationNonce(nonce: string | undefined): void {
+    this._oscParser.setNonce(nonce);
   }
 
   // ─── Core Operations ────────────────────────────────────────────
@@ -146,9 +170,14 @@ export class PtySession {
       // Passive OSC scan — must NOT mutate or swallow `data`. A throw from
       // the parser or sink is isolated so the chunk still reaches the user
       // callback byte-identically (pass-through guarantee / design D9).
-      if (this._setCurrentCwd) {
+      if (this._setCurrentCwd || this._shellIntegrationSink) {
         try {
-          this._oscParser.feed(data, this._setCurrentCwd);
+          this._oscParser.feed(data, (event) => {
+            if (event.kind === "cwd") {
+              this._setCurrentCwd?.(event.cwd);
+            }
+            this._shellIntegrationSink?.(event);
+          });
         } catch (err) {
           console.error("[AnyWhere Terminal] OSC parser/sink threw:", err);
         }

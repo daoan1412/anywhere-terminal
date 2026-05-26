@@ -29,6 +29,8 @@ vi.mock("../pty/PtySession", () => {
     pause = vi.fn();
     resume = vi.fn();
     setCurrentCwdSink = vi.fn();
+    setShellIntegrationSink = vi.fn();
+    setShellIntegrationNonce = vi.fn();
     private _od: ((d: string) => void) | undefined;
     private _oe: ((c: number) => void) | undefined;
     get onData() {

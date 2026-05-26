@@ -28,6 +28,8 @@ vi.mock("../pty/PtySession", () => {
     pause = vi.fn();
     resume = vi.fn();
     setCurrentCwdSink = vi.fn();
+    setShellIntegrationSink = vi.fn();
+    setShellIntegrationNonce = vi.fn();
     private _od: ((d: string) => void) | undefined;
     get onData() {
       return this._od;
@@ -87,14 +89,18 @@ function makeStorageMock() {
       bufferGens.set(id, (bufferGens.get(id) ?? 0) + 1);
     }),
     commitBufferAsync: vi.fn(async (id: string, _data: string, capturedGen: number) => {
-      if ((bufferGens.get(id) ?? 0) !== capturedGen) return "stale-skipped" as const;
+      if ((bufferGens.get(id) ?? 0) !== capturedGen) {
+        return "stale-skipped" as const;
+      }
       return "renamed" as const;
     }),
     commitIndexSync: vi.fn(() => {
       sidecarGen += 1;
     }),
     commitIndexAsync: vi.fn(async (_idx: unknown, capturedGen: number) => {
-      if (sidecarGen !== capturedGen) return "stale-skipped" as const;
+      if (sidecarGen !== capturedGen) {
+        return "stale-skipped" as const;
+      }
       return "renamed" as const;
     }),
     dropBuffer: vi.fn((id: string) => {

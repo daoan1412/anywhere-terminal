@@ -28,6 +28,16 @@ import type {
 } from "./SessionSnapshot";
 import type { SessionStorage } from "./SessionStorage";
 import { defaultHeadlessFactory, defaultSerializeAddonFactory, SnapshotPersistence } from "./SnapshotPersistence";
+import type { ShellIntegrationEvent } from "../pty/ShellIntegrationEvents";
+import {
+  appendToCommandOutput,
+  closeCommand,
+  createCommandTrackingRuntime,
+  lastCompleted,
+  openCommand,
+  setInFlightCommandLine,
+  type TrackedCommand,
+} from "./TrackedCommand";
 import type {
   HeadlessFactory,
   MemoryMetrics,
@@ -140,7 +150,9 @@ export class SessionManager {
     this.editorPanels = new EditorPanelRegistry((record) => {
       // Only write through to storage when restore is enabled; otherwise we
       // produce churn against `workspaceState` for no benefit.
-      if (!this.snapshots.isRestoreEnabled() || !this.storage) return;
+      if (!this.snapshots.isRestoreEnabled() || !this.storage) {
+        return;
+      }
       this.storage.scheduleLivePanelsWrite(record);
     });
     this.snapshots = new SnapshotPersistence({
@@ -160,7 +172,9 @@ export class SessionManager {
     // override `onShellExited` directly. See design.md D15.
     this.onShellExited = (sessionId) => {
       const session = this.sessions.get(sessionId);
-      if (!session) return;
+      if (!session) {
+        return;
+      }
       this.snapshots.commitExitSnapshot(sessionId, session.exitCode ?? null);
     };
   }
@@ -176,7 +190,9 @@ export class SessionManager {
    */
   setRestoreEnabled(enabled: boolean): void {
     this.snapshots.setRestoreEnabled(enabled, this.sessions.keys());
-    if (!enabled) this.editorPanels.clear();
+    if (!enabled) {
+      this.editorPanels.clear();
+    }
   }
 
   // ─── Snapshot pass-through (test + provider compatibility) ──────
@@ -218,7 +234,9 @@ export class SessionManager {
    */
   async flushIndexAwaited(): Promise<void> {
     await this.snapshots.flushIndexAwaited();
-    if (this._disposed || !this.snapshots.isRestoreEnabled() || !this.storage) return;
+    if (this._disposed || !this.snapshots.isRestoreEnabled() || !this.storage) {
+      return;
+    }
     try {
       await this.storage.writeLivePanelsAwaited(this.editorPanels.toRecord());
     } catch (err) {
@@ -233,7 +251,9 @@ export class SessionManager {
 
   /** Hydrate the live editor-panels registry from workspaceState (post-restart). */
   hydrateLivePanels(record?: LiveEditorPanelsRecord): void {
-    if (!this.snapshots.isRestoreEnabled()) return;
+    if (!this.snapshots.isRestoreEnabled()) {
+      return;
+    }
     this.editorPanels.hydrate(record);
   }
 
@@ -353,6 +373,10 @@ export class SessionManager {
       // Wire passive OSC 7 / OSC 633 cwd parser. Sink receives sanitized absolute
       // paths only; PtySession guarantees byte-identical forwarding to onData.
       pty.setCurrentCwdSink((cwd) => this.setCurrentCwd(id, cwd));
+      // Wire shell-integration tracker. Subscribes to A/B/C/D/E events from the
+      // same OSC parser (cwd events also surface here but are handled above; we
+      // ignore them in `_handleShellIntegrationEvent` to avoid double-dispatch).
+      pty.setShellIntegrationSink((event) => this._handleShellIntegrationEvent(id, event));
     }
 
     const outputBuffer = new OutputBuffer(id, webview, pty);
@@ -396,6 +420,7 @@ export class SessionManager {
       panelId: viewId.startsWith("editor-") ? viewId.slice("editor-".length) : undefined,
       shellExited: restoringExited || undefined,
       exitCode: restoringExited ? (restoreFrom?.metadata.exitCode ?? null) : undefined,
+      commandTracking: createCommandTrackingRuntime(),
     };
 
     // Deactivate other sessions in the same view (only for root tab sessions)
@@ -404,7 +429,9 @@ export class SessionManager {
       if (viewSessionIds) {
         for (const sid of viewSessionIds) {
           const s = this.sessions.get(sid);
-          if (s) s.isActive = false;
+          if (s) {
+            s.isActive = false;
+          }
         }
       }
     }
@@ -437,6 +464,12 @@ export class SessionManager {
       outputBuffer.append(data);
       this.appendToScrollback(session, data);
       this.snapshots.recordData(session, data);
+      // Append to the in-flight tracked command (no-op when nothing is in
+      // flight). Cap is enforced inside appendToCommandOutput so a never-
+      // closing command can't grow `output` past 100 KB.
+      if (session.commandTracking.inFlight) {
+        appendToCommandOutput(session.commandTracking, data);
+      }
     };
 
     pty.onExit = (code: number) => {
@@ -448,7 +481,9 @@ export class SessionManager {
       // If this is an intentional kill, skip cleanup (destroySession handles it
       // via performDestroy → cleanupSession, and the state is already
       // "destroying" from the synchronous transitionState in destroySession).
-      if (this.terminalBeingKilled.has(id)) return;
+      if (this.terminalBeingKilled.has(id)) {
+        return;
+      }
 
       // Natural exit (user typed `exit`, ^D, crash). Transition live →
       // exited-preserved BEFORE cleanupSession so its dispatch picks
@@ -464,14 +499,18 @@ export class SessionManager {
   /** Write input data to a session's PTY. Silent no-op for unknown session IDs. */
   writeToSession(sessionId: string, data: string): void {
     const session = this.sessions.get(sessionId);
-    if (!session) return;
+    if (!session) {
+      return;
+    }
     session.pty.write(data);
   }
 
   /** Resize a session's PTY and update stored dimensions. Silent no-op for unknown session IDs. */
   resizeSession(sessionId: string, cols: number, rows: number): void {
     const session = this.sessions.get(sessionId);
-    if (!session) return;
+    if (!session) {
+      return;
+    }
     session.pty.resize(cols, rows);
     session.cols = cols;
     session.rows = rows;
@@ -481,11 +520,17 @@ export class SessionManager {
   /** Switch active session within a view. Silent no-op for unknown viewId or sessionId. */
   switchActiveSession(viewId: string, sessionId: string): void {
     const viewSessionIds = this.viewSessions.get(viewId);
-    if (!viewSessionIds) return;
-    if (!viewSessionIds.includes(sessionId)) return;
+    if (!viewSessionIds) {
+      return;
+    }
+    if (!viewSessionIds.includes(sessionId)) {
+      return;
+    }
     for (const sid of viewSessionIds) {
       const s = this.sessions.get(sid);
-      if (s) s.isActive = sid === sessionId;
+      if (s) {
+        s.isActive = sid === sessionId;
+      }
     }
   }
 
@@ -498,7 +543,9 @@ export class SessionManager {
     viewId: string,
   ): Array<{ id: string; name: string; customName: string | null; isActive: boolean; isSplitPane: false }> {
     const viewSessionIds = this.viewSessions.get(viewId);
-    if (!viewSessionIds) return [];
+    if (!viewSessionIds) {
+      return [];
+    }
 
     type TabInfo = {
       id: string;
@@ -510,7 +557,9 @@ export class SessionManager {
     return viewSessionIds
       .map((sid): TabInfo | undefined => {
         const s = this.sessions.get(sid);
-        if (!s || s.isSplitPane) return undefined;
+        if (!s || s.isSplitPane) {
+          return undefined;
+        }
         return { id: s.id, name: s.name, customName: s.customName, isActive: s.isActive, isSplitPane: false };
       })
       .filter((tab): tab is TabInfo => tab !== undefined);
@@ -526,7 +575,9 @@ export class SessionManager {
     viewId: string,
   ): Array<{ id: string; name: string; customName: string | null; isActive: boolean; isSplitPane: boolean }> {
     const viewSessionIds = this.viewSessions.get(viewId);
-    if (!viewSessionIds) return [];
+    if (!viewSessionIds) {
+      return [];
+    }
 
     type SessionInfo = {
       id: string;
@@ -538,7 +589,9 @@ export class SessionManager {
     return viewSessionIds
       .map((sid): SessionInfo | undefined => {
         const s = this.sessions.get(sid);
-        if (!s) return undefined;
+        if (!s) {
+          return undefined;
+        }
         return {
           id: s.id,
           name: s.name,
@@ -563,7 +616,9 @@ export class SessionManager {
   /** Record the latest cwd parsed from PTY output. Silent no-op for unknown ids. */
   setCurrentCwd(sessionId: string, cwd: string): void {
     const session = this.sessions.get(sessionId);
-    if (!session) return;
+    if (!session) {
+      return;
+    }
     session.currentCwd = cwd;
     this.snapshots.schedulePersist(sessionId);
   }
@@ -584,9 +639,13 @@ export class SessionManager {
    */
   async getLiveCwd(sessionId: string): Promise<string | undefined> {
     const session = this.sessions.get(sessionId);
-    if (!session) return undefined;
+    if (!session) {
+      return undefined;
+    }
     const pid = session.pty.pid;
-    if (pid === undefined) return undefined;
+    if (pid === undefined) {
+      return undefined;
+    }
     return queryProcessCwd(pid);
   }
 
@@ -605,7 +664,9 @@ export class SessionManager {
    */
   renameSession(sessionId: string, input: string | null): void {
     const session = this.sessions.get(sessionId);
-    if (!session || session.isSplitPane) return;
+    if (!session || session.isSplitPane) {
+      return;
+    }
 
     const normalized = this.customNames.normalize(input);
     session.customName = normalized;
@@ -629,7 +690,9 @@ export class SessionManager {
    */
   clearScrollback(sessionId: string): void {
     const session = this.sessions.get(sessionId);
-    if (!session) return;
+    if (!session) {
+      return;
+    }
     session.scrollbackCache = [];
     session.scrollbackSize = 0;
     this.snapshots.commitClearSnapshot(sessionId);
@@ -638,7 +701,9 @@ export class SessionManager {
   /** Handle ack message for a session's output buffer. Silent no-op for unknown session IDs. */
   handleAck(sessionId: string, charCount: number): void {
     const session = this.sessions.get(sessionId);
-    if (!session) return;
+    if (!session) {
+      return;
+    }
     session.outputBuffer.handleAck(charCount);
   }
 
@@ -648,7 +713,9 @@ export class SessionManager {
    */
   updateWebviewForView(viewId: string, webview: MessageSender): void {
     const viewSessionIds = this.viewSessions.get(viewId);
-    if (!viewSessionIds) return;
+    if (!viewSessionIds) {
+      return;
+    }
 
     for (const sid of viewSessionIds) {
       const session = this.sessions.get(sid);
@@ -662,8 +729,76 @@ export class SessionManager {
   /** Get the joined scrollback cache data for a session. Returns "" if unknown. */
   getScrollbackData(sessionId: string): string {
     const session = this.sessions.get(sessionId);
-    if (!session) return "";
+    if (!session) {
+      return "";
+    }
     return session.scrollbackCache.join("");
+  }
+
+  // ─── Shell-integration command tracking ────────────────────────────
+  //
+  // Wired in createTerminalSession via pty.setShellIntegrationSink. The state
+  // machine is driven by OSC 633 markers parsed in src/pty/oscParser.ts:
+  //   promptStart  (A)  → reset any orphan in-flight (defensive)
+  //   commandStart (B/C) → open a new command (idempotent — B+C dual-fire OK)
+  //   commandLine  (E)  → set commandLine on the open in-flight (nonce-checked)
+  //   commandEnd   (D)  → close, push to commands[], evict
+  // See: design.md D2, D5, D6.
+
+  private _handleShellIntegrationEvent(sessionId: string, event: ShellIntegrationEvent): void {
+    const session = this.sessions.get(sessionId);
+    if (!session) return;
+    const runtime = session.commandTracking;
+    switch (event.kind) {
+      case "cwd":
+        // Already routed via setCurrentCwdSink — don't double-handle. Falls
+        // through; kept explicit so the type narrowing is exhaustive.
+        return;
+      case "promptStart":
+        // If a prior command never closed, drop it rather than leak it into
+        // the next command's output. This is rare (shell crash, lost D) but
+        // observable when it happens.
+        runtime.inFlight = null;
+        return;
+      case "commandStart":
+        openCommand(runtime, {
+          id: crypto.randomUUID(),
+          now: Date.now(),
+          cwd: session.currentCwd ?? null,
+        });
+        return;
+      case "commandLine":
+        // Only trust the command-line when the per-session nonce matched.
+        // Forged E markers from untrusted output land with nonceValid=false
+        // and leave commandLine as the empty string (set by openCommand).
+        if (event.nonceValid) {
+          setInFlightCommandLine(runtime, event.commandLine);
+        }
+        return;
+      case "commandEnd":
+        closeCommand(runtime, { exitCode: event.exitCode, now: Date.now() });
+        return;
+    }
+  }
+
+  /**
+   * Return the tracked commands for a session in oldest-first order. Empty
+   * when shell integration is inactive OR the session does not exist.
+   */
+  getTrackedCommands(sessionId: string): readonly TrackedCommand[] {
+    const session = this.sessions.get(sessionId);
+    if (!session) return [];
+    return session.commandTracking.commands;
+  }
+
+  /**
+   * Return the most-recently-closed tracked command for a session, or null.
+   * Skips any in-flight command — only fully-closed commands are returned.
+   */
+  getLastCompletedCommand(sessionId: string): TrackedCommand | null {
+    const session = this.sessions.get(sessionId);
+    if (!session) return null;
+    return lastCompleted(session.commandTracking);
   }
 
   /** Get aggregate memory usage metrics across all sessions. */
@@ -700,20 +835,28 @@ export class SessionManager {
   /** Pause output flushing for all sessions in a view. */
   pauseOutputForView(viewId: string): void {
     const viewSessionIds = this.viewSessions.get(viewId);
-    if (!viewSessionIds) return;
+    if (!viewSessionIds) {
+      return;
+    }
     for (const sid of viewSessionIds) {
       const s = this.sessions.get(sid);
-      if (s) s.outputBuffer.pauseOutput();
+      if (s) {
+        s.outputBuffer.pauseOutput();
+      }
     }
   }
 
   /** Resume output flushing for all sessions in a view (any buffered data flushes immediately). */
   resumeOutputForView(viewId: string): void {
     const viewSessionIds = this.viewSessions.get(viewId);
-    if (!viewSessionIds) return;
+    if (!viewSessionIds) {
+      return;
+    }
     for (const sid of viewSessionIds) {
       const s = this.sessions.get(sid);
-      if (s) s.outputBuffer.resumeOutput();
+      if (s) {
+        s.outputBuffer.resumeOutput();
+      }
     }
   }
 
@@ -728,7 +871,9 @@ export class SessionManager {
    */
   private transitionState(sessionId: string, from: SessionState | readonly SessionState[], to: SessionState): boolean {
     const session = this.sessions.get(sessionId);
-    if (!session) return false;
+    if (!session) {
+      return false;
+    }
     const allowed = Array.isArray(from) ? from : [from as SessionState];
     if (!allowed.includes(session.state)) {
       console.error(
@@ -767,7 +912,9 @@ export class SessionManager {
    */
   scheduleDestroyForView(viewId: string, delayMs: number = this.defaultGracePeriodMs, onFire?: () => void): void {
     const existing = this.pendingDestroys.get(viewId);
-    if (existing) clearTimeout(existing);
+    if (existing) {
+      clearTimeout(existing);
+    }
     const timer = setTimeout(() => {
       this.pendingDestroys.delete(viewId);
       this.destroyAllForView(viewId);
@@ -785,7 +932,9 @@ export class SessionManager {
   /** Cancel a previously scheduled destroy. Silent no-op when nothing is pending. */
   cancelScheduledDestroy(viewId: string): void {
     const existing = this.pendingDestroys.get(viewId);
-    if (!existing) return;
+    if (!existing) {
+      return;
+    }
     clearTimeout(existing);
     this.pendingDestroys.delete(viewId);
   }
@@ -839,7 +988,9 @@ export class SessionManager {
    * timers are cleared up front. See round-1 W3.
    */
   dispose(): void {
-    if (this._disposed) return;
+    if (this._disposed) {
+      return;
+    }
     this._disposed = true;
 
     // Tear down the snapshot debounce/timer; per-session mirror disposal
@@ -862,7 +1013,9 @@ export class SessionManager {
     const allIds = [...this.sessions.keys()];
     for (const id of allIds) {
       const session = this.sessions.get(id);
-      if (!session) continue;
+      if (!session) {
+        continue;
+      }
       try {
         session.outputBuffer.dispose();
       } catch {
@@ -904,7 +1057,9 @@ export class SessionManager {
   /** Perform the actual destruction of a session. Called from the operation queue — serial. */
   private async performDestroy(sessionId: string): Promise<void> {
     const session = this.sessions.get(sessionId);
-    if (!session) return;
+    if (!session) {
+      return;
+    }
 
     // Mark as being killed to prevent re-entrant cleanup from onExit
     this.terminalBeingKilled.add(sessionId);
@@ -938,7 +1093,9 @@ export class SessionManager {
   /** Remove a session from all maps and free its resources. */
   private cleanupSession(sessionId: string): void {
     const session = this.sessions.get(sessionId);
-    if (!session) return;
+    if (!session) {
+      return;
+    }
 
     // Dispose per-session resources
     for (const d of session.disposables) {
@@ -978,8 +1135,12 @@ export class SessionManager {
     const viewSessionIds = this.viewSessions.get(session.viewId);
     if (viewSessionIds) {
       const idx = viewSessionIds.indexOf(sessionId);
-      if (idx !== -1) viewSessionIds.splice(idx, 1);
-      if (viewSessionIds.length === 0) this.viewSessions.delete(session.viewId);
+      if (idx !== -1) {
+        viewSessionIds.splice(idx, 1);
+      }
+      if (viewSessionIds.length === 0) {
+        this.viewSessions.delete(session.viewId);
+      }
     }
   }
 

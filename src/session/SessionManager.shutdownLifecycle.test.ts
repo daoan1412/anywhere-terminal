@@ -39,6 +39,8 @@ vi.mock("../pty/PtySession", () => {
     pause = vi.fn();
     resume = vi.fn();
     setCurrentCwdSink = vi.fn();
+    setShellIntegrationSink = vi.fn();
+    setShellIntegrationNonce = vi.fn();
     private _od: ((d: string) => void) | undefined;
     private _oe: ((c: number) => void) | undefined;
     get onData() {
@@ -101,14 +103,18 @@ function makeStorageMock() {
     bufferGens.set(id, (bufferGens.get(id) ?? 0) + 1);
   });
   const commitBufferAsync = vi.fn(async (id: string, _data: string, capturedGen: number) => {
-    if ((bufferGens.get(id) ?? 0) !== capturedGen) return "stale-skipped" as const;
+    if ((bufferGens.get(id) ?? 0) !== capturedGen) {
+      return "stale-skipped" as const;
+    }
     return "renamed" as const;
   });
   const commitIndexSync = vi.fn((_idx: unknown) => {
     sidecarGen += 1;
   });
   const commitIndexAsync = vi.fn(async (_idx: unknown, capturedGen: number) => {
-    if (sidecarGen !== capturedGen) return "stale-skipped" as const;
+    if (sidecarGen !== capturedGen) {
+      return "stale-skipped" as const;
+    }
     return "renamed" as const;
   });
   const dropBuffer = vi.fn((id: string) => {
@@ -563,7 +569,9 @@ describe("R-7 invariant + fault-injection tests (D18)", () => {
     // based on state. Set the state to "disposed" manually via the type
     // system and verify dispose's branch falls through to releaseRuntimeOnly.
     const session = sm.getSession(id);
-    if (session) session.state = "disposed";
+    if (session) {
+      session.state = "disposed";
+    }
 
     sm.dispose();
 

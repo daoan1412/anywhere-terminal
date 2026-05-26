@@ -39,6 +39,8 @@ vi.mock("../pty/PtySession", () => {
     pause = vi.fn();
     resume = vi.fn();
     setCurrentCwdSink = vi.fn();
+    setShellIntegrationSink = vi.fn();
+    setShellIntegrationNonce = vi.fn();
     private _onDataCallback: ((data: string) => void) | undefined;
     private _onExitCallback: ((code: number) => void) | undefined;
 

@@ -29,6 +29,8 @@ vi.mock("../pty/PtySession", () => {
     pause = vi.fn();
     resume = vi.fn();
     setCurrentCwdSink = vi.fn();
+    setShellIntegrationSink = vi.fn();
+    setShellIntegrationNonce = vi.fn();
     private _od: ((d: string) => void) | undefined;
     private _oe: ((c: number) => void) | undefined;
     get onData() {
@@ -93,7 +95,9 @@ function makeStorageMock() {
     bufferGens.set(id, (bufferGens.get(id) ?? 0) + 1);
   });
   const commitBufferAsync = vi.fn(async (id: string, _data: string, capturedGen: number) => {
-    if ((bufferGens.get(id) ?? 0) !== capturedGen) return "stale-skipped" as const;
+    if ((bufferGens.get(id) ?? 0) !== capturedGen) {
+      return "stale-skipped" as const;
+    }
     return "renamed" as const;
   });
   const dropBuffer = vi.fn((id: string) => {
@@ -103,7 +107,9 @@ function makeStorageMock() {
     sidecarGen += 1;
   });
   const commitIndexAsync = vi.fn(async (_idx: unknown, capturedGen: number) => {
-    if (sidecarGen !== capturedGen) return "stale-skipped" as const;
+    if (sidecarGen !== capturedGen) {
+      return "stale-skipped" as const;
+    }
     return "renamed" as const;
   });
   const currentBufferGen = vi.fn((id: string) => bufferGens.get(id) ?? 0);
@@ -289,8 +295,12 @@ describe("SessionManager debounced persistence", () => {
     const syncCalls = storage.commitIndexSync.mock.calls;
     const lastAsync = idxCalls[idxCalls.length - 1]?.[0] as { entries: Record<string, unknown> } | undefined;
     const lastSync = syncCalls[syncCalls.length - 1]?.[0] as { entries: Record<string, unknown> } | undefined;
-    if (lastAsync) expect(lastAsync.entries[id]).toBeUndefined();
-    if (lastSync) expect(lastSync.entries[id]).toBeUndefined();
+    if (lastAsync) {
+      expect(lastAsync.entries[id]).toBeUndefined();
+    }
+    if (lastSync) {
+      expect(lastSync.entries[id]).toBeUndefined();
+    }
     // dropSession (from cleanupSession with state="destroying") calls
     // storage.dropBuffer — the in-flight async commit returns stale-skipped
     // and never touches the canonical path.

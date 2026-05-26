@@ -58,6 +58,8 @@ vi.mock("../pty/PtySession", () => {
         tracked.cwdSink = fn;
       }
     });
+    setShellIntegrationSink = vi.fn();
+    setShellIntegrationNonce = vi.fn();
     private _onDataCallback: ((data: string) => void) | undefined;
     private _onExitCallback: ((code: number) => void) | undefined;
 

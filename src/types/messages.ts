@@ -351,7 +351,8 @@ export type WebViewToExtensionMessage =
   | RequestSubscribeFsChangesMessage
   | RequestUnsubscribeFsChangesMessage
   | UpdateHoverPreviewSettingMessage
-  | PersistPanelIdMessage;
+  | PersistPanelIdMessage
+  | ScrollbackDumpMessage;
 
 /**
  * Webview → Extension. Sent by the editor webview after it has merged the
@@ -825,7 +826,8 @@ export type ExtensionToWebViewMessage =
   | FsRehydrateMessage
   | RevealInFileTreeMessage
   | SetPanelIdMessage
-  | RestoreFromSnapshotMessage;
+  | RestoreFromSnapshotMessage
+  | RequestScrollbackDumpMessage;
 
 /**
  * Extension → Webview. Tells the editor webview the panelId VS Code will use
@@ -865,4 +867,37 @@ export interface RestoreFromSnapshotMessage {
    * as `false` (root tab). See .reviews/round-4.md [W4].
    */
   isSplitPane?: boolean;
+}
+
+/**
+ * Extension → Webview. Asks the webview to serialise the xterm.js scrollback
+ * for the given tab and reply with `ScrollbackDumpMessage`. The webview reuses
+ * a single in-flight serialisation per `tabId`: concurrent requests for the
+ * same `tabId` resolve to the same payload.
+ *
+ * See: asimov/changes/export-terminal-session/specs/webview-scrollback-dump/spec.md,
+ * design.md D4.
+ */
+export interface RequestScrollbackDumpMessage {
+  type: "requestScrollbackDump";
+  tabId: string;
+  /** UUID correlation token; the matching `ScrollbackDumpMessage` echoes it. */
+  requestId: string;
+}
+
+/**
+ * Webview → Extension. The serialised scrollback payload requested by
+ * `RequestScrollbackDumpMessage`. `data` preserves ANSI escapes; stripping
+ * (if any) happens in the extension export pipeline. `truncated` is true iff
+ * the xterm `scrollback` setting capped the output. Unknown `tabId` replies
+ * with `data: ""`, `lineCount: 0`, `truncated: false`.
+ */
+export interface ScrollbackDumpMessage {
+  type: "scrollbackDump";
+  tabId: string;
+  /** Echoed from the matching `RequestScrollbackDumpMessage`. */
+  requestId: string;
+  data: string;
+  lineCount: number;
+  truncated: boolean;
 }

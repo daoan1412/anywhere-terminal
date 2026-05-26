@@ -2,6 +2,21 @@
 
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { createOscParser } from "./oscParser";
+import type { ShellIntegrationEvent, ShellIntegrationSink } from "./ShellIntegrationEvents";
+
+/** Collect cwd events into a string array. */
+function cwdsOf(out: string[]): ShellIntegrationSink {
+  return (event) => {
+    if (event.kind === "cwd") out.push(event.cwd);
+  };
+}
+
+/** Collect every event verbatim. */
+function eventsOf(out: ShellIntegrationEvent[]): ShellIntegrationSink {
+  return (event) => {
+    out.push(event);
+  };
+}
 
 // ─── Helpers ────────────────────────────────────────────────────────
 
@@ -19,7 +34,9 @@ function osc633Cwd(rawPath: string, term: string = ST): string {
 function collect(seq: string): string[] {
   const parser = createOscParser();
   const out: string[] = [];
-  parser.feed(seq, (cwd) => out.push(cwd));
+  parser.feed(seq, (event) => {
+    if (event.kind === "cwd") out.push(event.cwd);
+  });
   return out;
 }
 
@@ -109,8 +126,8 @@ describe("oscParser: chunk-boundary splits", () => {
     for (let offset = 1; offset < seq.length; offset++) {
       const parser = createOscParser();
       const out: string[] = [];
-      parser.feed(seq.slice(0, offset), (cwd) => out.push(cwd));
-      parser.feed(seq.slice(offset), (cwd) => out.push(cwd));
+      parser.feed(seq.slice(0, offset), cwdsOf(out));
+      parser.feed(seq.slice(offset), cwdsOf(out));
       expect(out, `split at offset ${offset}`).toEqual(["/abc/def/ghi"]);
     }
   });
@@ -121,8 +138,8 @@ describe("oscParser: chunk-boundary splits", () => {
     const splitIdx = seq.lastIndexOf("\x1b");
     const parser = createOscParser();
     const out: string[] = [];
-    parser.feed(seq.slice(0, splitIdx + 1), (cwd) => out.push(cwd));
-    parser.feed(seq.slice(splitIdx + 1), (cwd) => out.push(cwd));
+    parser.feed(seq.slice(0, splitIdx + 1), cwdsOf(out));
+    parser.feed(seq.slice(splitIdx + 1), cwdsOf(out));
     expect(out).toEqual(["/x"]);
   });
 
@@ -134,7 +151,7 @@ describe("oscParser: chunk-boundary splits", () => {
   it("emits cwds spread across many feeds", () => {
     const parser = createOscParser();
     const out: string[] = [];
-    const onCwd = (cwd: string) => out.push(cwd);
+    const onCwd = cwdsOf(out);
     parser.feed("first ", onCwd);
     parser.feed(osc7("file:///alpha"), onCwd);
     parser.feed(" between ", onCwd);
@@ -151,7 +168,7 @@ describe("oscParser: overflow", () => {
     const parser = createOscParser();
     const out: string[] = [];
     expect(() => {
-      parser.feed(`\x1b]7;file:///${"A".repeat(5000)}`, (cwd) => out.push(cwd));
+      parser.feed(`\x1b]7;file:///${"A".repeat(5000)}`, cwdsOf(out));
     }).not.toThrow();
     expect(out).toEqual([]);
   });
@@ -160,9 +177,9 @@ describe("oscParser: overflow", () => {
     const parser = createOscParser();
     const out: string[] = [];
     // Burn through the buffer with an unterminated OSC.
-    parser.feed(`\x1b]7;file:///${"X".repeat(5000)}`, (cwd) => out.push(cwd));
+    parser.feed(`\x1b]7;file:///${"X".repeat(5000)}`, cwdsOf(out));
     // Now send a clean OSC 7 — it should be picked up.
-    parser.feed(osc7("file:///recovered"), (cwd) => out.push(cwd));
+    parser.feed(osc7("file:///recovered"), cwdsOf(out));
     expect(out).toEqual(["/recovered"]);
   });
 });
@@ -244,7 +261,7 @@ describe("oscParser: property/fuzz", () => {
       expect(() => {
         for (const chunk of chunks) {
           recorded.push(chunk);
-          parser.feed(chunk, (cwd) => emitted.push(cwd));
+          parser.feed(chunk, cwdsOf(emitted));
         }
       }, `seq #${i}`).not.toThrow();
       // Every emitted cwd must be absolute (D3 invariant).
@@ -290,5 +307,203 @@ describe("oscParser: defensive", () => {
     collect(osc7("file:///foo%00bar"));
     collect(osc633Cwd("relative"));
     expect(warn).not.toHaveBeenCalled();
+  });
+});
+
+// ─── OSC 633 command-boundary markers (A/B/C/D/E) ───────────────────
+
+function osc633(payload: string, term: string = ST): string {
+  return `\x1b]633;${payload}${term}`;
+}
+
+describe("oscParser: OSC 633 markers", () => {
+  it("(A) prompt-start emits promptStart", () => {
+    const parser = createOscParser();
+    const events: ShellIntegrationEvent[] = [];
+    parser.feed(osc633("A"), eventsOf(events));
+    expect(events).toEqual([{ kind: "promptStart" }]);
+  });
+
+  it("(B) command-input end emits commandStart", () => {
+    const parser = createOscParser();
+    const events: ShellIntegrationEvent[] = [];
+    parser.feed(osc633("B"), eventsOf(events));
+    expect(events).toEqual([{ kind: "commandStart" }]);
+  });
+
+  it("(C) pre-execution emits commandStart (same kind as B)", () => {
+    const parser = createOscParser();
+    const events: ShellIntegrationEvent[] = [];
+    parser.feed(osc633("C"), eventsOf(events));
+    expect(events).toEqual([{ kind: "commandStart" }]);
+  });
+
+  it("(D) bare emits commandEnd with exitCode=null", () => {
+    const parser = createOscParser();
+    const events: ShellIntegrationEvent[] = [];
+    parser.feed(osc633("D"), eventsOf(events));
+    expect(events).toEqual([{ kind: "commandEnd", exitCode: null }]);
+  });
+
+  it("(D;0) emits commandEnd with exitCode=0", () => {
+    const parser = createOscParser();
+    const events: ShellIntegrationEvent[] = [];
+    parser.feed(osc633("D;0"), eventsOf(events));
+    expect(events).toEqual([{ kind: "commandEnd", exitCode: 0 }]);
+  });
+
+  it("(D;127) emits commandEnd with exitCode=127", () => {
+    const parser = createOscParser();
+    const events: ShellIntegrationEvent[] = [];
+    parser.feed(osc633("D;127"), eventsOf(events));
+    expect(events).toEqual([{ kind: "commandEnd", exitCode: 127 }]);
+  });
+
+  it("(D;-1) accepts negative exit codes (signals)", () => {
+    const parser = createOscParser();
+    const events: ShellIntegrationEvent[] = [];
+    parser.feed(osc633("D;-1"), eventsOf(events));
+    expect(events).toEqual([{ kind: "commandEnd", exitCode: -1 }]);
+  });
+
+  it("(D;xyz) non-numeric exit-code arg → exitCode=null", () => {
+    const parser = createOscParser();
+    const events: ShellIntegrationEvent[] = [];
+    parser.feed(osc633("D;xyz"), eventsOf(events));
+    expect(events).toEqual([{ kind: "commandEnd", exitCode: null }]);
+  });
+
+  it("(E;cmd) with no nonce param → commandLine, nonceValid=false", () => {
+    const parser = createOscParser();
+    parser.setNonce("abc123");
+    const events: ShellIntegrationEvent[] = [];
+    parser.feed(osc633("E;ls -la"), eventsOf(events));
+    expect(events).toEqual([{ kind: "commandLine", commandLine: "ls -la", nonceValid: false }]);
+  });
+
+  it("(E;cmd;nonce) with matching nonce → nonceValid=true", () => {
+    const parser = createOscParser();
+    parser.setNonce("abc123");
+    const events: ShellIntegrationEvent[] = [];
+    parser.feed(osc633("E;ls -la;abc123"), eventsOf(events));
+    expect(events).toEqual([{ kind: "commandLine", commandLine: "ls -la", nonceValid: true }]);
+  });
+
+  it("(E;cmd;nonce) with mismatched nonce → nonceValid=false", () => {
+    const parser = createOscParser();
+    parser.setNonce("abc123");
+    const events: ShellIntegrationEvent[] = [];
+    parser.feed(osc633("E;ls -la;DIFFERENT"), eventsOf(events));
+    expect(events).toEqual([{ kind: "commandLine", commandLine: "ls -la", nonceValid: false }]);
+  });
+
+  it("(E) parser without setNonce never validates", () => {
+    const parser = createOscParser();
+    const events: ShellIntegrationEvent[] = [];
+    parser.feed(osc633("E;ls -la;abc123"), eventsOf(events));
+    expect(events).toEqual([{ kind: "commandLine", commandLine: "ls -la", nonceValid: false }]);
+  });
+
+  it("(E) unescapes \\x3b → ; in commandLine", () => {
+    // VS Code's __vsc_escape_value encodes `;` in command lines as `\x3b`
+    // so a raw `;` split on the payload is safe.
+    const parser = createOscParser();
+    parser.setNonce("n");
+    const events: ShellIntegrationEvent[] = [];
+    parser.feed(osc633("E;echo a\\x3b echo b;n"), eventsOf(events));
+    expect(events).toEqual([{ kind: "commandLine", commandLine: "echo a; echo b", nonceValid: true }]);
+  });
+
+  it("(E) unescapes doubled backslash", () => {
+    const parser = createOscParser();
+    parser.setNonce("n");
+    const events: ShellIntegrationEvent[] = [];
+    parser.feed(osc633("E;path C:\\\\dev;n"), eventsOf(events));
+    expect(events).toEqual([{ kind: "commandLine", commandLine: "path C:\\dev", nonceValid: true }]);
+  });
+
+  it("P;Cwd= still emits a cwd event (regression — existing behaviour)", () => {
+    const parser = createOscParser();
+    const events: ShellIntegrationEvent[] = [];
+    parser.feed(osc633("P;Cwd=/foo/bar"), eventsOf(events));
+    expect(events).toEqual([{ kind: "cwd", cwd: "/foo/bar" }]);
+  });
+
+  it("P;Prompt= and P;IsWindows= are ignored (only Cwd consumed)", () => {
+    const parser = createOscParser();
+    const events: ShellIntegrationEvent[] = [];
+    parser.feed(osc633("P;Prompt=$ "), eventsOf(events));
+    parser.feed(osc633("P;IsWindows=True"), eventsOf(events));
+    parser.feed(osc633("P;ContinuationPrompt=> "), eventsOf(events));
+    expect(events).toEqual([]);
+  });
+
+  it("unknown sub-command (e.g. 'Z') is silently ignored", () => {
+    const parser = createOscParser();
+    const events: ShellIntegrationEvent[] = [];
+    parser.feed(osc633("Z"), eventsOf(events));
+    parser.feed(osc633("Z;extra"), eventsOf(events));
+    expect(events).toEqual([]);
+  });
+
+  it("malformed D (no separator, e.g. 'Dabc') is ignored", () => {
+    const parser = createOscParser();
+    const events: ShellIntegrationEvent[] = [];
+    parser.feed(osc633("Dabc"), eventsOf(events));
+    expect(events).toEqual([]);
+  });
+
+  it("malformed E (no separator, e.g. 'Eabc') is ignored", () => {
+    const parser = createOscParser();
+    const events: ShellIntegrationEvent[] = [];
+    parser.feed(osc633("Eabc"), eventsOf(events));
+    expect(events).toEqual([]);
+  });
+
+  it("full command lifecycle A → B → E → C → D;0 in one feed", () => {
+    const parser = createOscParser();
+    parser.setNonce("nonce-xyz");
+    const events: ShellIntegrationEvent[] = [];
+    const stream =
+      osc633("A") +
+      osc633("B") +
+      osc633("E;pnpm test;nonce-xyz") +
+      "output from pnpm test...\n" +
+      osc633("C") +
+      osc633("D;0");
+    parser.feed(stream, eventsOf(events));
+    expect(events).toEqual([
+      { kind: "promptStart" },
+      { kind: "commandStart" }, // B
+      { kind: "commandLine", commandLine: "pnpm test", nonceValid: true },
+      { kind: "commandStart" }, // C — consumer must dedupe
+      { kind: "commandEnd", exitCode: 0 },
+    ]);
+  });
+
+  it("nonce can be changed mid-session via setNonce", () => {
+    const parser = createOscParser();
+    parser.setNonce("old");
+    const events: ShellIntegrationEvent[] = [];
+    parser.feed(osc633("E;cmd1;old"), eventsOf(events));
+    parser.setNonce("new");
+    parser.feed(osc633("E;cmd2;new"), eventsOf(events));
+    parser.feed(osc633("E;cmd3;old"), eventsOf(events));
+    expect(events).toEqual([
+      { kind: "commandLine", commandLine: "cmd1", nonceValid: true },
+      { kind: "commandLine", commandLine: "cmd2", nonceValid: true },
+      { kind: "commandLine", commandLine: "cmd3", nonceValid: false },
+    ]);
+  });
+
+  it("OSC 633 marker chunk-split across two feeds still emits exactly one event", () => {
+    const seq = osc633("D;0");
+    for (let offset = 1; offset < seq.length; offset++) {
+      const parser = createOscParser();
+      const events: ShellIntegrationEvent[] = [];
+      parser.feed(seq.slice(0, offset), eventsOf(events));
+      parser.feed(seq.slice(offset), eventsOf(events));
+      expect(events, `split at offset ${offset}`).toEqual([{ kind: "commandEnd", exitCode: 0 }]);
+    }
   });
 });
