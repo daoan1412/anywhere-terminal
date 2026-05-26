@@ -363,7 +363,7 @@ These tasks implement D14-D18 from `design.md`. They REPLACE the patch-stack lif
 
 Order: R-1 → R-2 / R-3 (parallelizable, different files) → R-4 → R-5 → R-6 → R-7 → R-8.
 
-- [ ] R-1 Introduce per-session lifecycle state enum + transitions in SessionManager
+- [x] R-1 Introduce per-session lifecycle state enum + transitions in SessionManager
   - **Deps**: (none — first task)
   - **Refs**: design.md D14, .reviews/round-5.md [B1] [W3]
   - **Scope**:

@@ -29,10 +29,27 @@ export interface SerializeAddonLike {
 
 export type SerializeAddonFactory = () => SerializeAddonLike;
 
+/**
+ * Per-session lifecycle state — drives every snapshot-touching dispatch in
+ * SessionManager (dispose, cleanupSession, pty.onExit) so the bug-shape of
+ * round-4/round-5 (cross-method temporal coupling via implicit set-membership)
+ * cannot recur. See design.md D14.
+ *
+ * Transitions:
+ *   live              → destroying        (destroySession / destroyAllForView)
+ *   live              → exited-preserved  (pty.onExit, not killed by user)
+ *   exited-preserved  → destroying        (user destroys an already-exited restored tab)
+ *   destroying        → disposed          (cleanupSession completes — tombstone before map deletion)
+ *   exited-preserved  → disposed          (cleanupSession after natural exit — tombstone)
+ */
+export type SessionState = "live" | "exited-preserved" | "destroying" | "disposed";
+
 /** A single terminal session with its PTY, buffer, and metadata. */
 export interface TerminalSession {
   /** Unique session identifier (UUID) */
   id: string;
+  /** Current lifecycle state — see SessionState union above. */
+  state: SessionState;
   /** Which view this session belongs to (e.g., 'anywhereTerminal.sidebar') */
   viewId: string;
   /** The PTY process wrapper */

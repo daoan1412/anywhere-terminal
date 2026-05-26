@@ -28,7 +28,13 @@ import type {
 } from "./SessionSnapshot";
 import type { SessionStorage } from "./SessionStorage";
 import { defaultHeadlessFactory, defaultSerializeAddonFactory, SnapshotPersistence } from "./SnapshotPersistence";
-import type { HeadlessFactory, MemoryMetrics, SerializeAddonFactory, TerminalSession } from "./TerminalSession";
+import type {
+  HeadlessFactory,
+  MemoryMetrics,
+  SerializeAddonFactory,
+  SessionState,
+  TerminalSession,
+} from "./TerminalSession";
 
 // ─── Re-exports (preserve external API for tests + providers) ──────
 
@@ -37,6 +43,7 @@ export type {
   HeadlessTerminalLike,
   SerializeAddonFactory,
   SerializeAddonLike,
+  SessionState,
   TerminalSession,
   MemoryMetrics,
 } from "./TerminalSession";
@@ -94,17 +101,6 @@ export class SessionManager {
 
   /** Set of session IDs currently being killed (prevent re-entrant cleanup) */
   private terminalBeingKilled = new Set<string>();
-
-  /**
-   * Session IDs the user has explicitly destroyed (or will destroy — added
-   * synchronously by `destroySession` / `destroyAllForView` BEFORE the
-   * operationQueue's microtask runs). Lets `dispose()` and `cleanupSession()`
-   * tell apart user-destroy intent from natural shell exits — the former
-   * MUST drop the snapshot (detachSession), the latter MUST preserve it for
-   * D13 read-only restore (releaseMirror). Cleared per-id when
-   * `cleanupSession()` completes. See .reviews/round-4.md [B1] + [B3].
-   */
-  private sessionsPendingDestroy = new Set<string>();
 
   /** Serialized operation queue for destructive operations */
   private operationQueue: Promise<void> = Promise.resolve();
@@ -364,6 +360,9 @@ export class SessionManager {
 
     const session: TerminalSession = {
       id,
+      // Initial state: live for fresh / restored-running, exited-preserved for
+      // restored-exited (D13 read-only). See design.md D14.
+      state: restoringExited ? "exited-preserved" : "live",
       viewId,
       pty,
       name,
@@ -442,10 +441,15 @@ export class SessionManager {
       this.snapshots.recordExit(session, typeof code === "number" ? code : null);
       this.onShellExited?.(id);
 
-      // If this is an intentional kill, skip cleanup (destroySession handles it)
+      // If this is an intentional kill, skip cleanup (destroySession handles it
+      // via performDestroy → cleanupSession, and the state is already
+      // "destroying" from the synchronous transitionState in destroySession).
       if (this.terminalBeingKilled.has(id)) return;
 
-      // Unexpected crash — run cleanup and notify webview
+      // Natural exit (user typed `exit`, ^D, crash). Transition live →
+      // exited-preserved BEFORE cleanupSession so its dispatch picks
+      // releaseMirror (D13 preserve). See design.md D14.
+      this.transitionState(id, "live", "exited-preserved");
       this.cleanupSession(id);
       this.safePostMessage(webview, { type: "exit", tabId: id, code });
     };
@@ -711,15 +715,40 @@ export class SessionManager {
 
   // ─── Public API: Destructive Operations (Queued) ────────────────
 
+  /**
+   * Transition a session's lifecycle state. Asserts the current state is one
+   * of the expected `from` values; logs an error + returns false on mismatch
+   * (caller continues with stale state — we never throw during shutdown).
+   * See design.md D14. Replaces the implicit `sessionsPendingDestroy` set
+   * from .reviews/round-4.md [B1].
+   */
+  private transitionState(
+    sessionId: string,
+    from: SessionState | readonly SessionState[],
+    to: SessionState,
+  ): boolean {
+    const session = this.sessions.get(sessionId);
+    if (!session) return false;
+    const allowed = Array.isArray(from) ? from : [from as SessionState];
+    if (!allowed.includes(session.state)) {
+      console.error(
+        `[AnyWhere Terminal] Invalid state transition for session ${sessionId}: ${session.state} → ${to} (expected from: ${allowed.join("|")})`,
+      );
+      return false;
+    }
+    session.state = to;
+    return true;
+  }
+
   /** Destroy a session (queued, serialized via operation queue). */
   destroySession(sessionId: string): void {
-    // Record destructive intent SYNCHRONOUSLY before enqueueing. dispose()
-    // and cleanupSession() check this set to decide between detachSession
-    // (drop snapshot — user wanted it gone) and releaseMirror (preserve
-    // for D13 read-only restore). Without this set, a queued destroy still
-    // mid-flight at deactivate-time would be silently preserved by
-    // dispose's default releaseMirror call. See .reviews/round-4.md [B1].
-    this.sessionsPendingDestroy.add(sessionId);
+    // Record destructive intent SYNCHRONOUSLY before enqueueing — the queue
+    // microtask hasn't run yet. dispose() and cleanupSession() branch on
+    // session.state to choose detachSession (drop snapshot — user wanted it
+    // gone) vs releaseMirror (D13 preserve). See design.md D14.
+    // Accept both "live" (running session) and "exited-preserved" (user closes
+    // an already-exited restored tab).
+    this.transitionState(sessionId, ["live", "exited-preserved"], "destroying");
     this.operationQueue = this.operationQueue
       .then(async () => {
         await this.performDestroy(sessionId);
@@ -769,12 +798,14 @@ export class SessionManager {
   /** Destroy all sessions for a specific view (queued, serialized). */
   destroyAllForView(viewId: string): void {
     // Record destructive intent SYNCHRONOUSLY for every session in the view
-    // BEFORE enqueueing, so dispose() / cleanupSession() can distinguish
-    // user-destroy intent from natural exits during shutdown. See
-    // .reviews/round-4.md [B1].
+    // BEFORE enqueueing — dispose() / cleanupSession() branch on session.state
+    // to distinguish user-destroy intent from natural exits during shutdown.
+    // See design.md D14.
     const viewSessionIds = this.viewSessions.get(viewId);
     if (viewSessionIds) {
-      for (const sid of viewSessionIds) this.sessionsPendingDestroy.add(sid);
+      for (const sid of viewSessionIds) {
+        this.transitionState(sid, ["live", "exited-preserved"], "destroying");
+      }
     }
     this.operationQueue = this.operationQueue
       .then(async () => {
@@ -845,12 +876,12 @@ export class SessionManager {
           /* best-effort */
         }
       }
-      // Branch on user-destroy intent. The default — preserve via
-      // releaseMirror so the next activate restores the user's terminals —
-      // is wrong for sessions the user has already asked to destroy: a
-      // queued/in-flight destroySession at deactivate-time would otherwise
-      // be silently preserved as a snapshot. See .reviews/round-4.md [B1].
-      if (this.sessionsPendingDestroy.has(id)) {
+      // Branch on lifecycle state — design.md D14. "destroying" means the
+      // user explicitly destroyed (or queued a destroy still mid-flight at
+      // deactivate-time); we MUST drop the snapshot. "exited-preserved" and
+      // "live" both preserve the mirror so the next activate restores the
+      // user's terminals (D13 read-only for exited, full-replay for live).
+      if (session.state === "destroying") {
         this.snapshots.detachSession(id);
       } else {
         this.snapshots.releaseMirror(id);
@@ -861,7 +892,6 @@ export class SessionManager {
     this.viewSessions.clear();
     this.usedNumbers.clear();
     this.terminalBeingKilled.clear();
-    this.sessionsPendingDestroy.clear();
   }
 
   // ─── Private: Destroy Implementation ────────────────────────────
@@ -914,21 +944,27 @@ export class SessionManager {
       }
     }
 
-    // Branch on destroy intent vs natural exit. The default snapshot
-    // teardown (detachSession) unlinks the buffer + drops the index entry,
-    // which is correct for user destroy but VIOLATES design.md D13 for a
-    // natural shell exit (`exit`, ^D, crash) — exited entries MUST be kept
-    // for read-only restore. The sync exit-flush (`flushSessionImmediateSync`,
-    // invoked from `onShellExited`) has already persisted the exit snapshot
-    // by the time we reach here; releaseMirror disposes only the runtime
-    // mirror, leaving the persisted snapshot intact. See .reviews/round-4.md
-    // [B1] + [B3].
-    if (this.sessionsPendingDestroy.has(sessionId)) {
+    // Branch on lifecycle state — design.md D14. "destroying" means the user
+    // explicitly destroyed; we drop the snapshot. "exited-preserved" means a
+    // natural shell exit (`exit`, ^D, crash); the sync exit-flush has already
+    // persisted the snapshot via onShellExited, so releaseMirror only disposes
+    // the runtime mirror — the persisted snapshot survives for D13 read-only
+    // restore. "live" here would be a contract violation (cleanupSession is
+    // only called from performDestroy or post-exit transition); fall through
+    // to releaseMirror as a safe default + log.
+    if (session.state === "destroying") {
       this.snapshots.detachSession(sessionId);
+    } else if (session.state === "exited-preserved") {
+      this.snapshots.releaseMirror(sessionId);
     } else {
+      console.error(
+        `[AnyWhere Terminal] cleanupSession called for ${sessionId} in unexpected state '${session.state}' — defaulting to releaseMirror`,
+      );
       this.snapshots.releaseMirror(sessionId);
     }
-    this.sessionsPendingDestroy.delete(sessionId);
+    // Tombstone the state before deleting from the map. Useful for debugging
+    // and for any in-flight callback that still holds a reference.
+    session.state = "disposed";
 
     // Remove from maps
     this.sessions.delete(sessionId);

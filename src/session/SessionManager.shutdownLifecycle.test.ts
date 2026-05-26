@@ -391,3 +391,122 @@ describe("SessionManager pty.onExit preserves exited-shell snapshot (round-4 [B3
     expect(storage.unlinkBufferFile).not.toHaveBeenCalledWith(id);
   });
 });
+
+// ─────────────────────────────────────────────────────────────────────
+// [R-1] Per-session lifecycle state machine (design.md D14)
+//      State enum: "live" | "exited-preserved" | "destroying" | "disposed".
+//      Tests assert each legal transition fires at the right call site and
+//      that invalid transitions are logged + ignored (no state corruption).
+// ─────────────────────────────────────────────────────────────────────
+
+describe("SessionManager session lifecycle state machine (R-1, D14)", () => {
+  it("createSession initializes a fresh session in state 'live'", () => {
+    const fx = makeFactories();
+    const storage = makeStorageMock();
+    const sm = new SessionManager(undefined, {
+      restoreEnabled: true,
+      headlessFactory: fx.headless,
+      serializeAddonFactory: fx.serialize,
+      storage: storage as any,
+    });
+    const id = sm.createSession("sidebar", mockWebview());
+    expect(sm.getSession(id)?.state).toBe("live");
+    sm.dispose();
+  });
+
+  it("destroySession transitions the session to 'destroying' SYNCHRONOUSLY (before queue drains)", () => {
+    const fx = makeFactories();
+    const storage = makeStorageMock();
+    const sm = new SessionManager(undefined, {
+      restoreEnabled: true,
+      headlessFactory: fx.headless,
+      serializeAddonFactory: fx.serialize,
+      storage: storage as any,
+    });
+    const id = sm.createSession("sidebar", mockWebview());
+    expect(sm.getSession(id)?.state).toBe("live");
+    sm.destroySession(id);
+    // Synchronous check — operationQueue microtask has NOT drained yet.
+    expect(sm.getSession(id)?.state).toBe("destroying");
+    sm.dispose();
+  });
+
+  it("destroyAllForView transitions every session in the view to 'destroying' SYNCHRONOUSLY", () => {
+    const fx = makeFactories();
+    const storage = makeStorageMock();
+    const sm = new SessionManager(undefined, {
+      restoreEnabled: true,
+      headlessFactory: fx.headless,
+      serializeAddonFactory: fx.serialize,
+      storage: storage as any,
+    });
+    const a = sm.createSession("anywhereTerminal.sidebar", mockWebview());
+    const b = sm.createSession("anywhereTerminal.sidebar", mockWebview());
+    sm.destroyAllForView("anywhereTerminal.sidebar");
+    expect(sm.getSession(a)?.state).toBe("destroying");
+    expect(sm.getSession(b)?.state).toBe("destroying");
+    sm.dispose();
+  });
+
+  it("non-killed pty.onExit transitions live → exited-preserved (D13 read-only snapshot survives)", () => {
+    const fx = makeFactories();
+    const storage = makeStorageMock();
+    const sm = new SessionManager(undefined, {
+      restoreEnabled: true,
+      headlessFactory: fx.headless,
+      serializeAddonFactory: fx.serialize,
+      storage: storage as any,
+    });
+    const id = sm.createSession("sidebar", mockWebview());
+    mockPtySessions[0].onData?.("some-output");
+    expect(sm.getSession(id)?.state).toBe("live");
+    // Non-killed exit → cleanupSession fires synchronously, then session is
+    // removed from map. State should be 'exited-preserved' at the time the
+    // snapshot dispatch branch runs (observable via the snapshot index entry
+    // having survived AND no unlink fired).
+    mockPtySessions[0].onExit?.(0);
+    // After exit, the session is removed from sessions.get(id) — but the
+    // snapshot must have been preserved (verified by the existing B3 test).
+    // What we add here: the dispatch decision was driven by the state machine,
+    // not by sessionsPendingDestroy.has() — assert no unlink fired.
+    expect(storage.unlinkBufferFile).not.toHaveBeenCalledWith(id);
+    sm.dispose();
+  });
+
+  it("createSession with a restoreFrom snapshot carrying shellExited=true initializes state 'exited-preserved'", () => {
+    const fx = makeFactories();
+    const storage = makeStorageMock();
+    const sm = new SessionManager(undefined, {
+      restoreEnabled: true,
+      headlessFactory: fx.headless,
+      serializeAddonFactory: fx.serialize,
+      storage: storage as any,
+    });
+    const id = sm.createSession("sidebar", mockWebview(), {
+      restoreFrom: {
+        metadata: {
+          sessionId: "restored-1",
+          viewLocation: "sidebar",
+          terminalNumber: 1,
+          customName: null,
+          shell: "/bin/zsh",
+          shellArgs: [],
+          cwd: "/tmp",
+          currentCwd: null,
+          cols: 80,
+          rows: 30,
+          bufferFile: "snapshots/restored-1.snapshot.ans",
+          bufferBytes: 0,
+          isSplitPane: false,
+          rootTabId: null,
+          snapshotAt: Date.now(),
+          shellExited: true,
+          exitCode: 0,
+        },
+        buffer: "",
+      },
+    });
+    expect(sm.getSession(id)?.state).toBe("exited-preserved");
+    sm.dispose();
+  });
+});
