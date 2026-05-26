@@ -65,4 +65,13 @@ export interface WebviewState {
    */
   fileTree?: FileTreeState;
   fileTreeByLocation?: Partial<Record<TerminalLocationKey, FileTreeState>>;
+  /**
+   * Stable identifier for the editor WebviewPanel that owns this state — set
+   * by the extension via `setPanelId`, persisted by the webview, and read
+   * back by VS Code's `WebviewPanelSerializer` on window reload. Only present
+   * for editor panels.
+   *
+   * See: asimov/changes/restore-terminal-sessions/design.md D2.
+   */
+  panelId?: string;
 }

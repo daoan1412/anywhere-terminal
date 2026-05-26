@@ -327,7 +327,7 @@ export class TerminalViewProvider implements vscode.WebviewViewProvider {
     try {
       switch (message.type) {
         case "ready":
-          this.onReady(webviewView);
+          void this.onReady(webviewView);
           break;
 
         case "input":
@@ -560,7 +560,7 @@ export class TerminalViewProvider implements vscode.WebviewViewProvider {
    * See: specs/ipc-wiring/spec.md#Ready-Handshake-Wiring
    * See: specs/view-lifecycle-resilience/spec.md#Scrollback-Cache-Replay-on-Webview-Re-creation
    */
-  private onReady(webviewView: vscode.WebviewView): void {
+  private async onReady(webviewView: vscode.WebviewView): Promise<void> {
     // Mark webview as ready — gates outbound messages
     this._ready = true;
 
@@ -594,12 +594,27 @@ export class TerminalViewProvider implements vscode.WebviewViewProvider {
         // Send 'init' message with all existing sessions (roots + splits, see
         // restore-terminal-sessions design.md D12) — splits MUST be present so
         // the webview can recreate every xterm referenced by `tabLayouts`.
-        void this.safeSendWithRetry(webviewView.webview, {
+        //
+        // Await delivery before posting `restore` payloads. Same race as
+        // round-2 [W4] on Phase B: if `safeSendWithRetry`'s first attempt
+        // fails, it schedules a 50ms retry — a synchronous post-loop would
+        // enqueue `restore` first, the webview would look up `store.terminals`
+        // for a tabId that doesn't exist yet (no init processed), and the
+        // restore payload would be silently dropped. User-visible: tab strip
+        // populated, terminal content blank. See `restore` handler in main.ts.
+        const initDelivered = await this.safeSendWithRetry(webviewView.webview, {
           type: "init",
           tabs: existingSessions,
           config: readTerminalConfig(),
           ...this.fileTreeHost.initPayload(),
         });
+        if (!initDelivered) {
+          console.error(
+            "[AnyWhere Terminal] init delivery failed during reload — skipping restore posts.",
+          );
+          this.sessionManager.resumeOutputForView(viewId);
+          return;
+        }
 
         // Send 'restore' messages with scrollback data for each session
         for (const session of existingSessions) {
@@ -629,12 +644,31 @@ export class TerminalViewProvider implements vscode.WebviewViewProvider {
           });
         }
         const restoredSessions = this.sessionManager.getAllSessionsForView(viewId);
-        void this.safeSendWithRetry(webviewView.webview, {
+        // Await init delivery before posting restoreFromSnapshot. If
+        // safeSendWithRetry's first attempt fails and schedules a 50ms retry,
+        // a synchronous post-loop would enqueue restoreFromSnapshot first —
+        // the webview would then see the snapshot before the tab even exists
+        // and fall into the deferOpen path, reintroducing the W4 mis-wrap.
+        // See round-2 [W4].
+        const initDelivered = await this.safeSendWithRetry(webviewView.webview, {
           type: "init",
           tabs: restoredSessions,
           config: readTerminalConfig(),
           ...this.fileTreeHost.initPayload(),
         });
+        if (!initDelivered) {
+          // All retries failed — the webview channel is unhealthy. Posting
+          // restoreFromSnapshot now would arrive at a webview that never
+          // processed init, falling into the same deferOpen mis-wrap W4 was
+          // closing. Log and skip the restore loop; the persisted snapshots
+          // remain on disk and will be retried on the next activate. Output
+          // resume still fires so the fresh PTY isn't permanently paused.
+          console.error(
+            "[AnyWhere Terminal] init delivery failed during restore — skipping restoreFromSnapshot posts.",
+          );
+          this.sessionManager.resumeOutputForView(viewId);
+          return;
+        }
         for (const snap of snaps) {
           this.safePostMessage(webviewView.webview, {
             type: "restoreFromSnapshot",
@@ -645,6 +679,7 @@ export class TerminalViewProvider implements vscode.WebviewViewProvider {
             snapshotAt: snap.metadata.snapshotAt,
             shellExited: snap.metadata.shellExited,
             exitCode: snap.metadata.exitCode,
+            isSplitPane: snap.metadata.isSplitPane,
           });
         }
         // Resume output flushing for sessions paused by createSession({restoreFrom}).

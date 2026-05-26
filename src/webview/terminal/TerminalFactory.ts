@@ -84,6 +84,30 @@ export class TerminalFactory {
   }
 
   /**
+   * Attach a deferred-open terminal to its container and load the WebGL addon.
+   * Used by the session-restore router after writing the persisted buffer +
+   * divider so the first render frame already has the restored content.
+   * See: asimov/changes/restore-terminal-sessions/design.md D8.
+   */
+  attachDeferredTerminal(instance: { terminal: Terminal; container: HTMLDivElement }): void {
+    instance.terminal.open(instance.container);
+    if (!this.webglFailed) {
+      try {
+        const webglAddon = new WebglAddon();
+        webglAddon.onContextLoss(() => {
+          webglAddon.dispose();
+          this.webglFailed = true;
+          console.warn("[AnyWhere Terminal] WebGL context lost, falling back to canvas renderer");
+        });
+        instance.terminal.loadAddon(webglAddon);
+      } catch {
+        this.webglFailed = true;
+        console.warn("[AnyWhere Terminal] WebGL renderer failed, using canvas fallback for all future terminals");
+      }
+    }
+  }
+
+  /**
    * Fit a single terminal to its container.
    * Delegates to XtermFitService for dimension calculation,
    * then performs the resize if needed.
@@ -159,6 +183,7 @@ export class TerminalFactory {
     config: TerminalConfig,
     isActive: boolean,
     customName: string | null = null,
+    options?: { deferOpen?: boolean; isSplitPane?: boolean },
   ): TerminalInstance {
     const containerEl = document.getElementById("terminal-container");
     if (!containerEl) {
@@ -325,22 +350,29 @@ export class TerminalFactory {
       }),
     );
 
-    // Open terminal in container
-    terminal.open(container);
+    // Open terminal in container. When `options.deferOpen === true`, the
+    // caller is responsible for invoking `instance.terminal.open(container)`
+    // later (used by the session-restore router which writes the persisted
+    // buffer + divider into the terminal BEFORE attaching to the DOM — see
+    // asimov/changes/restore-terminal-sessions/design.md D8).
+    if (!options?.deferOpen) {
+      terminal.open(container);
 
-    // Try to enable WebGL renderer for better rendering on Retina displays
-    if (!this.webglFailed) {
-      try {
-        const webglAddon = new WebglAddon();
-        webglAddon.onContextLoss(() => {
-          webglAddon.dispose();
+      // Try to enable WebGL renderer for better rendering on Retina displays.
+      // Only meaningful AFTER open() — opening attaches the canvas.
+      if (!this.webglFailed) {
+        try {
+          const webglAddon = new WebglAddon();
+          webglAddon.onContextLoss(() => {
+            webglAddon.dispose();
+            this.webglFailed = true;
+            console.warn("[AnyWhere Terminal] WebGL context lost, falling back to canvas renderer");
+          });
+          terminal.loadAddon(webglAddon);
+        } catch {
           this.webglFailed = true;
-          console.warn("[AnyWhere Terminal] WebGL context lost, falling back to canvas renderer");
-        });
-        terminal.loadAddon(webglAddon);
-      } catch {
-        this.webglFailed = true;
-        console.warn("[AnyWhere Terminal] WebGL renderer failed, using canvas fallback for all future terminals");
+          console.warn("[AnyWhere Terminal] WebGL renderer failed, using canvas fallback for all future terminals");
+        }
       }
     }
 
@@ -437,28 +469,40 @@ export class TerminalFactory {
       return false;
     });
 
-    // Initialize split layout for this tab (single leaf)
-    if (!this.store.tabLayouts.has(id)) {
+    // Initialize split layout for this tab (single leaf). Skipped for split
+    // panes — the layout is owned by the root tab, not the pane itself. See
+    // restore-terminal-sessions design.md D12.
+    if (!options?.isSplitPane && !this.store.tabLayouts.has(id)) {
       this.store.tabLayouts.set(id, createLeaf(id));
       this.store.tabActivePaneIds.set(id, id);
       this.store.persist();
     }
 
-    if (isActive) {
+    // Split panes are never the `activeTabId` (that's a root-tab concept).
+    if (isActive && !options?.isSplitPane) {
       this.store.activeTabId = id;
     }
 
-    // Fit after opening (deferred to allow layout to settle)
-    setTimeout(() => {
-      // Guard: terminal may have been disposed during async delay
-      if (!this.store.terminals.has(id)) {
-        return;
-      }
-      this.fitTerminal(instance);
-      if (isActive) {
-        terminal.focus();
-      }
-    }, 0);
+    // Fit after opening (deferred to allow layout to settle).
+    //
+    // Split-pane children are NOT fit here — their container is reparented by
+    // `renderTabSplitTree` AFTER this constructor returns, so a setTimeout(0)
+    // measurement would see the still-detached container (0×0) and send a
+    // stale resize IPC to the extension. `debouncedFitAllLeaves` (scheduled
+    // by handleInit via requestAnimationFrame) owns split-pane sizing instead.
+    // Root tabs still need the immediate fit so single-pane terminals get
+    // measured before first PTY output. See round-2 [S2].
+    if (!options?.isSplitPane) {
+      setTimeout(() => {
+        if (!this.store.terminals.has(id)) {
+          return;
+        }
+        this.fitTerminal(instance);
+        if (isActive) {
+          terminal.focus();
+        }
+      }, 0);
+    }
 
     return instance;
   }

@@ -45,8 +45,67 @@ export class SessionStorage {
     this.snapshotsDir = path.join(storageUri.fsPath, "snapshots");
   }
 
+  /**
+   * Load the index. Prefers the sync-written sidecar file at
+   * `<storageUri>/snapshots/index.json` — that file is written by
+   * `flushSnapshotsSync` during deactivate using a synchronous fs API, so it
+   * survives the Memento `update()` cancellation VS Code raises mid-shutdown.
+   * Falls back to the workspaceState entry (older builds wrote only there).
+   */
   loadIndex(): SessionSnapshotsIndex | undefined {
-    return this.workspaceState.get<SessionSnapshotsIndex>(SESSION_SNAPSHOTS_INDEX_KEY);
+    const detailed = this.loadIndexDetailed();
+    return detailed.kind === "valid" ? detailed.index : undefined;
+  }
+
+  /**
+   * Detailed load — distinguishes "no index present" from "present but the
+   * version is unsupported". Hydrate MUST consult this variant so it can
+   * gate orphan recovery on the `missing` case only; an `unsupported` index
+   * is authoritative-and-rejected — the entire restore set is discarded per
+   * round-1 W1 and .reviews/round-4.md [W3].
+   */
+  loadIndexDetailed():
+    | { kind: "valid"; index: SessionSnapshotsIndex }
+    | { kind: "missing" }
+    | { kind: "unsupported" } {
+    const sidecar = this.indexSidecarPath();
+    if (this.fs.existsSync(sidecar)) {
+      try {
+        const raw = this.fs.readFileSync(sidecar, "utf8");
+        const parsed = JSON.parse(raw) as Partial<SessionSnapshotsIndex>;
+        if (parsed && typeof parsed === "object") {
+          if (parsed.version === 1 && parsed.entries && typeof parsed.entries === "object") {
+            return { kind: "valid", index: parsed as SessionSnapshotsIndex };
+          }
+          // Sidecar present but version we don't understand — authoritative
+          // rejection. Do NOT fall through to Memento (would be stale relative
+          // to whatever wrote the sidecar) and do NOT run orphan recovery
+          // (corrupted state is discarded per spec).
+          return { kind: "unsupported" };
+        }
+      } catch {
+        // Torn-write / unreadable sidecar — fall through to Memento as legacy
+        // recovery. This is "missing" not "unsupported": we have no signal
+        // about which version was intended.
+      }
+    }
+    const mem = this.workspaceState.get<SessionSnapshotsIndex>(SESSION_SNAPSHOTS_INDEX_KEY);
+    if (mem === undefined) return { kind: "missing" };
+    if (mem && typeof mem === "object" && mem.version === 1 && mem.entries) {
+      return { kind: "valid", index: mem };
+    }
+    return { kind: "unsupported" };
+  }
+
+  /**
+   * Synchronously persist the index to a sidecar file at
+   * `<storageUri>/snapshots/index.json`. Used by `flushSnapshotsSync` during
+   * deactivate so the index survives the Memento `update()` cancellation that
+   * VS Code raises while the extension host shuts down.
+   */
+  writeIndexSync(index: SessionSnapshotsIndex): void {
+    this.ensureSnapshotsDir();
+    this.fs.writeFileSync(this.indexSidecarPath(), JSON.stringify(index));
   }
 
   loadLivePanels(): LiveEditorPanelsRecord | undefined {
@@ -84,6 +143,15 @@ export class SessionStorage {
 
   private ensureSnapshotsDir(): void {
     this.fs.mkdirSync(this.snapshotsDir, { recursive: true });
+  }
+
+  private indexSidecarPath(): string {
+    return path.join(this.snapshotsDir, "index.json");
+  }
+
+  private async writeIndexFile(index: SessionSnapshotsIndex): Promise<void> {
+    await this.fs.promises.mkdir(this.snapshotsDir, { recursive: true });
+    await this.fs.promises.writeFile(this.indexSidecarPath(), JSON.stringify(index));
   }
 
   readBufferFile(sessionId: string): string | null {
@@ -162,6 +230,9 @@ export class SessionStorage {
         return;
       }
       // Fire-and-forget; failure surfaces in dev logs, not a crash.
+      void this.writeIndexFile(toWrite).catch((err) => {
+        console.error("[AnyWhere Terminal] writeIndexFile failed:", err);
+      });
       void this.workspaceState.update(SESSION_SNAPSHOTS_INDEX_KEY, toWrite);
     }, INDEX_DEBOUNCE_MS);
   }
@@ -209,8 +280,11 @@ export class SessionStorage {
 
   async purge(): Promise<void> {
     this.cancelPendingIndex();
-    await this.workspaceState.update(SESSION_SNAPSHOTS_INDEX_KEY, undefined);
-    await this.workspaceState.update(LIVE_EDITOR_PANELS_KEY, undefined);
+    // FILE CLEANUP MUST RUN FIRST — VS Code raises a `Canceled` Thenable on
+    // `Memento.update()` during ext-host shutdown. If we awaited Memento
+    // before touching disk, a Canceled rejection would leave the sidecar +
+    // buffer files behind for the next activate to hydrate as phantoms.
+    // See .reviews/round-4.md [B4].
     try {
       if (this.fs.existsSync(this.snapshotsDir)) {
         if (this.fs.rmSync) {
@@ -228,5 +302,7 @@ export class SessionStorage {
     } catch {
       // best-effort cleanup
     }
+    await this.workspaceState.update(SESSION_SNAPSHOTS_INDEX_KEY, undefined);
+    await this.workspaceState.update(LIVE_EDITOR_PANELS_KEY, undefined);
   }
 }

@@ -340,11 +340,19 @@ export class SplitTreeRenderer {
       return;
     }
 
-    // Create a new terminal for the split pane (not active tab-level, just a terminal instance)
-    const newInstance = factory.createTerminal(msg.newSessionId, msg.newSessionName, this.store.currentConfig, false);
-    // Don't create a new tab layout for this terminal — it's part of the existing tab's split tree
-    this.store.tabLayouts.delete(msg.newSessionId);
-    this.store.tabActivePaneIds.delete(msg.newSessionId);
+    // Create a new terminal for the split pane (not active tab-level, just a terminal instance).
+    // Passing `isSplitPane: true` skips the per-tab `tabLayouts` leaf init AND the
+    // setTimeout(0) fit pre-reparent (which would measure a 0×0 container and emit
+    // a spurious resize IPC). The post-layout `debouncedFitAllLeaves` below owns
+    // split-pane sizing. See round-3 follow-up to round-2 [S2].
+    const newInstance = factory.createTerminal(
+      msg.newSessionId,
+      msg.newSessionName,
+      this.store.currentConfig,
+      false,
+      null,
+      { isSplitPane: true },
+    );
 
     // Update the split tree: replace the source leaf with a branch containing source + new
     const newBranch = createBranch(msg.direction, createLeaf(msg.sourcePaneId), createLeaf(msg.newSessionId));

@@ -95,6 +95,17 @@ export class SessionManager {
   /** Set of session IDs currently being killed (prevent re-entrant cleanup) */
   private terminalBeingKilled = new Set<string>();
 
+  /**
+   * Session IDs the user has explicitly destroyed (or will destroy — added
+   * synchronously by `destroySession` / `destroyAllForView` BEFORE the
+   * operationQueue's microtask runs). Lets `dispose()` and `cleanupSession()`
+   * tell apart user-destroy intent from natural shell exits — the former
+   * MUST drop the snapshot (detachSession), the latter MUST preserve it for
+   * D13 read-only restore (releaseMirror). Cleared per-id when
+   * `cleanupSession()` completes. See .reviews/round-4.md [B1] + [B3].
+   */
+  private sessionsPendingDestroy = new Set<string>();
+
   /** Serialized operation queue for destructive operations */
   private operationQueue: Promise<void> = Promise.resolve();
 
@@ -146,10 +157,12 @@ export class SessionManager {
       // session ids back to their owning panel (round-1 W2).
       editorPanels: this.editorPanels,
     });
-    // Default exit-hook → immediate persist (bypass debounce) so the exit state
-    // lands on disk even if the user closes the window right after. Tests
+    // Default exit-hook → SYNC immediate persist so the exit snapshot is
+    // durable BEFORE cleanupSession runs (which previously raced — the async
+    // flush couldn't complete in time and the D13 read-only snapshot was
+    // unlinked by detachSession). See .reviews/round-4.md [B3]. Tests
     // override `onShellExited` directly.
-    this.onShellExited = (sessionId) => void this.snapshots.flushSessionImmediate(sessionId);
+    this.onShellExited = (sessionId) => this.snapshots.flushSessionImmediateSync(sessionId);
   }
 
   /** Test/inspection helper — current value of the restore-enabled flag. */
@@ -700,6 +713,13 @@ export class SessionManager {
 
   /** Destroy a session (queued, serialized via operation queue). */
   destroySession(sessionId: string): void {
+    // Record destructive intent SYNCHRONOUSLY before enqueueing. dispose()
+    // and cleanupSession() check this set to decide between detachSession
+    // (drop snapshot — user wanted it gone) and releaseMirror (preserve
+    // for D13 read-only restore). Without this set, a queued destroy still
+    // mid-flight at deactivate-time would be silently preserved by
+    // dispose's default releaseMirror call. See .reviews/round-4.md [B1].
+    this.sessionsPendingDestroy.add(sessionId);
     this.operationQueue = this.operationQueue
       .then(async () => {
         await this.performDestroy(sessionId);
@@ -748,12 +768,20 @@ export class SessionManager {
 
   /** Destroy all sessions for a specific view (queued, serialized). */
   destroyAllForView(viewId: string): void {
+    // Record destructive intent SYNCHRONOUSLY for every session in the view
+    // BEFORE enqueueing, so dispose() / cleanupSession() can distinguish
+    // user-destroy intent from natural exits during shutdown. See
+    // .reviews/round-4.md [B1].
+    const viewSessionIds = this.viewSessions.get(viewId);
+    if (viewSessionIds) {
+      for (const sid of viewSessionIds) this.sessionsPendingDestroy.add(sid);
+    }
     this.operationQueue = this.operationQueue
       .then(async () => {
-        const viewSessionIds = this.viewSessions.get(viewId);
-        if (!viewSessionIds) return;
+        const liveSessionIds = this.viewSessions.get(viewId);
+        if (!liveSessionIds) return;
         // Copy the array since performDestroy modifies viewSessions
-        const ids = [...viewSessionIds];
+        const ids = [...liveSessionIds];
         for (const sid of ids) {
           await this.performDestroy(sid);
         }
@@ -817,14 +845,23 @@ export class SessionManager {
           /* best-effort */
         }
       }
-      // Drops snapshot index entry + unlinks file + disposes headless + addon.
-      this.snapshots.detachSession(id);
+      // Branch on user-destroy intent. The default — preserve via
+      // releaseMirror so the next activate restores the user's terminals —
+      // is wrong for sessions the user has already asked to destroy: a
+      // queued/in-flight destroySession at deactivate-time would otherwise
+      // be silently preserved as a snapshot. See .reviews/round-4.md [B1].
+      if (this.sessionsPendingDestroy.has(id)) {
+        this.snapshots.detachSession(id);
+      } else {
+        this.snapshots.releaseMirror(id);
+      }
     }
 
     this.sessions.clear();
     this.viewSessions.clear();
     this.usedNumbers.clear();
     this.terminalBeingKilled.clear();
+    this.sessionsPendingDestroy.clear();
   }
 
   // ─── Private: Destroy Implementation ────────────────────────────
@@ -877,9 +914,21 @@ export class SessionManager {
       }
     }
 
-    // Hand off snapshot teardown — disposes headless + addon, drops index
-    // entry, unlinks file, schedules an index rewrite.
-    this.snapshots.detachSession(sessionId);
+    // Branch on destroy intent vs natural exit. The default snapshot
+    // teardown (detachSession) unlinks the buffer + drops the index entry,
+    // which is correct for user destroy but VIOLATES design.md D13 for a
+    // natural shell exit (`exit`, ^D, crash) — exited entries MUST be kept
+    // for read-only restore. The sync exit-flush (`flushSessionImmediateSync`,
+    // invoked from `onShellExited`) has already persisted the exit snapshot
+    // by the time we reach here; releaseMirror disposes only the runtime
+    // mirror, leaving the persisted snapshot intact. See .reviews/round-4.md
+    // [B1] + [B3].
+    if (this.sessionsPendingDestroy.has(sessionId)) {
+      this.snapshots.detachSession(sessionId);
+    } else {
+      this.snapshots.releaseMirror(sessionId);
+    }
+    this.sessionsPendingDestroy.delete(sessionId);
 
     // Remove from maps
     this.sessions.delete(sessionId);

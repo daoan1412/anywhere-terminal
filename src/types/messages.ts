@@ -857,4 +857,12 @@ export interface RestoreFromSnapshotMessage {
   snapshotAt: number;
   shellExited: boolean;
   exitCode: number | null;
+  /**
+   * True when the tab is a SPLIT-PANE CHILD (not a root tab). The webview's
+   * deferOpen fallback must use this to avoid clobbering the parent's
+   * `tabLayouts` entry by setting `tabLayouts.set(childId, createLeaf(childId))`.
+   * Optional for back-compat with prior webviews on the wire; treat missing
+   * as `false` (root tab). See .reviews/round-4.md [W4].
+   */
+  isSplitPane?: boolean;
 }

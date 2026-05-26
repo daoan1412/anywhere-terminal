@@ -21,9 +21,11 @@ import type {
   InsertPathEffectMessage,
   OutputMessage,
   ReadDirectoryResponseMessage,
+  RestoreFromSnapshotMessage,
   RestoreMessage,
   RevealInFileTreeMessage,
   SetFileTreePositionMessage,
+  SetPanelIdMessage,
   SplitPaneAtMessage,
   SplitPaneCreatedMessage,
   SplitPaneMessage,
@@ -77,6 +79,9 @@ export interface MessageHandlers {
   // ── File-tree FS watcher (add-file-tree-fs-watcher) ──
   onFsChangesInvalidated(msg: FsChangesInvalidatedMessage): void;
   onFsRehydrate(msg: FsRehydrateMessage): void;
+  // ── Session restore (restore-terminal-sessions) ──
+  onSetPanelId(msg: SetPanelIdMessage): void;
+  onRestoreFromSnapshot(msg: RestoreFromSnapshotMessage): void;
 }
 
 // ─── Factory ────────────────────────────────────────────────────────
@@ -177,6 +182,12 @@ export function createMessageRouter(handlers: MessageHandlers): (msg: ExtensionT
         break;
       case "fs-rehydrate":
         handlers.onFsRehydrate(msg);
+        break;
+      case "setPanelId":
+        handlers.onSetPanelId(msg);
+        break;
+      case "restoreFromSnapshot":
+        handlers.onRestoreFromSnapshot(msg);
         break;
       case "init":
         // init is handled directly by main.ts — not routed

@@ -438,13 +438,20 @@ const routeMessage = createMessageRouter({
     let instance = store.terminals.get(msg.tabId);
     let attachLater = false;
     if (!instance) {
+      // Pass isSplitPane through so the factory's `tabLayouts.set(...,
+      // createLeaf)` branch is skipped for split-pane children — otherwise
+      // a deferOpen revive of a split child would clobber the parent's
+      // tabLayouts entry with a bare leaf, collapsing the split tree and
+      // persisting the corruption via store.persist(). Defensively default
+      // to false (root tab) when the message lacks the field (legacy
+      // ext-host wire shape). See .reviews/round-4.md [W4].
       instance = factory.createTerminal(
         msg.tabId,
         msg.tabId,
         store.currentConfig,
         store.activeTabId === msg.tabId,
         null,
-        { deferOpen: true },
+        { deferOpen: true, isSplitPane: msg.isSplitPane === true },
       );
       attachLater = true;
     }

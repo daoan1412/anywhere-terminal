@@ -127,6 +127,19 @@ export function affectsTerminalConfig(e: vscode.ConfigurationChangeEvent): boole
   );
 }
 
+/**
+ * Read the cross-restart session restore setting. Default `true`.
+ */
+export function readSessionRestoreEnabled(): boolean {
+  const config = vscode.workspace.getConfiguration("anywhereTerminal");
+  return config.get<boolean>("sessionRestore.enabled") ?? true;
+}
+
+/** Check whether a configuration change event affects the session-restore setting. */
+export function affectsSessionRestoreEnabled(e: vscode.ConfigurationChangeEvent): boolean {
+  return e.affectsConfiguration("anywhereTerminal.sessionRestore.enabled");
+}
+
 // ─── Private: Resolution Chains ─────────────────────────────────────
 
 /**

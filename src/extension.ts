@@ -64,7 +64,12 @@ export function activate(context: vscode.ExtensionContext) {
   // owning editor panel rather than defaulting to sidebar. See round-1 W2.
   if (restoreEnabled) {
     sessionManager.hydrateLivePanels(sessionStorage.loadLivePanels());
-    sessionManager.hydrateFromSnapshots(sessionStorage.loadIndex());
+    // Hydrate reads its own typed index via loadIndexDetailed so it can
+    // distinguish "missing" (orphan recovery OK) from "unsupported"
+    // (discard entire restore set). Older code passed loadIndex() here —
+    // that variant collapses both cases to undefined and made hydrate run
+    // orphan recovery on an unsupported sidecar. See .reviews/round-4.md [W3].
+    sessionManager.hydrateFromSnapshots();
   } else {
     // Setting disabled — purge any leftover persistence from a prior session.
     void sessionStorage.purge();
@@ -495,7 +500,17 @@ export function activate(context: vscode.ExtensionContext) {
       // does NOT push a configUpdate to webviews — it owns the restore pipeline
       // lifecycle and is handled here on the extension side.
       if (affectsSessionRestoreEnabled(e)) {
-        sessionManager.setRestoreEnabled(readSessionRestoreEnabled());
+        // Re-apply the no-workspace-folder guard at runtime: without it, a
+        // user toggling the setting on (or User-scope sync flipping it) would
+        // re-enable persistence to globalStorageUri in a no-folder window and
+        // leak snapshots across unrelated no-folder windows. See round-2 [W2].
+        const want = readSessionRestoreEnabled();
+        if (want && !hasWorkspaceStorage) {
+          console.warn(
+            "[AnyWhere Terminal] sessionRestore toggle ignored — no workspace folder open.",
+          );
+        }
+        sessionManager.setRestoreEnabled(hasWorkspaceStorage && want);
       }
 
       if (!affectsTerminalConfig(e)) {
@@ -606,7 +621,10 @@ export async function deactivate(): Promise<void> {
   } catch (err) {
     console.error("[AnyWhere Terminal] flushSnapshotsSync failed during deactivate:", err);
   }
-  // Step 2 — await the index + live-panels Memento updates.
+  // Step 2 — await the index + live-panels Memento updates. VS Code raises a
+  // `Canceled` Thenable here when the extension host is shutting down — the
+  // sidecar index written synchronously in Step 1 is the authoritative source
+  // on next activate, so a cancel here is a degraded-but-correct outcome.
   try {
     await sm.flushIndexAwaited();
   } catch (err) {

@@ -421,7 +421,7 @@ export class TerminalEditorProvider {
     try {
       switch (message.type) {
         case "ready":
-          this.onReady();
+          void this.onReady();
           break;
 
         case "input":
@@ -581,8 +581,15 @@ export class TerminalEditorProvider {
   /**
    * Handle the 'ready' message from the webview.
    * Creates a session via SessionManager and sends 'init' to the webview.
+   *
+   * MUST be async + await `init` delivery before posting any `restore` /
+   * `restoreFromSnapshot` payload — mirrors the round-2 [W4] fix for
+   * TerminalViewProvider. Without the await, a transient postMessage
+   * failure (50-150ms retry window) would let restore messages arrive at a
+   * webview that hasn't processed init, triggering the `deferOpen`
+   * mis-wrap with a default-config terminal. See .reviews/round-4.md [W1].
    */
-  private onReady(): void {
+  private async onReady(): Promise<void> {
     this._ready = true;
 
     // Tell the webview which panelId VS Code will use to identify this panel
@@ -613,12 +620,19 @@ export class TerminalEditorProvider {
         // the surviving sessions still hold the disposed webview and
         // safePostMessage silently no-ops. See: design.md D3, D12.
         this.sessionManager.updateWebviewForView(this._viewId, this._panel.webview);
-        this.safePostMessage({
+        const initDelivered = await this.safeSendWithRetry({
           type: "init",
           tabs: existingSessions,
           config: readTerminalConfig(),
           ...this.fileTreeHost.initPayload(),
         });
+        if (!initDelivered) {
+          console.error(
+            "[AnyWhere Terminal] init delivery failed during editor reload — skipping scrollback restore.",
+          );
+          this.sessionManager.resumeOutputForView(this._viewId);
+          return;
+        }
         for (const session of existingSessions) {
           const scrollback = this.sessionManager.getScrollbackData(session.id);
           if (scrollback) {
@@ -639,12 +653,23 @@ export class TerminalEditorProvider {
           this.sessionManager.attachSessionToPanel(this._panelId, sessionId);
         }
         const restoredSessions = this.sessionManager.getAllSessionsForView(this._viewId);
-        this.safePostMessage({
+        // Await init delivery before posting restoreFromSnapshot — same
+        // W4 race as TerminalViewProvider. Pre-fix, a transient init drop
+        // would deliver restoreFromSnapshot to a webview with no terminal
+        // in store.terminals → deferOpen mis-wrap → blank editor tab.
+        const initDelivered = await this.safeSendWithRetry({
           type: "init",
           tabs: restoredSessions,
           config: readTerminalConfig(),
           ...this.fileTreeHost.initPayload(),
         });
+        if (!initDelivered) {
+          console.error(
+            "[AnyWhere Terminal] init delivery failed during editor restore — skipping restoreFromSnapshot posts.",
+          );
+          this.sessionManager.resumeOutputForView(this._viewId);
+          return;
+        }
         for (const snap of this.restoreSnapshots) {
           this.safePostMessage({
             type: "restoreFromSnapshot",
@@ -655,6 +680,7 @@ export class TerminalEditorProvider {
             snapshotAt: snap.metadata.snapshotAt,
             shellExited: snap.metadata.shellExited,
             exitCode: snap.metadata.exitCode,
+            isSplitPane: snap.metadata.isSplitPane,
           });
         }
         // Resume output flushing for sessions paused by createSession({restoreFrom}).
@@ -670,7 +696,7 @@ export class TerminalEditorProvider {
         });
         this.sessionManager.attachSessionToPanel(this._panelId, newSessionId);
         const tabs = this.sessionManager.getTabsForView(this._viewId);
-        this.safePostMessage({
+        void this.safeSendWithRetry({
           type: "init",
           tabs,
           config: readTerminalConfig(),
@@ -680,7 +706,7 @@ export class TerminalEditorProvider {
     } catch (err) {
       console.error("[AnyWhere Terminal] Failed to initialize editor terminal:", err);
 
-      this.safePostMessage({
+      void this.safeSendWithRetry({
         type: "error",
         message: err instanceof Error ? err.message : "Failed to initialize terminal",
         severity: "error",
@@ -699,5 +725,29 @@ export class TerminalEditorProvider {
     } catch {
       // Sync throw — webview may be disposed
     }
+  }
+
+  /**
+   * Post a message with retry logic for transient postMessage failures.
+   * Retries up to `maxRetries` times with a 50ms delay between attempts.
+   * Returns true if delivered, false if all attempts failed. Mirrors the
+   * implementation in TerminalViewProvider so editor + sidebar/panel
+   * providers share the same delivery guarantee. See .reviews/round-4.md [W1].
+   */
+  private async safeSendWithRetry(message: unknown, maxRetries = 2): Promise<boolean> {
+    for (let attempt = 0; attempt <= maxRetries; attempt++) {
+      try {
+        const result = await (this._panel.webview.postMessage(message) as Thenable<boolean>);
+        if (result) {
+          return true;
+        }
+      } catch {
+        // Sync or async failure — will retry
+      }
+      if (attempt < maxRetries) {
+        await new Promise<void>((resolve) => setTimeout(resolve, 50));
+      }
+    }
+    return false;
   }
 }
