@@ -240,6 +240,16 @@
   outline: none;
 }
 
+/* Active-pane indicator — subtle inset focus border, only visible when the
+ * leaf has split siblings (descendant of a `.split-branch`). Without this,
+ * single-pane tabs would gain a permanent border which is visual noise.
+ * `box-shadow` is used instead of `border` so layout/sizing don't shift
+ * when the class toggles. Persists across focus blur so users always see
+ * which pane the title-bar "Export…" / "Insert Path" actions will target. */
+.split-branch .split-leaf.active-pane {
+  box-shadow: inset 0 0 0 1px var(--vscode-focusBorder, #007fd4);
+}
+
 /* ============================================================
  * Split pane — export flash
  * Brief inset-outline pulse on the .split-leaf the user clicked

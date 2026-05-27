@@ -756,10 +756,30 @@ function bootstrap(): void {
   });
 
   // Notify Extension Host when user clicks/focuses the terminal.
-  // Sends the resolved active pane session ID so "Insert Path" targets the correct split pane.
-  document.addEventListener("focusin", () => {
+  // Sends the resolved active pane session ID so "Insert Path" + the
+  // title-bar "Export…" flash target the pane the user is actually on.
+  //
+  // We derive `activeSessionId` from `event.target.closest('.split-leaf')`
+  // (DOM ground truth) rather than `store.tabActivePaneIds` to dodge a
+  // synchronous race: xterm.js calls `textarea.focus()` inside its own
+  // mousedown handler before the leafContainer mousedown handler runs, so
+  // focusin fires while `tabActivePaneIds` still points at the previously
+  // active pane. When we detect a leaf-driven focus, we also sync the
+  // store + visual class so subsequent reads agree.
+  document.addEventListener("focusin", (event) => {
     const tabId = store.activeTabId;
-    const activeSessionId = tabId ? (store.tabActivePaneIds.get(tabId) ?? tabId) : undefined;
+    if (!tabId) {
+      vscode.postMessage({ type: "focus", activeSessionId: undefined });
+      return;
+    }
+    const target = event.target instanceof Element ? event.target.closest<HTMLElement>(".split-leaf") : null;
+    const leafSessionId = target?.dataset.sessionId;
+    if (leafSessionId && store.tabActivePaneIds.get(tabId) !== leafSessionId) {
+      store.tabActivePaneIds.set(tabId, leafSessionId);
+      splitRenderer.updateActivePaneVisual(tabId);
+      store.persist();
+    }
+    const activeSessionId = leafSessionId ?? (store.tabActivePaneIds.get(tabId) ?? tabId);
     vscode.postMessage({ type: "focus", activeSessionId });
   });
   window.addEventListener("message", (event: MessageEvent) => {
