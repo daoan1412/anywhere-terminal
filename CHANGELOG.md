@@ -4,6 +4,19 @@ All notable changes to **AnyWhere Terminal** are documented in this file.
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- **Export terminal sessions to file.** Three new command-palette entries — `Export Current Tab Scrollback`, `Export Last Command`, `Export Command…` — write the focused tab's output to a user-chosen path via the workspace FS API (remote/virtual workspaces supported). Output is ANSI-stripped by default; pick `.ansi` for raw escapes. Per-command export uses OSC 633 shell integration to capture command-line + exit code + cwd alongside the output.
+- **Shell integration auto-injected for bash, zsh, fish, pwsh.** Per-session nonce protects the OSC 633 `E` (command-line) marker against forged input. Vendored MIT-licensed VS Code scripts; user `--noprofile --norc` / `-NoProfile` flags are respected.
+
+### Fixed
+
+- **Bash and zsh terminals now source user `.bashrc` / `.zshrc` / `.zprofile` / `.zlogin` / `.zshenv` again.** The shell-integration injector was missing the `VSCODE_INJECTION=1` env var the vendored scripts gate user-rc sourcing on; terminals were starting with no user PATH, aliases, prompt, or functions. `USER_ZDOTDIR` now falls back to `$HOME` (zsh default) instead of empty string.
+- **`Cmd+K` (clear scrollback) now also wipes the tracked-commands list** — closing the privacy boundary so `Export Last Command` / `Export Command` cannot surface output captured before the clear, and the boundary survives a window restart.
+- **Empty prompt lines no longer accumulate above the restore divider on each reload.** The headless mirror's seed buffer was retaining each previous shell's final prompt; the new PTY's prompt now overwrites that row before the next snapshot.
+
 ## [0.13.0] — 2026-05-26
 
 ### Added

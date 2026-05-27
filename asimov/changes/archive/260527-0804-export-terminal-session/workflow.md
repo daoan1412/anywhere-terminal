@@ -50,8 +50,8 @@
 - [ ] Deploy Gate _(skip if `asimov/project.md` § Commands → Deploy is N/A)_:
   - [ ] Run deploy command
   - [ ] Run smoke test
-- [ ] Apply deltas: `bun run asm change apply`
-- [ ] Archive change: `bun run asm change archive`
+- [x] Apply deltas: `bun run asm change apply`
+- [x] Archive change: `bun run asm change archive`
 - [ ] Commit all changes
 
 ## Notes
