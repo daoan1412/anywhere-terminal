@@ -8,16 +8,20 @@
   },
   "agent": {
     "asm-review-contracts": {
-      "model": "openai/gpt-5.4"
+      "model": "openai/gpt-5.4",
+      "reasoningEffort": "high"
     },
     "asm-review-data-security": {
-      "model": "openai/gpt-5.5"
+      "model": "openai/gpt-5.5",
+      "reasoningEffort": "high"
     },
     "asm-review-frontend": {
-      "model": "openai/gpt-5.4-mini"
+      "model": "openai/gpt-5.4-mini",
+      "reasoningEffort": "high"
     },
     "asm-review-logic": {
-      "model": "openai/gpt-5.5"
+      "model": "openai/gpt-5.3-codex",
+      "reasoningEffort": "high"
     },
     "asm-librarian": {
       "model": "openai/gpt-5.4-mini"
