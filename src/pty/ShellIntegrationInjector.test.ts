@@ -57,7 +57,7 @@ describe("ShellIntegrationInjector: bash", () => {
     const expectedDir = `/tmp/at-bash-${ids[1]}`;
     const expectedInit = `${expectedDir}/shellIntegration.bash`;
     expect(result!.args).toEqual(["--init-file", expectedInit, "-l"]);
-    expect(result!.env).toEqual({ HOME: "/u/h", VSCODE_NONCE: ids[0] });
+    expect(result!.env).toEqual({ HOME: "/u/h", VSCODE_NONCE: ids[0], VSCODE_INJECTION: "1" });
     expect(calls).toContainEqual({ op: "mkdir", path: expectedDir, opts: { recursive: true, mode: 0o700 } });
     expect(calls).toContainEqual({
       op: "copy",
@@ -99,8 +99,9 @@ describe("ShellIntegrationInjector: zsh", () => {
     expect(result!.env).toEqual({
       HOME: "/u/h",
       ZDOTDIR: tempDir,
-      USER_ZDOTDIR: "",
+      USER_ZDOTDIR: "/u/h", // ← Falls back to HOME (zsh's default) when ZDOTDIR unset
       VSCODE_NONCE: ids[0],
+      VSCODE_INJECTION: "1",
     });
     const copyOps = calls.filter((c) => c.op === "copy").map((c) => c.path);
     expect(copyOps).toEqual([
@@ -117,6 +118,21 @@ describe("ShellIntegrationInjector: zsh", () => {
     expect(result!.env.USER_ZDOTDIR).toBe("/u/h/.config/zsh");
     expect(result!.env.ZDOTDIR).toMatch(/^\/tmp\/at-zsh-/);
   });
+
+  it("[B1] USER_ZDOTDIR falls back to HOME when ZDOTDIR is unset (not empty string)", () => {
+    // Vendored .zshenv/.zprofile/.zshrc/.zlogin ALL source $USER_ZDOTDIR/<file>.
+    // Empty fallback would make every source `/<file>` (path doesn't exist) →
+    // user config silently skipped. zsh's default for ZDOTDIR when unset is $HOME.
+    const { ctx } = fakeCtx();
+    const result = injectShellIntegration("/bin/zsh", [], { HOME: "/u/h" }, ctx);
+    expect(result!.env.USER_ZDOTDIR).toBe("/u/h");
+  });
+
+  it("[B1] USER_ZDOTDIR is '' only when neither ZDOTDIR nor HOME is set", () => {
+    const { ctx } = fakeCtx();
+    const result = injectShellIntegration("/bin/zsh", [], {}, ctx);
+    expect(result!.env.USER_ZDOTDIR).toBe("");
+  });
 });
 
 describe("ShellIntegrationInjector: fish", () => {
@@ -125,6 +141,7 @@ describe("ShellIntegrationInjector: fish", () => {
     const result = injectShellIntegration("/opt/homebrew/bin/fish", [], { HOME: "/u/h" }, ctx);
     expect(result).not.toBeNull();
     expect(result!.args).toEqual(["--init-command", "source '/ext/resources/shell-integration/shellIntegration.fish'"]);
+    // fish doesn't need VSCODE_INJECTION (no rc-source gate in shellIntegration.fish).
     expect(result!.env).toEqual({ HOME: "/u/h", VSCODE_NONCE: ids[0] });
     expect(result!.cleanup).toBeInstanceOf(Function); // no-op but callable
   });
@@ -142,6 +159,7 @@ describe("ShellIntegrationInjector: pwsh", () => {
     const result = injectShellIntegration("/usr/local/bin/pwsh", [], { PATH: "/usr/bin" }, ctx);
     expect(result).not.toBeNull();
     expect(result!.args).toEqual(["-noexit", "-command", ". '/ext/resources/shell-integration/shellIntegration.ps1'"]);
+    // pwsh's shellIntegration.ps1 has no VSCODE_INJECTION gate (PowerShell profile loading is opt-out via -NoProfile).
     expect(result!.env).toEqual({ PATH: "/usr/bin", VSCODE_NONCE: ids[0] });
   });
 
@@ -198,10 +216,47 @@ describe("ShellIntegrationInjector: environment hygiene", () => {
     expect(result!.env.TERM_PROGRAM).toBe("AnyWhereTerminal");
   });
 
-  it("never sets VSCODE_INJECTION (anti-duplicate-marker)", () => {
+  it("[B1] sets VSCODE_INJECTION=1 for bash + zsh so vendored scripts source user rc", () => {
+    // Vendored bash + zsh scripts gate sourcing user .bashrc / .zshrc / etc.
+    // on $VSCODE_INJECTION=="1". Without it set the shell starts with NO user
+    // PATH, aliases, prompt, hooks — a hard regression. The script's own
+    // VSCODE_SHELL_INTEGRATION re-entry guard prevents double-source from
+    // dotfiles that auto-source the integration script.
+    const { ctx: bashCtx } = fakeCtx();
+    expect(injectShellIntegration("/bin/bash", [], { HOME: "/u/h" }, bashCtx)!.env.VSCODE_INJECTION).toBe("1");
+    const { ctx: zshCtx } = fakeCtx();
+    expect(injectShellIntegration("/bin/zsh", [], { HOME: "/u/h" }, zshCtx)!.env.VSCODE_INJECTION).toBe("1");
+  });
+
+  it("[B1] fish + pwsh do NOT need VSCODE_INJECTION (their scripts have no rc-source gate)", () => {
+    const { ctx: fishCtx } = fakeCtx();
+    expect(injectShellIntegration("/opt/fish", [], {}, fishCtx)!.env).not.toHaveProperty("VSCODE_INJECTION");
+    const { ctx: pwshCtx } = fakeCtx();
+    expect(injectShellIntegration("/usr/local/bin/pwsh", [], {}, pwshCtx)!.env).not.toHaveProperty("VSCODE_INJECTION");
+  });
+
+  it("[B3] scrubs VSCODE_SHELL_INTEGRATION from inherited env so vendored scripts don't early-return", () => {
+    // Both bash + zsh scripts check `if [[ -n "$VSCODE_SHELL_INTEGRATION" ]]; then return; fi`
+    // at the top. Inheriting this var from a parent shell (e.g. extension host
+    // launched from a terminal whose shell sourced VS Code's integration) would
+    // make the injection a silent no-op.
+    const dirtyEnv = { HOME: "/u/h", VSCODE_SHELL_INTEGRATION: "1" };
+    for (const shell of ["/bin/bash", "/bin/zsh", "/opt/fish", "/usr/local/bin/pwsh"]) {
+      const { ctx } = fakeCtx();
+      const result = injectShellIntegration(shell, [], dirtyEnv, ctx);
+      expect(result!.env).not.toHaveProperty("VSCODE_SHELL_INTEGRATION");
+    }
+  });
+
+  it("[B3] scrubs VSCODE_ZDOTDIR (zsh-script internal state) from inherited env", () => {
     const { ctx } = fakeCtx();
-    const result = injectShellIntegration("/bin/zsh", [], { HOME: "/u/h" }, ctx);
-    expect(result!.env).not.toHaveProperty("VSCODE_INJECTION");
+    const result = injectShellIntegration(
+      "/bin/zsh",
+      [],
+      { HOME: "/u/h", VSCODE_ZDOTDIR: "/stale/path/from/parent" },
+      ctx,
+    );
+    expect(result!.env).not.toHaveProperty("VSCODE_ZDOTDIR");
   });
 
   it("nonce is unique per call", () => {

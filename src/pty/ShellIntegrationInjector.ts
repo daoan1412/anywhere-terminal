@@ -51,15 +51,26 @@ const NOOP_CLEANUP = (): void => {};
  * binary is unrecognised (no integration available) — the spawn site MUST
  * proceed with the original args/env in that case.
  *
- * The per-session nonce is added to `env` as `VSCODE_NONCE=<uuid>`. The
- * vendored E-emitting scripts include this nonce on every `E` marker; the
- * parser side compares and rejects forged E markers from untrusted output.
+ * Env contract handed to bash/zsh/fish/pwsh:
+ * - `VSCODE_NONCE=<uuid>` — included on every `E` marker; parser rejects forged
+ *   ones from untrusted output.
+ * - `VSCODE_INJECTION=1` (bash + zsh only) — the vendored scripts gate sourcing
+ *   user `.bashrc` / `.zshrc` / `.zprofile` / `.zlogin` / `.zshenv` on this
+ *   var. Without it set the shell starts with NO user PATH, aliases, prompt,
+ *   or hooks — a hard regression. The script's own re-entry guard
+ *   (`if [[ -n "$VSCODE_SHELL_INTEGRATION" ]]; then return; fi`) prevents
+ *   double-source from user dotfiles that auto-source the integration script.
+ * - `USER_ZDOTDIR=<path>` (zsh only) — vendored `.zshenv` / `.zprofile` /
+ *   `.zshrc` / `.zlogin` ALL source `$USER_ZDOTDIR/<file>`. Falls back to
+ *   `$HOME` (zsh's default for ZDOTDIR), NOT empty string.
+ *
+ * Scrubbed from inherited `baseEnv` to defend against parent-process leakage
+ * (extension host launched from a shell that already had VS Code's shell-
+ * integration sourced): `VSCODE_SHELL_INTEGRATION`, `VSCODE_ZDOTDIR`. Either
+ * present would make the integration script silently no-op or behave wrong.
  *
  * `TERM_PROGRAM` is intentionally NOT touched here — it is set to
- * `AnyWhereTerminal` upstream by `PtyManager.buildEnvironment`, and double-
- * setting `VSCODE_INJECTION=1` would cause user `.bashrc` snippets that
- * auto-source the integration script to fire a second time, producing
- * duplicate OSC 633 markers (see design F2 / oracle finding F2).
+ * `AnyWhereTerminal` upstream by `PtyManager.buildEnvironment`.
  */
 export function injectShellIntegration(
   shellPath: string,
@@ -102,6 +113,26 @@ export function injectShellIntegration(
   return null;
 }
 
+/**
+ * Strip env vars that the vendored shell-integration scripts treat as
+ * "already running" or "internal state" signals. Without this scrub, the
+ * scripts may early-return or compute wrong paths if those vars leak in from
+ * the extension host's `process.env` (e.g. extension host launched from a
+ * terminal whose shell had VS Code's integration sourced).
+ *
+ * - `VSCODE_SHELL_INTEGRATION` is the re-entry guard checked at the top of
+ *   `shellIntegration-bash.sh` / `shellIntegration-rc.zsh` — if non-empty the
+ *   scripts `builtin return` without setting up any hooks.
+ * - `VSCODE_ZDOTDIR` is the temp-dir snapshot the vendored zsh scripts use
+ *   to bridge ZDOTDIR; an inherited value would mis-route the bridge.
+ */
+function scrubLeakedEnv(baseEnv: Readonly<Record<string, string>>): Record<string, string> {
+  const cleaned: Record<string, string> = { ...baseEnv };
+  delete cleaned.VSCODE_SHELL_INTEGRATION;
+  delete cleaned.VSCODE_ZDOTDIR;
+  return cleaned;
+}
+
 // ─── bash ───────────────────────────────────────────────────────────
 
 function injectBash(args: string[], baseEnv: Readonly<Record<string, string>>, ctx: InjectionContext): InjectionResult {
@@ -113,7 +144,7 @@ function injectBash(args: string[], baseEnv: Readonly<Record<string, string>>, c
   const newArgs = ["--init-file", initFile, ...args];
   return {
     args: newArgs,
-    env: { ...baseEnv, VSCODE_NONCE: nonce },
+    env: { ...scrubLeakedEnv(baseEnv), VSCODE_NONCE: nonce, VSCODE_INJECTION: "1" },
     nonce,
     cleanup: makeTempDirCleanup(ctx, tempDir),
   };
@@ -135,16 +166,18 @@ function injectZsh(args: string[], baseEnv: Readonly<Record<string, string>>, ct
   for (const [src, dst] of mapping) {
     ctx.fs.copyFileSync(path.join(ctx.scriptsDir, src), path.join(tempDir, dst));
   }
-  // Preserve the user's original ZDOTDIR so the chained scripts can source it.
-  // `baseEnv.ZDOTDIR` (if present) takes priority over `HOME` (zsh default).
-  const userZdotdir = baseEnv.ZDOTDIR ?? "";
+  // Vendored .zshenv/.zprofile/.zshrc/.zlogin ALL source `$USER_ZDOTDIR/<file>`.
+  // Order: explicit user ZDOTDIR → HOME (zsh's default when ZDOTDIR unset) →
+  // empty as last-ditch (will silently skip user config rather than crash).
+  const userZdotdir = baseEnv.ZDOTDIR ?? baseEnv.HOME ?? "";
   return {
     args,
     env: {
-      ...baseEnv,
+      ...scrubLeakedEnv(baseEnv),
       ZDOTDIR: tempDir,
       USER_ZDOTDIR: userZdotdir,
       VSCODE_NONCE: nonce,
+      VSCODE_INJECTION: "1",
     },
     nonce,
     cleanup: makeTempDirCleanup(ctx, tempDir),
@@ -159,7 +192,7 @@ function injectFish(args: string[], baseEnv: Readonly<Record<string, string>>, c
   const newArgs = ["--init-command", `source ${shellQuote(scriptPath)}`, ...args];
   return {
     args: newArgs,
-    env: { ...baseEnv, VSCODE_NONCE: nonce },
+    env: { ...scrubLeakedEnv(baseEnv), VSCODE_NONCE: nonce },
     nonce,
     cleanup: NOOP_CLEANUP,
   };
@@ -176,7 +209,7 @@ function injectPwsh(args: string[], baseEnv: Readonly<Record<string, string>>, c
   const newArgs = ["-noexit", "-command", `. '${psQuoted}'`, ...args];
   return {
     args: newArgs,
-    env: { ...baseEnv, VSCODE_NONCE: nonce },
+    env: { ...scrubLeakedEnv(baseEnv), VSCODE_NONCE: nonce },
     nonce,
     cleanup: NOOP_CLEANUP,
   };
