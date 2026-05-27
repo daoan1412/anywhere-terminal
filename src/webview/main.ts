@@ -11,6 +11,7 @@ declare function acquireVsCodeApi(): {
   setState(state: unknown): void;
 };
 
+import { SerializeAddon } from "@xterm/addon-serialize";
 import type {
   ExtensionToWebViewMessage,
   HoverPreviewSettings,
@@ -251,22 +252,17 @@ function removeTerminal(id: string): void {
 
 // ─── Scrollback Dump (export-terminal-session) ───────────────────────
 
-// S1: defer `@xterm/addon-serialize` to first-export time. Memoised after the
-// first call so subsequent dumps don't re-import. The handler accepts a
-// Promise-returning factory so this dynamic import composes naturally.
-let _serializeAddonCtor: typeof import("@xterm/addon-serialize").SerializeAddon | null = null;
-async function loadSerializeAddon(): Promise<InstanceType<typeof import("@xterm/addon-serialize").SerializeAddon>> {
-  if (!_serializeAddonCtor) {
-    const mod = await import("@xterm/addon-serialize");
-    _serializeAddonCtor = mod.SerializeAddon;
-  }
-  return new _serializeAddonCtor();
-}
-
+// `@xterm/addon-serialize` is bundled eagerly. The webview build is
+// single-file iife (`esbuild.js:92`), so a `await import(...)` here would
+// still inline the module into `media/webview.js` (~3.6 MB) — only the
+// module's top-level execution would be deferred, which is negligible.
+// True lazy load would require switching the build away from iife AND
+// teaching the webview CSP to fetch chunks at runtime; out of scope for
+// the export feature. See external-review round W1.
 const handleScrollbackDump = createScrollbackDumpHandler({
   getTerminal: (tabId) => store.terminals.get(tabId)?.terminal,
   postMessage: (msg) => vscode.postMessage(msg),
-  createSerializeAddon: loadSerializeAddon,
+  createSerializeAddon: () => new SerializeAddon(),
 });
 
 // ─── Message Router ─────────────────────────────────────────────────

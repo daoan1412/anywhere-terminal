@@ -903,6 +903,12 @@ export interface RequestScrollbackDumpMessage {
  * (if any) happens in the extension export pipeline. `truncated` is true iff
  * the xterm `scrollback` setting capped the output. Unknown `tabId` replies
  * with `data: ""`, `lineCount: 0`, `truncated: false`.
+ *
+ * `error` is set when the webview handler threw — typically
+ * `SerializeAddon.serialize()` failed, `loadAddon` rejected, or addon
+ * construction itself threw. The coordinator translates this into a
+ * `ScrollbackDumpFailedError` so the export command can surface a toast
+ * instead of silently writing an empty file. See: external-review W2.
  */
 export interface ScrollbackDumpMessage {
   type: "scrollbackDump";
@@ -912,4 +918,6 @@ export interface ScrollbackDumpMessage {
   data: string;
   lineCount: number;
   truncated: boolean;
+  /** When set, the dump failed and `data`/`lineCount`/`truncated` are placeholders. */
+  error?: string;
 }

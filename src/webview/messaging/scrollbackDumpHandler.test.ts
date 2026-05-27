@@ -280,10 +280,77 @@ describe("scrollbackDumpHandler: error path", () => {
     // Addon disposal happens regardless of serialize() throwing — the `finally`
     // block in computeDump guarantees it.
     expect(disposed).toBe(true);
-    // The error path emits an empty payload so the extension-side pending
-    // Promise resolves cleanly instead of timing out.
-    expect(posted).toEqual([
-      { type: "scrollbackDump", tabId: "tab-1", requestId: "r1", data: "", lineCount: 0, truncated: false },
-    ]);
+  });
+
+  it("[W2 external-review] surfaces the failure via `error` field so the coordinator rejects (not silent empty)", async () => {
+    // Pre-fix, a serialize() throw was caught and reported as
+    // `{ data: '', lineCount: 0, truncated: false }` — the coordinator
+    // resolved with that payload and `exportBuffer` wrote an empty file
+    // silently. Now `error` carries the reason; coordinator rejects.
+    const terminals = new Map([["tab-1", makeTerminal()]]);
+    const posted: ScrollbackDumpMessage[] = [];
+    const deps: ScrollbackDumpDeps = {
+      getTerminal: (id) => terminals.get(id) as unknown as import("@xterm/xterm").Terminal | undefined,
+      postMessage: (m) => posted.push(m),
+      createSerializeAddon: () => ({
+        serialize: () => {
+          throw new Error("SerializeAddon: boom");
+        },
+        dispose: () => {},
+      }),
+    };
+    const handler = createScrollbackDumpHandler(deps);
+    handler({ type: "requestScrollbackDump", tabId: "tab-1", requestId: "r1" });
+    await flushMicrotasks();
+    expect(posted).toHaveLength(1);
+    expect(posted[0].error).toBe("SerializeAddon: boom");
+    // Placeholders for the typed schema (consumers MUST NOT read these when error is set).
+    expect(posted[0].data).toBe("");
+    expect(posted[0].lineCount).toBe(0);
+    expect(posted[0].truncated).toBe(false);
+  });
+
+  it("[W2] surfaces async addon-loader rejections as `error` too (covers dynamic-import failure)", async () => {
+    const terminals = new Map([["tab-1", makeTerminal()]]);
+    const posted: ScrollbackDumpMessage[] = [];
+    const deps: ScrollbackDumpDeps = {
+      getTerminal: (id) => terminals.get(id) as unknown as import("@xterm/xterm").Terminal | undefined,
+      postMessage: (m) => posted.push(m),
+      createSerializeAddon: () => Promise.reject(new Error("module load failed")),
+    };
+    const handler = createScrollbackDumpHandler(deps);
+    handler({ type: "requestScrollbackDump", tabId: "tab-1", requestId: "r-async" });
+    await flushMicrotasks();
+    expect(posted[0].error).toBe("module load failed");
+  });
+
+  it("[W2] error replies are still broadcast to ALL queued requestIds for the same tabId", async () => {
+    const terminals = new Map([["tab-1", makeTerminal()]]);
+    const posted: ScrollbackDumpMessage[] = [];
+    let resolveAddon: (a: SerializeAddonLike) => void;
+    const addonReady = new Promise<SerializeAddonLike>((r) => {
+      resolveAddon = r;
+    });
+    const deps: ScrollbackDumpDeps = {
+      getTerminal: (id) => terminals.get(id) as unknown as import("@xterm/xterm").Terminal | undefined,
+      postMessage: (m) => posted.push(m),
+      createSerializeAddon: () => addonReady,
+    };
+    const handler = createScrollbackDumpHandler(deps);
+    handler({ type: "requestScrollbackDump", tabId: "tab-1", requestId: "r1" });
+    await flushMicrotasks();
+    handler({ type: "requestScrollbackDump", tabId: "tab-1", requestId: "r2" });
+    await flushMicrotasks();
+    resolveAddon!({
+      serialize: () => {
+        throw new Error("late-stage failure");
+      },
+      dispose: () => {},
+    });
+    await flushMicrotasks();
+    expect(posted).toHaveLength(2);
+    for (const m of posted) {
+      expect(m.error).toBe("late-stage failure");
+    }
   });
 });

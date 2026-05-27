@@ -5,6 +5,7 @@ import {
   ErrorCode,
   PtyLoadError,
   ScrollbackDumpAbortedError,
+  ScrollbackDumpFailedError,
   ScrollbackDumpTimeoutError,
   ShellNotFoundError,
 } from "./errors";
@@ -18,11 +19,12 @@ describe("ErrorCode", () => {
     expect(ErrorCode.BufferOverflow).toBe("BUFFER_OVERFLOW");
     expect(ErrorCode.ScrollbackDumpAborted).toBe("SCROLLBACK_DUMP_ABORTED");
     expect(ErrorCode.ScrollbackDumpTimeout).toBe("SCROLLBACK_DUMP_TIMEOUT");
+    expect(ErrorCode.ScrollbackDumpFailed).toBe("SCROLLBACK_DUMP_FAILED");
   });
 
-  it("has 5 members", () => {
+  it("has 6 members", () => {
     const values = Object.values(ErrorCode);
-    expect(values).toHaveLength(5);
+    expect(values).toHaveLength(6);
   });
 });
 
@@ -46,6 +48,19 @@ describe("ScrollbackDumpTimeoutError", () => {
     expect(err.name).toBe("ScrollbackDumpTimeoutError");
     expect(err.sessionId).toBe("sess-1");
     expect(err.requestId).toBe("req-1");
+    expect(err).toBeInstanceOf(AnyWhereTerminalError);
+  });
+});
+
+describe("ScrollbackDumpFailedError", () => {
+  it("carries the webview's error reason on `.reason` and includes it in the message", () => {
+    const err = new ScrollbackDumpFailedError("sess-1", "req-1", "SerializeAddon: boom");
+    expect(err.code).toBe(ErrorCode.ScrollbackDumpFailed);
+    expect(err.name).toBe("ScrollbackDumpFailedError");
+    expect(err.sessionId).toBe("sess-1");
+    expect(err.requestId).toBe("req-1");
+    expect(err.reason).toBe("SerializeAddon: boom");
+    expect(err.message).toContain("SerializeAddon: boom");
     expect(err).toBeInstanceOf(AnyWhereTerminalError);
   });
 });

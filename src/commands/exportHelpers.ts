@@ -9,7 +9,7 @@
 //   asimov/changes/export-terminal-session/design.md D7, D8
 
 import stripAnsi from "strip-ansi";
-import * as vscode from "vscode";
+import type * as vscode from "vscode";
 import type { TrackedCommand } from "../session/TrackedCommand";
 
 /**

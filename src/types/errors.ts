@@ -10,6 +10,7 @@ export enum ErrorCode {
   BufferOverflow = "BUFFER_OVERFLOW",
   ScrollbackDumpAborted = "SCROLLBACK_DUMP_ABORTED",
   ScrollbackDumpTimeout = "SCROLLBACK_DUMP_TIMEOUT",
+  ScrollbackDumpFailed = "SCROLLBACK_DUMP_FAILED",
 }
 
 // ─── Base Error ─────────────────────────────────────────────────────
@@ -76,5 +77,27 @@ export class ScrollbackDumpTimeoutError extends AnyWhereTerminalError {
   ) {
     super(`Scrollback dump timed out (session ${sessionId}, request ${requestId})`, ErrorCode.ScrollbackDumpTimeout);
     this.name = "ScrollbackDumpTimeoutError";
+  }
+}
+
+/**
+ * The webview handler failed to produce a scrollback dump — typically the
+ * `SerializeAddon.serialize()` call threw, the dynamic addon import failed,
+ * or `loadAddon` rejected. The webview surfaces this back via the `error`
+ * field on `ScrollbackDumpMessage`; the coordinator rejects the pending
+ * Promise with this error so `exportBuffer` can show a toast instead of
+ * silently writing an empty file. See: external-review W2.
+ */
+export class ScrollbackDumpFailedError extends AnyWhereTerminalError {
+  constructor(
+    public readonly sessionId: string,
+    public readonly requestId: string,
+    public readonly reason: string,
+  ) {
+    super(
+      `Scrollback dump failed (session ${sessionId}, request ${requestId}): ${reason}`,
+      ErrorCode.ScrollbackDumpFailed,
+    );
+    this.name = "ScrollbackDumpFailedError";
   }
 }

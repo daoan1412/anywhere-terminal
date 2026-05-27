@@ -8,7 +8,7 @@
 //   asimov/changes/export-terminal-session/.reviews/round-1.md [W1]
 
 import * as crypto from "node:crypto";
-import { ScrollbackDumpAbortedError, ScrollbackDumpTimeoutError } from "../types/errors";
+import { ScrollbackDumpAbortedError, ScrollbackDumpFailedError, ScrollbackDumpTimeoutError } from "../types/errors";
 import type { RequestScrollbackDumpMessage } from "../types/messages";
 import type { MessageSender } from "./OutputBuffer";
 
@@ -17,6 +17,8 @@ export interface ScrollbackDumpPayload {
   data: string;
   lineCount: number;
   truncated: boolean;
+  /** When set, the webview handler failed and the coordinator rejects. */
+  error?: string;
 }
 
 /** Dependencies injected from SessionManager. */
@@ -103,6 +105,13 @@ export class ScrollbackDumpCoordinator {
     }
     clearTimeout(pending.timer);
     this.pending.delete(requestId);
+    if (payload.error !== undefined) {
+      // Webview handler failed (serialize threw, addon ctor threw, etc).
+      // Reject so `exportBuffer` surfaces a toast instead of writing an
+      // empty file. See: external-review W2.
+      pending.reject(new ScrollbackDumpFailedError(senderSessionId, requestId, payload.error));
+      return;
+    }
     pending.resolve(payload);
   }
 

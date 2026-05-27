@@ -92,10 +92,13 @@ export function createScrollbackDumpHandler(deps: ScrollbackDumpDeps): (msg: Req
         }
       },
       (err) => {
-        // Reply with empty payload so the extension's request-correlated
-        // Promise resolves — the dump coordinator awaits this and would
-        // otherwise hang. Logged for diagnosis but not user-surfaced.
+        // Reply with `error` set so the coordinator rejects the pending
+        // Promise — `exportBuffer` then surfaces a toast instead of writing
+        // a silently-empty file. `data`/`lineCount`/`truncated` are
+        // placeholders the typed schema still requires; they MUST NOT be
+        // consumed when `error` is present.
         inFlightByTab.delete(msg.tabId);
+        const reason = err instanceof Error ? err.message : String(err);
         console.error("[AnyWhere Terminal] scrollback dump failed:", err);
         for (const requestId of requestIds) {
           deps.postMessage({
@@ -105,6 +108,7 @@ export function createScrollbackDumpHandler(deps: ScrollbackDumpDeps): (msg: Req
             data: "",
             lineCount: 0,
             truncated: false,
+            error: reason,
           });
         }
       },

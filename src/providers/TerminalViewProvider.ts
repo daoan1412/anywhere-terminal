@@ -366,6 +366,7 @@ export class TerminalViewProvider implements vscode.WebviewViewProvider {
               data: message.data,
               lineCount: message.lineCount,
               truncated: message.truncated,
+              error: typeof message.error === "string" ? message.error : undefined,
             });
           }
           break;

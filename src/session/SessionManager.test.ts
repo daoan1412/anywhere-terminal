@@ -1682,6 +1682,31 @@ describe("SessionManager.requestScrollbackDump", () => {
     sm.dispose();
   });
 
+  it("[W2 external-review] reply carrying an `error` field rejects with ScrollbackDumpFailedError", async () => {
+    const sm = new SessionManager();
+    const webview = createMockWebview();
+    const sessionId = sm.createSession("sidebar", webview);
+
+    const dumpPromise = sm.requestScrollbackDump(sessionId);
+    const guard = dumpPromise.catch((err: unknown) => err);
+    const sent = webview.messages.find(
+      (m): m is { type: "requestScrollbackDump"; tabId: string; requestId: string } =>
+        typeof m === "object" && m !== null && (m as { type?: string }).type === "requestScrollbackDump",
+    )!;
+
+    sm.handleScrollbackDump(sent.requestId, sessionId, {
+      data: "",
+      lineCount: 0,
+      truncated: false,
+      error: "SerializeAddon: synthetic failure",
+    });
+
+    const err = (await guard) as Error & { reason?: string };
+    expect(err.constructor.name).toBe("ScrollbackDumpFailedError");
+    expect(err.message).toContain("SerializeAddon: synthetic failure");
+    sm.dispose();
+  });
+
   it("late reply after timeout is silently dropped (no double-settle)", async () => {
     const sm = new SessionManager();
     const webview = createMockWebview();
