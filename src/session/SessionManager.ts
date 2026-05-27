@@ -721,9 +721,12 @@ export class SessionManager {
   /**
    * Clear scrollback cache for a session. Silent no-op for unknown session IDs.
    *
-   * Also resets the headless mirror (`\x1bc` RIS) and schedules an immediate
-   * persist so the cleared state is a true privacy boundary — a restart after
-   * clear MUST NOT resurrect the cleared content. See round-1 B2.
+   * Also resets the headless mirror (`\x1bc` RIS), wipes the tracked-commands
+   * list, and schedules an immediate persist so the cleared state is a true
+   * privacy boundary — a restart after clear MUST NOT resurrect the cleared
+   * content via either the visible buffer OR the Export Command quickpick.
+   * See round-1 B2 (initial clear semantics) + external-review B2 (extending
+   * the boundary to commandTracking).
    */
   clearScrollback(sessionId: string): void {
     const session = this.sessions.get(sessionId);
@@ -732,6 +735,7 @@ export class SessionManager {
     }
     session.scrollbackCache = [];
     session.scrollbackSize = 0;
+    session.commandTracking.clear();
     this.snapshots.commitClearSnapshot(sessionId);
   }
 

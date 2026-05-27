@@ -371,6 +371,44 @@ describe("SessionManager debounced persistence", () => {
     sm.dispose();
   });
 
+  it("[B2] clearScrollback writes a snapshot index entry with NO trackedCommands (privacy boundary survives restart)", () => {
+    const fx = makeFactories();
+    const storage = makeStorageMock();
+    const sm = new SessionManager(undefined, {
+      restoreEnabled: true,
+      headlessFactory: fx.headless,
+      serializeAddonFactory: fx.serialize,
+      storage: storage as any,
+    });
+    const id = sm.createSession("sidebar", mockWebview());
+    // Drive at least one onData so the headless mirror is constructed —
+    // commitClearSnapshot has separate code paths for no-mirror (restored-
+    // exited, drops entry entirely) vs with-mirror (RIS + write empty buffer).
+    // This test targets the with-mirror path because that's the live-shell
+    // privacy boundary that B2 is about.
+    mockPtySessions[0].onData?.("x");
+
+    // Populate tracked commands so a clear would have something to wipe.
+    const session = sm.getSession(id)!;
+    session.commandTracking.open({ id: "c1", now: 100, cwd: "/tmp" });
+    session.commandTracking.setCommandLine("secret command");
+    session.commandTracking.appendOutput("sensitive output");
+    session.commandTracking.close({ exitCode: 0, now: 200 });
+
+    storage.commitIndexSync.mockClear();
+
+    sm.clearScrollback(id);
+
+    // The clear-path index entry must NOT carry trackedCommands forward.
+    const lastIndexCall = storage.commitIndexSync.mock.calls.at(-1)?.[0] as
+      | { entries: Record<string, { trackedCommands?: unknown }> }
+      | undefined;
+    const entry = lastIndexCall?.entries[id];
+    expect(entry).toBeDefined();
+    expect(entry?.trackedCommands).toBeUndefined();
+    sm.dispose();
+  });
+
   it("the setting kill-switch suppresses persistence", async () => {
     const fx = makeFactories();
     const storage = makeStorageMock();

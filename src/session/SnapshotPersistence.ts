@@ -386,7 +386,13 @@ export class SnapshotPersistence {
       return;
     }
     if (metadata) {
-      this._snapshotIndex[id] = { ...metadata, bufferBytes: 0 };
+      // Force-omit trackedCommands on the clear path. SessionManager.clearScrollback
+      // already calls commandTracking.clear() before us so the in-memory list is
+      // empty by the time generateSnapshotMetadata runs — but persisting an empty
+      // value here is defense-in-depth: any future caller of commitClearSnapshot
+      // that forgets to wipe commandTracking first still won't leak command
+      // output across the privacy boundary. See external-review B2.
+      this._snapshotIndex[id] = { ...metadata, bufferBytes: 0, trackedCommands: undefined };
     }
     try {
       this.storage.commitIndexSync({ version: 1, entries: { ...this._snapshotIndex } });

@@ -252,6 +252,20 @@ export class CommandTracker {
   }
 
   /**
+   * Wipe ALL tracked commands AND drop any in-flight command. Called from
+   * SessionManager.clearScrollback so the privacy boundary established by
+   * Cmd+K extends to the tracked-commands list: after clear, `Export Last
+   * Command` / `Export Command` must NOT be able to surface output captured
+   * before the clear. The snapshot persistence layer separately omits
+   * `trackedCommands` on the commitClearSnapshot path so cleared output
+   * doesn't survive a restart either.
+   */
+  clear(): void {
+    this._commands.length = 0;
+    this._inFlight = null;
+  }
+
+  /**
    * Enforce the per-session caps: MAX_COMMANDS_PER_SESSION entries OR
    * MAX_TOTAL_OUTPUT_PER_SESSION chars across all `output` strings. FIFO.
    */

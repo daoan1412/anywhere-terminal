@@ -129,6 +129,29 @@ describe("CommandTracker: lifecycle", () => {
     expect(tr.inFlight).toBeNull();
     expect(tr.commands).toEqual([]);
   });
+
+  it("[B2] clear() wipes BOTH completed commands AND the in-flight slot", () => {
+    const tr = new CommandTracker();
+    // Two completed commands + one in-flight.
+    tr.open({ id: nextId(), now: 1000, cwd: null });
+    tr.setCommandLine("ls");
+    tr.appendOutput("out1");
+    tr.close({ exitCode: 0, now: 1100 });
+    tr.open({ id: nextId(), now: 1200, cwd: null });
+    tr.setCommandLine("pwd");
+    tr.appendOutput("out2");
+    tr.close({ exitCode: 0, now: 1300 });
+    tr.open({ id: nextId(), now: 1400, cwd: null });
+    tr.appendOutput("in-flight");
+    expect(tr.commands).toHaveLength(2);
+    expect(tr.inFlight).not.toBeNull();
+
+    tr.clear();
+
+    expect(tr.commands).toEqual([]);
+    expect(tr.inFlight).toBeNull();
+    expect(tr.lastCompleted).toBeNull();
+  });
 });
 
 describe("CommandTracker: appendOutput cap (F4 — append-time enforcement)", () => {

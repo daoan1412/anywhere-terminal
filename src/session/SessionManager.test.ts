@@ -700,6 +700,42 @@ describe("SessionManager: clearScrollback", () => {
 
     sm.dispose();
   });
+
+  it("[B2] also wipes tracked commands so Export Last/Command cannot resurface pre-clear output", () => {
+    const sm = new SessionManager();
+    const id = sm.createSession("sidebar", createMockWebview());
+    const session = sm.getSession(id)!;
+    // Manually populate a tracked command (simulates a captured B/C → D cycle).
+    session.commandTracking.open({ id: "c1", now: 1000, cwd: "/tmp" });
+    session.commandTracking.setCommandLine("ls");
+    session.commandTracking.appendOutput("file1\nfile2\n");
+    session.commandTracking.close({ exitCode: 0, now: 2000 });
+    expect(session.commandTracking.commands).toHaveLength(1);
+
+    sm.clearScrollback(id);
+
+    expect(session.commandTracking.commands).toEqual([]);
+    expect(session.commandTracking.inFlight).toBeNull();
+    expect(sm.getLastCompletedCommand(id)).toBeNull();
+    expect(sm.getTrackedCommands(id)).toEqual([]);
+
+    sm.dispose();
+  });
+
+  it("[B2] in-flight command on the cleared session is also dropped", () => {
+    const sm = new SessionManager();
+    const id = sm.createSession("sidebar", createMockWebview());
+    const session = sm.getSession(id)!;
+    session.commandTracking.open({ id: "live", now: 1000, cwd: "/tmp" });
+    session.commandTracking.appendOutput("in-flight output");
+    expect(session.commandTracking.inFlight).not.toBeNull();
+
+    sm.clearScrollback(id);
+
+    expect(session.commandTracking.inFlight).toBeNull();
+
+    sm.dispose();
+  });
 });
 
 // ─── Terminal Number Recycling ──────────────────────────────────────
