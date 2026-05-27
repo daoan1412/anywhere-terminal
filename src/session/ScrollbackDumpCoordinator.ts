@@ -82,10 +82,23 @@ export class ScrollbackDumpCoordinator {
    * Resolve a pending request with the webview's reply. Silently ignores
    * unknown / already-settled `requestId`s (defensive against double-fires +
    * late replies after timeout).
+   *
+   * `senderSessionId` is the `tabId` echoed back by the webview in the reply
+   * payload. Pre-fix, the coordinator authenticated replies on `requestId`
+   * unguessability alone. Now we also reject any reply whose echoed sender
+   * does not match the original request target — defense in depth against a
+   * future bug that leaks a requestId across webviews. See:
+   * .reviews/round-2.md [S3].
    */
-  handleReply(requestId: string, payload: ScrollbackDumpPayload): void {
+  handleReply(requestId: string, senderSessionId: string, payload: ScrollbackDumpPayload): void {
     const pending = this.pending.get(requestId);
     if (!pending) {
+      return;
+    }
+    if (pending.sessionId !== senderSessionId) {
+      // Sender mismatch — could be a buggy webview echoing the wrong tabId
+      // or a cross-webview leak. Leave the pending entry intact so the
+      // legitimate reply or the 15s timeout still gets a chance to settle it.
       return;
     }
     clearTimeout(pending.timer);

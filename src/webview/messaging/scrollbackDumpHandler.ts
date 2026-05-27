@@ -102,11 +102,13 @@ function computeDump(deps: ScrollbackDumpDeps, tabId: string): DumpPayload {
     terminal.loadAddon(addon as unknown as { activate(t: Terminal): void; dispose(): void });
     const data = addon.serialize();
     const lineCount = terminal.buffer.normal.length;
-    // xterm's `scrollback` option caps how much we can serialise; `truncated`
-    // is true iff we hit the cap. `terminal.options.scrollback` is the
-    // configured cap (defaults to 1000). When buffer.normal.length equals it,
-    // we can't be sure no more would have fit — report `truncated: true`.
-    const scrollbackCap = terminal.options.scrollback ?? 1000;
+    // `terminal.buffer.normal.length` returns the total line count INCLUDING
+    // the visible viewport rows. The `scrollback` option caps only the
+    // scrollback portion ABOVE the viewport, so the effective cap on
+    // `buffer.normal.length` is `scrollback + rows`. Without the viewport
+    // offset, a terminal at exactly `rows` lines below cap would report
+    // `truncated: true` falsely. See: .reviews/round-2.md [W2].
+    const scrollbackCap = (terminal.options.scrollback ?? 1000) + terminal.rows;
     const truncated = lineCount >= scrollbackCap;
     return { data, lineCount, truncated };
   } finally {

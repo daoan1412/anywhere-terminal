@@ -502,10 +502,11 @@ export class SessionManager {
       outputBuffer.append(data);
       this.appendToScrollback(session, data);
       this.snapshots.recordData(session, data);
-      // Append to the in-flight tracked command (no-op when nothing is in
-      // flight). Cap is enforced inside CommandTracker.appendOutput so a
-      // never-closing command can't grow `output` past 100 KB.
-      session.commandTracking.appendOutput(data);
+      // NOTE: command-output capture is NOT done here. The OSC parser emits
+      // ordered `text`/`commandStart`/`commandEnd` events; the tracker drives
+      // `appendOutput` from the `text` event so a single PTY chunk shaped
+      // `[output][OSC_D]` cannot close the in-flight before its output is
+      // captured. See: .reviews/round-2.md [B1].
     };
 
     pty.onExit = (code: number) => {
@@ -822,9 +823,13 @@ export class SessionManager {
     return this.scrollbackDumps.request(sessionId, session.webview);
   }
 
-  /** Resolve a pending dump request with the webview's reply. */
-  handleScrollbackDump(requestId: string, payload: ScrollbackDumpPayload): void {
-    this.scrollbackDumps.handleReply(requestId, payload);
+  /**
+   * Resolve a pending dump request with the webview's reply. `senderSessionId`
+   * is the `tabId` echoed by the webview in the reply — used to authenticate
+   * the reply against the original request target. See: .reviews/round-2.md [S3].
+   */
+  handleScrollbackDump(requestId: string, senderSessionId: string, payload: ScrollbackDumpPayload): void {
+    this.scrollbackDumps.handleReply(requestId, senderSessionId, payload);
   }
 
   /** Get aggregate memory usage metrics across all sessions. */

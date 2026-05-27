@@ -54,9 +54,14 @@ const NO_TRACKED_TOAST =
   "AnyWhere Terminal: no tracked commands yet. Commands track from window reload onward and require shell integration — see Help.";
 const HELP_LABEL = "Help";
 
+// Filter extensions are DISJOINT so the user's filter choice maps unambiguously
+// to an ANSI preference via `preferenceFromExtension`. Pre-fix the Raw filter
+// included `.log`, which overlapped with the Text filter and caused the default
+// `<session>-<timestamp>.log` filename under Raw to be ANSI-stripped — spec D8
+// says filter intent should win. See: .reviews/round-2.md [W3].
 const SAVE_DIALOG_FILTERS = {
   "Text (ANSI stripped)": ["txt", "log"],
-  "Raw (ANSI preserved)": ["log", "ansi"],
+  "Raw (ANSI preserved)": ["ansi"],
 };
 
 // ─── Public entry points ────────────────────────────────────────────

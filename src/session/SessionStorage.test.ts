@@ -202,6 +202,45 @@ describe("SessionStorage", () => {
     expect(written.entries.s1.unknownFields).toBeUndefined();
   });
 
+  it("[W1] literal top-level `unknownFields` key on disk is re-bucketed, not self-promoted", () => {
+    // A corrupted / pathological sidecar that contains a literal top-level
+    // "unknownFields" key (e.g. a buggy v(N+2) build that mistakenly persisted
+    // the in-memory carry-through slot itself). With [W1] fixed, that key
+    // gets sieved into the in-memory `unknownFields` bag (where its nested
+    // contents will spread to top level on next persist) rather than being
+    // recognised as the bag itself. See: .reviews/round-2.md [W1].
+    const mem = makeFakeMemento();
+    const { fs, files } = makeFakeFs();
+    const s = new SessionStorage(mem as unknown as vscode.Memento, STORAGE_URI, fs);
+    const sidecarPath = `${SNAPS_DIR}/index.json`;
+    files.set(
+      sidecarPath,
+      JSON.stringify({
+        version: 1,
+        entries: {
+          s1: { ...makeMeta("s1"), unknownFields: { tainted: "value" } },
+        },
+      }),
+    );
+
+    const detailed = s.loadIndexDetailed();
+    expect(detailed.kind).toBe("valid");
+    if (detailed.kind !== "valid") {
+      return;
+    }
+    // The literal `unknownFields` top-level key is itself bucketed as unknown
+    // (sieved into the in-memory bag) — NOT trusted as the bag's contents.
+    expect(detailed.index.entries.s1.unknownFields).toEqual({ unknownFields: { tainted: "value" } });
+
+    // On re-persist, the key spreads back at the top level (its nested
+    // content survives, but as a CONTENT pair, not as the slot itself).
+    s.commitIndexSync(detailed.index);
+    const written = JSON.parse(files.get(sidecarPath) as string) as {
+      entries: Record<string, { unknownFields?: unknown }>;
+    };
+    expect(written.entries.s1.unknownFields).toEqual({ tainted: "value" });
+  });
+
   it("commitBufferSync and commitBufferAsync produce identical files", async () => {
     const mem = makeFakeMemento();
     const { fs, files } = makeFakeFs();

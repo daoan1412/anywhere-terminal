@@ -145,7 +145,7 @@ function makeTrackedCommand(o: Partial<TrackedCommand> = {}): TrackedCommand {
     cwd: "/srv/app",
     startedAt: 1000,
     endedAt: 2000,
-    outputBytes: 10,
+    outputChars: 10,
     outputTruncated: false,
     ...o,
   };

@@ -34,11 +34,14 @@ export interface TrackedCommand {
   /** ms-epoch when `D` closed the command. `null` while in-flight. */
   endedAt: number | null;
   /**
-   * True byte count of output observed for this command — increments on EVERY
-   * appended chunk even after `output` hits the 100 KB cap. Allows the export
-   * UI to communicate "X KB truncated".
+   * Character count (UTF-16 code units, matching JS `.length`) of output
+   * observed for this command — increments on EVERY appended chunk even
+   * after `output` hits the 100 KB cap. `outputChars - output.length`
+   * equals the count of chars discarded by the cap. Allows the export UI
+   * to communicate "X chars truncated". Not a true byte count (would
+   * undercount for multi-byte UTF-8 input). See: .reviews/round-2.md [S2].
    */
-  outputBytes: number;
+  outputChars: number;
   /** Set to `true` if any output was discarded by the 100 KB cap. */
   outputTruncated: boolean;
 }
@@ -118,9 +121,13 @@ export class CommandTracker {
   }
 
   /**
-   * Process a parsed OSC 633 event. Encapsulates the full A/B/C/D/E state
-   * machine — callers handle cwd separately (it has its own session-level
-   * sink). See: .reviews/round-1.md [W2].
+   * Process a parsed OSC event. Encapsulates the full A/B/C/D/E state machine
+   * plus the `text` segment routing introduced by [B1]: text events between
+   * OSC sequences feed `appendOutput` *in source order with* `commandStart` /
+   * `commandEnd`, so a single PTY chunk containing `[output][D]` no longer
+   * loses its output by closing the in-flight first. Callers handle `cwd`
+   * separately (it has its own session-level sink). See: .reviews/round-1.md
+   * [W2] + .reviews/round-2.md [B1].
    */
   handleEvent(event: ShellIntegrationEvent, ctx: HandleEventContext): void {
     switch (event.kind) {
@@ -137,6 +144,12 @@ export class CommandTracker {
         return;
       case "commandEnd":
         this.close({ exitCode: event.exitCode, now: ctx.now });
+        return;
+      case "text":
+        // Parser-supplied text segment between OSC sequences. `appendOutput`
+        // is a no-op when no command is in flight (prompt-rendering bytes /
+        // pre-first-command output), so we never need to gate this externally.
+        this.appendOutput(event.text);
         return;
       case "cwd":
         // cwd has its own session-level sink — tracker doesn't store cwd.
@@ -161,7 +174,7 @@ export class CommandTracker {
       cwd: params.cwd,
       startedAt: params.now,
       endedAt: null,
-      outputBytes: 0,
+      outputChars: 0,
       outputTruncated: false,
     };
   }
@@ -179,7 +192,7 @@ export class CommandTracker {
    *
    * Append-time enforcement is mandatory: a never-closing command (e.g.
    * `cat /dev/urandom`) MUST NOT grow `output.length` past 100 KB even though
-   * no `D` marker ever fires. Bytes past the cap are counted in `outputBytes`
+   * no `D` marker ever fires. Chars past the cap are counted in `outputChars`
    * (for UI reporting) and trigger `outputTruncated`.
    */
   appendOutput(data: string): void {
@@ -187,13 +200,13 @@ export class CommandTracker {
     if (!cmd) {
       return;
     }
-    const byteLen = data.length;
-    cmd.outputBytes += byteLen;
+    const charLen = data.length;
+    cmd.outputChars += charLen;
     if (cmd.outputTruncated) {
       return; // Already over cap — don't append more.
     }
     const remaining = MAX_OUTPUT_PER_COMMAND - cmd.output.length;
-    if (byteLen <= remaining) {
+    if (charLen <= remaining) {
       cmd.output += data;
       return;
     }

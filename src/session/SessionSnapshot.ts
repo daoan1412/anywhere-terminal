@@ -70,7 +70,15 @@ export interface SessionSnapshotMetadata {
   unknownFields?: Record<string, unknown>;
 }
 
-/** Keys that this build defines on `SessionSnapshotMetadata`. */
+/**
+ * Keys that this build defines as TOP-LEVEL persisted fields of
+ * `SessionSnapshotMetadata`. Intentionally EXCLUDES `unknownFields` — the
+ * in-memory carry-through slot is never written to disk under its own name
+ * (only its contents are spread at the top level by `expandMetadataForPersist`).
+ * A literal top-level `unknownFields` key in raw JSON therefore gets bucketed
+ * into the sieve's `unknown` bag and re-spread on the next persist instead of
+ * self-poisoning the slot. See: .reviews/round-2.md [W1].
+ */
 export const KNOWN_METADATA_KEYS: ReadonlySet<string> = new Set<keyof SessionSnapshotMetadata>([
   "sessionId",
   "panelId",
@@ -91,7 +99,6 @@ export const KNOWN_METADATA_KEYS: ReadonlySet<string> = new Set<keyof SessionSna
   "shellExited",
   "exitCode",
   "trackedCommands",
-  "unknownFields",
 ]);
 
 /**

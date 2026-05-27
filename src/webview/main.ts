@@ -444,14 +444,30 @@ const routeMessage = createMessageRouter({
     // to the matching split-leaf; CSS animation auto-fades. We force a
     // reflow between remove + re-add so a rapid second click restarts the
     // animation (same pattern as onInsertPathEffect above).
+    //
+    // Listener hygiene: remove the prior `animationend` handler before
+    // re-registering so rapid repeated triggers don't accumulate stacked
+    // `{once:true}` listeners (they would all fire on the final animationend
+    // — harmless DOM-wise but unbounded registration). See: .reviews/
+    // round-2.md [S1].
     const leaf = document.querySelector<HTMLElement>(`.split-leaf[data-session-id="${CSS.escape(msg.sessionId)}"]`);
     if (!leaf) {
       return;
     }
-    leaf.classList.remove("export-flash");
-    void leaf.offsetWidth;
-    leaf.classList.add("export-flash");
-    leaf.addEventListener("animationend", () => leaf.classList.remove("export-flash"), { once: true });
+    type FlashLeaf = HTMLElement & { __exportFlashHandler?: () => void };
+    const flashLeaf = leaf as FlashLeaf;
+    if (flashLeaf.__exportFlashHandler) {
+      flashLeaf.removeEventListener("animationend", flashLeaf.__exportFlashHandler);
+    }
+    const handler = (): void => {
+      flashLeaf.classList.remove("export-flash");
+      flashLeaf.__exportFlashHandler = undefined;
+    };
+    flashLeaf.__exportFlashHandler = handler;
+    flashLeaf.classList.remove("export-flash");
+    void flashLeaf.offsetWidth;
+    flashLeaf.classList.add("export-flash");
+    flashLeaf.addEventListener("animationend", handler, { once: true });
   },
   onRestoreFromSnapshot(msg) {
     // Replay a persisted snapshot into an xterm instance. The typical sequence

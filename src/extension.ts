@@ -204,7 +204,16 @@ export function activate(context: vscode.ExtensionContext) {
   // `undefined` lets the downstream command surface NO_FOCUS_TOAST naturally.
   // See: .reviews/round-1.md [W4].
   const resolveExportSessionId = (ctx?: { paneSessionId?: string }): string | undefined => {
-    if (ctx?.paneSessionId && sessionManager.getSession(ctx.paneSessionId)) {
+    // `typeof === "string"` (not just truthy) defends against a malformed
+    // right-click invocation delivering `paneSessionId` as a number / array /
+    // object — the truthy chain alone would let those slip through and break
+    // the downstream `sessionId: string` contract. See: .reviews/round-2.md [W4].
+    if (
+      ctx !== null &&
+      typeof ctx === "object" &&
+      typeof ctx?.paneSessionId === "string" &&
+      sessionManager.getSession(ctx.paneSessionId)
+    ) {
       return ctx.paneSessionId;
     }
     return getFocusedProvider().getActiveSessionId();

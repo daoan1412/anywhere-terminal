@@ -73,7 +73,7 @@ function makeCmd(overrides: Partial<TrackedCommand> = {}): TrackedCommand {
     cwd: "/srv/app",
     startedAt: 1000,
     endedAt: 2000,
-    outputBytes: 15,
+    outputChars: 15,
     outputTruncated: false,
     ...overrides,
   };
@@ -98,11 +98,11 @@ describe("formatCommandBlock", () => {
   it("appends a truncation footer when outputTruncated=true", () => {
     const cmd = makeCmd({
       output: "x".repeat(100_000),
-      outputBytes: 1_500_000,
+      outputChars: 1_500_000,
       outputTruncated: true,
     });
     const out = formatCommandBlock(cmd);
-    expect(out).toContain("[output truncated — total 1500000 bytes, captured 100000]");
+    expect(out).toContain("[output truncated — produced 1500000 chars, captured 100000]");
   });
 });
 

@@ -1500,7 +1500,7 @@ describe("SessionManager.requestScrollbackDump", () => {
     expect(sent!.tabId).toBe(sessionId);
     expect(sent!.requestId).toBeTruthy();
 
-    sm.handleScrollbackDump(sent!.requestId, {
+    sm.handleScrollbackDump(sent!.requestId, sessionId, {
       data: "hello world",
       lineCount: 42,
       truncated: false,
@@ -1566,7 +1566,7 @@ describe("SessionManager.requestScrollbackDump", () => {
       (m): m is { type: "requestScrollbackDump"; tabId: string; requestId: string } =>
         typeof m === "object" && m !== null && (m as { type?: string }).type === "requestScrollbackDump",
     )!;
-    sm.handleScrollbackDump(sent.requestId, { data: "x", lineCount: 1, truncated: false });
+    sm.handleScrollbackDump(sent.requestId, sessionId, { data: "x", lineCount: 1, truncated: false });
     const result = await dumpPromise;
     expect(result.data).toBe("x");
     sm.dispose();
@@ -1587,8 +1587,8 @@ describe("SessionManager.requestScrollbackDump", () => {
     expect(requests).toHaveLength(2);
     expect(requests[0].requestId).not.toBe(requests[1].requestId);
 
-    sm.handleScrollbackDump(requests[1].requestId, { data: "from-b", lineCount: 2, truncated: false });
-    sm.handleScrollbackDump(requests[0].requestId, { data: "from-a", lineCount: 1, truncated: false });
+    sm.handleScrollbackDump(requests[1].requestId, sessionId, { data: "from-b", lineCount: 2, truncated: false });
+    sm.handleScrollbackDump(requests[0].requestId, sessionId, { data: "from-a", lineCount: 1, truncated: false });
 
     const [resA, resB] = await Promise.all([a, b]);
     expect(resA.data).toBe("from-a");
@@ -1599,8 +1599,50 @@ describe("SessionManager.requestScrollbackDump", () => {
   it("handleScrollbackDump with unknown requestId is a silent no-op", () => {
     const sm = new SessionManager();
     expect(() =>
-      sm.handleScrollbackDump("never-requested", { data: "", lineCount: 0, truncated: false }),
+      sm.handleScrollbackDump("never-requested", "any-session", { data: "", lineCount: 0, truncated: false }),
     ).not.toThrow();
+    sm.dispose();
+  });
+
+  // [S3] — reject replies whose echoed tabId doesn't match the original
+  // request target. See: .reviews/round-2.md [S3].
+  it("[S3] handleScrollbackDump with mismatched senderSessionId is silently dropped (legitimate reply or timeout still wins)", async () => {
+    const sm = new SessionManager();
+    const webview = createMockWebview();
+    const sessionId = sm.createSession("sidebar", webview);
+
+    const dumpPromise = sm.requestScrollbackDump(sessionId);
+    let settled = false;
+    dumpPromise.then(
+      () => {
+        settled = true;
+      },
+      () => {
+        settled = true;
+      },
+    );
+    const sent = webview.messages.find(
+      (m): m is { type: "requestScrollbackDump"; tabId: string; requestId: string } =>
+        typeof m === "object" && m !== null && (m as { type?: string }).type === "requestScrollbackDump",
+    )!;
+
+    // A foreign senderSessionId is dropped — pending entry stays alive.
+    sm.handleScrollbackDump(sent.requestId, "wrong-session-id", {
+      data: "spoofed",
+      lineCount: 99,
+      truncated: false,
+    });
+    await Promise.resolve();
+    expect(settled).toBe(false);
+
+    // The legitimate sender then resolves it.
+    sm.handleScrollbackDump(sent.requestId, sessionId, {
+      data: "legitimate",
+      lineCount: 1,
+      truncated: false,
+    });
+    const result = await dumpPromise;
+    expect(result.data).toBe("legitimate");
     sm.dispose();
   });
 
@@ -1620,7 +1662,7 @@ describe("SessionManager.requestScrollbackDump", () => {
         typeof m === "object" && m !== null && (m as { type?: string }).type === "requestScrollbackDump",
     )!;
     expect(() =>
-      sm.handleScrollbackDump(sent.requestId, { data: "late", lineCount: 1, truncated: false }),
+      sm.handleScrollbackDump(sent.requestId, sessionId, { data: "late", lineCount: 1, truncated: false }),
     ).not.toThrow();
     sm.dispose();
   });

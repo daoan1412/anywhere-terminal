@@ -451,11 +451,12 @@ export class TerminalEditorProvider {
         case "scrollbackDump":
           if (
             typeof message.requestId === "string" &&
+            typeof message.tabId === "string" &&
             typeof message.data === "string" &&
             typeof message.lineCount === "number" &&
             typeof message.truncated === "boolean"
           ) {
-            this.sessionManager.handleScrollbackDump(message.requestId, {
+            this.sessionManager.handleScrollbackDump(message.requestId, message.tabId, {
               data: message.data,
               lineCount: message.lineCount,
               truncated: message.truncated,

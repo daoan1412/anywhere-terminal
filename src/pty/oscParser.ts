@@ -11,11 +11,14 @@
 import * as path from "node:path";
 import type { ShellIntegrationEvent, ShellIntegrationSink } from "./ShellIntegrationEvents";
 
-/** Maximum buffer size before truncation. */
+/**
+ * Maximum size of a single partial OSC sequence retained across feeds. A
+ * partial OSC larger than this is dropped (assumed garbage); the next chunk's
+ * scan resumes from a fresh state. Plain text (non-OSC) is emitted as it is
+ * found in each feed and never accumulates past one chunk boundary, so this
+ * cap bounds ONLY partial OSC payloads.
+ */
 const MAX_PENDING = 4096;
-
-/** Bytes retained after MAX_PENDING overflow (room for a fresh ESC ] to start). */
-const TRUNCATE_TO = 128;
 
 /** Pure-state OSC parser. One instance per PtySession. */
 export interface OscParser {
@@ -34,9 +37,10 @@ export interface OscParser {
  * Create a new OSC parser instance.
  *
  * Maintains a pending buffer across feed() calls so escape sequences split
- * across chunks are detected correctly. The buffer is bounded at MAX_PENDING
- * bytes; on overflow the open OSC is discarded and scanning resumes at the
- * next ESC ] boundary.
+ * across chunks are detected correctly. Plain text segments between OSC
+ * sequences are emitted as `{ kind: "text", text }` events so consumers can
+ * route them into the tracked-command's output buffer in order — see [B1].
+ * A partial OSC larger than MAX_PENDING is discarded.
  */
 export function createOscParser(): OscParser {
   let pending = "";
@@ -47,64 +51,103 @@ export function createOscParser(): OscParser {
       nonce = n;
     },
     feed(chunk: string, onEvent: ShellIntegrationSink): void {
-      pending += chunk;
-      if (pending.length > MAX_PENDING) {
-        pending = pending.slice(-TRUNCATE_TO);
-      }
+      // Combine retained partial-OSC bytes from the previous feed with the
+      // current chunk into a single working buffer. We process this buffer
+      // end-to-end in this call and save only any trailing partial OSC (or a
+      // lone trailing ESC that might start one) back to `pending`.
+      const buf = pending + chunk;
+      pending = "";
 
       let i = 0;
+      let textStart = 0;
+
+      const emitText = (from: number, to: number): void => {
+        if (to > from) {
+          onEvent({ kind: "text", text: buf.slice(from, to) });
+        }
+      };
+
+      // Save the partial OSC at `escIdx` for the next feed. Drop entirely
+      // when it exceeds MAX_PENDING — a partial that long is assumed garbage.
+      const retainPartial = (escIdx: number): void => {
+        const partial = buf.slice(escIdx);
+        if (partial.length > MAX_PENDING) {
+          // Drop the partial; preceding text was already emitted by the caller.
+          pending = "";
+        } else {
+          pending = partial;
+        }
+      };
+
       while (true) {
-        const escIdx = pending.indexOf("\x1b]", i);
+        const escIdx = buf.indexOf("\x1b]", i);
         if (escIdx === -1) {
-          pending = pending.slice(-1);
+          // No more `\x1b]` in the remaining buffer. Emit pending text, keeping
+          // a lone trailing ESC for the next feed (it might start a new OSC).
+          const lastIdx = buf.length - 1;
+          if (lastIdx >= 0 && buf.charCodeAt(lastIdx) === 0x1b) {
+            emitText(textStart, lastIdx);
+            pending = "\x1b";
+          } else {
+            emitText(textStart, buf.length);
+            pending = "";
+          }
           return;
         }
 
         const afterEsc = escIdx + 2;
         let p = afterEsc;
-        while (p < pending.length && pending[p] >= "0" && pending[p] <= "9") {
+        while (p < buf.length && buf[p] >= "0" && buf[p] <= "9") {
           p++;
         }
 
         if (p === afterEsc) {
-          if (p >= pending.length) {
-            pending = pending.slice(escIdx);
+          if (p >= buf.length) {
+            // Mid-buffer at `\x1b]` — keep partial for next feed.
+            emitText(textStart, escIdx);
+            retainPartial(escIdx);
             return;
           }
+          // Malformed `\x1b]<non-digit>` — treat as text and resume scanning
+          // past the `\x1b`. The text emission for these bytes happens on the
+          // next OSC find or at end-of-buffer.
           i = escIdx + 1;
           continue;
         }
 
-        if (p >= pending.length) {
-          pending = pending.slice(escIdx);
+        if (p >= buf.length) {
+          // Mid-digit-sequence — keep partial for next feed.
+          emitText(textStart, escIdx);
+          retainPartial(escIdx);
           return;
         }
 
-        if (pending[p] !== ";") {
+        if (buf[p] !== ";") {
+          // Malformed `\x1b]<digits><non-semi>` — text bytes, resume.
           i = escIdx + 1;
           continue;
         }
 
-        const oscNum = pending.slice(afterEsc, p);
+        const oscNum = buf.slice(afterEsc, p);
         const payloadStart = p + 1;
 
         let termIdx = -1;
         let termLen = 0;
         let q = payloadStart;
         let needMore = false;
-        while (q < pending.length) {
-          const c = pending[q];
+        while (q < buf.length) {
+          const c = buf[q];
           if (c === "\x07") {
             termIdx = q;
             termLen = 1;
             break;
           }
           if (c === "\x1b") {
-            if (q + 1 >= pending.length) {
+            if (q + 1 >= buf.length) {
               needMore = true;
               break;
             }
-            if (pending[q + 1] === "\\") {
+            if (buf[q + 1] === "\\") {
               termIdx = q;
               termLen = 2;
               break;
@@ -113,17 +156,17 @@ export function createOscParser(): OscParser {
           q++;
         }
 
-        if (needMore) {
-          pending = pending.slice(escIdx);
+        if (needMore || termIdx === -1) {
+          emitText(textStart, escIdx);
+          retainPartial(escIdx);
           return;
         }
 
-        if (termIdx === -1) {
-          pending = pending.slice(escIdx);
-          return;
-        }
+        // Successfully parsed an OSC. Emit text accumulated before it, then
+        // the OSC event, then advance.
+        emitText(textStart, escIdx);
 
-        const payload = pending.slice(payloadStart, termIdx);
+        const payload = buf.slice(payloadStart, termIdx);
 
         if (oscNum === "7") {
           handleOsc7(payload, onEvent);
@@ -131,9 +174,10 @@ export function createOscParser(): OscParser {
           handleOsc633(payload, onEvent, nonce);
         }
         // Other OSC numbers (0 title, 8 hyperlink, 52 clipboard, 1337 iTerm,
-        // etc.) are silently skipped.
+        // etc.) are silently consumed — neither emitted as text nor as event.
 
         i = termIdx + termLen;
+        textStart = i;
       }
     },
   };

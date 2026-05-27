@@ -300,7 +300,7 @@ describe("SessionManager.generateSnapshotMetadata", () => {
       cwd: "/tmp",
       startedAt: 100,
       endedAt: 200,
-      outputBytes: 7,
+      outputChars: 7,
       outputTruncated: false,
     };
     const inFlight = {
@@ -311,7 +311,7 @@ describe("SessionManager.generateSnapshotMetadata", () => {
       cwd: "/tmp",
       startedAt: 300,
       endedAt: null,
-      outputBytes: 3,
+      outputChars: 3,
       outputTruncated: false,
     };
     const id = sm.createSession("anywhereTerminal.sidebar", mockWebview(), {

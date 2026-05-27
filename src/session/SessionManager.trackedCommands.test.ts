@@ -33,7 +33,7 @@ describe("CommandTracker: lifecycle", () => {
       cwd: "/home/user",
       startedAt: 1000,
       endedAt: null,
-      outputBytes: 0,
+      outputChars: 0,
       outputTruncated: false,
     });
     expect(tr.commands).toEqual([]);
@@ -76,7 +76,7 @@ describe("CommandTracker: lifecycle", () => {
       cwd: "/srv",
       startedAt: 1000,
       endedAt: 2000,
-      outputBytes: "file1\nfile2\n".length,
+      outputChars: "file1\nfile2\n".length,
       outputTruncated: false,
     });
   });
@@ -111,7 +111,7 @@ describe("CommandTracker: appendOutput cap (F4 — append-time enforcement)", ()
     tr.appendOutput("hello");
     tr.appendOutput(" world");
     expect(tr.inFlight?.output).toBe("hello world");
-    expect(tr.inFlight?.outputBytes).toBe(11);
+    expect(tr.inFlight?.outputChars).toBe(11);
     expect(tr.inFlight?.outputTruncated).toBe(false);
   });
 
@@ -121,7 +121,7 @@ describe("CommandTracker: appendOutput cap (F4 — append-time enforcement)", ()
     const blob = "x".repeat(MAX_OUTPUT_PER_COMMAND + 1234);
     tr.appendOutput(blob);
     expect(tr.inFlight?.output.length).toBe(MAX_OUTPUT_PER_COMMAND);
-    expect(tr.inFlight?.outputBytes).toBe(MAX_OUTPUT_PER_COMMAND + 1234);
+    expect(tr.inFlight?.outputChars).toBe(MAX_OUTPUT_PER_COMMAND + 1234);
     expect(tr.inFlight?.outputTruncated).toBe(true);
   });
 
@@ -132,7 +132,7 @@ describe("CommandTracker: appendOutput cap (F4 — append-time enforcement)", ()
     expect(tr.inFlight?.outputTruncated).toBe(false);
     tr.appendOutput("b".repeat(500));
     expect(tr.inFlight?.output.length).toBe(MAX_OUTPUT_PER_COMMAND);
-    expect(tr.inFlight?.outputBytes).toBe(MAX_OUTPUT_PER_COMMAND - 100 + 500);
+    expect(tr.inFlight?.outputChars).toBe(MAX_OUTPUT_PER_COMMAND - 100 + 500);
     expect(tr.inFlight?.outputTruncated).toBe(true);
   });
 
@@ -143,7 +143,7 @@ describe("CommandTracker: appendOutput cap (F4 — append-time enforcement)", ()
     const trimmedLen = tr.inFlight!.output.length;
     tr.appendOutput("y".repeat(5000));
     expect(tr.inFlight?.output.length).toBe(trimmedLen);
-    expect(tr.inFlight?.outputBytes).toBe(MAX_OUTPUT_PER_COMMAND + 100 + 5000);
+    expect(tr.inFlight?.outputChars).toBe(MAX_OUTPUT_PER_COMMAND + 100 + 5000);
   });
 
   it("never-closing command (cat /dev/urandom equivalent) stays under 100 KB", () => {
@@ -155,7 +155,7 @@ describe("CommandTracker: appendOutput cap (F4 — append-time enforcement)", ()
     }
     expect(tr.inFlight?.output.length).toBe(MAX_OUTPUT_PER_COMMAND);
     expect(tr.inFlight?.outputTruncated).toBe(true);
-    expect(tr.inFlight?.outputBytes).toBe(10_240_000);
+    expect(tr.inFlight?.outputChars).toBe(10_240_000);
   });
 
   it("appendOutput is a no-op when nothing is in flight", () => {
@@ -305,6 +305,41 @@ describe("CommandTracker: handleEvent (W2 — full state machine)", () => {
     expect(tr.inFlight).toBeNull();
     expect(tr.commands).toEqual([]);
   });
+
+  // ─── [B1] regression: text events drive appendOutput in source order ──
+  // See: asimov/changes/export-terminal-session/.reviews/round-2.md [B1].
+  // The parser emits `text` between OSC sequences; `appendOutput` must run
+  // BEFORE `commandEnd` closes the in-flight so a single-chunk command
+  // `[B][output][D]` doesn't lose its output.
+
+  it("[B1] text event captures output INTO the in-flight command", () => {
+    const tr = new CommandTracker();
+    tr.handleEvent({ kind: "commandStart" }, ctx);
+    tr.handleEvent({ kind: "text", text: "hello world\n" }, ctx);
+    expect(tr.inFlight?.output).toBe("hello world\n");
+  });
+
+  it("[B1] text BEFORE commandStart is dropped (no in-flight)", () => {
+    const tr = new CommandTracker();
+    tr.handleEvent({ kind: "text", text: "prompt-rendering bytes" }, ctx);
+    expect(tr.inFlight).toBeNull();
+    expect(tr.commands).toEqual([]);
+  });
+
+  it("[B1] full single-chunk command lifecycle preserves output", () => {
+    const tr = new CommandTracker();
+    tr.handleEvent({ kind: "promptStart" }, ctx);
+    tr.handleEvent({ kind: "commandStart" }, ctx);
+    tr.handleEvent({ kind: "commandLine", commandLine: "pwd", nonceValid: true }, ctx);
+    tr.handleEvent({ kind: "text", text: "/home/user\n" }, ctx);
+    tr.handleEvent({ kind: "commandEnd", exitCode: 0 }, { ...ctx, now: 2000 });
+    expect(tr.commands).toHaveLength(1);
+    expect(tr.commands[0]).toMatchObject({
+      commandLine: "pwd",
+      output: "/home/user\n",
+      exitCode: 0,
+    });
+  });
 });
 
 describe("CommandTracker constructor (hydrate)", () => {
@@ -317,7 +352,7 @@ describe("CommandTracker constructor (hydrate)", () => {
       cwd: "/tmp",
       startedAt: 100,
       endedAt: 200,
-      outputBytes: output.length,
+      outputChars: output.length,
       outputTruncated: false,
     };
   }
@@ -357,7 +392,7 @@ describe("CommandTracker constructor (hydrate)", () => {
     const big = "z".repeat(100_000);
     const persisted: TrackedCommand[] = [];
     for (let i = 0; i < 11; i++) {
-      persisted.push({ ...completed(`big-${i}`, big), outputBytes: big.length });
+      persisted.push({ ...completed(`big-${i}`, big), outputChars: big.length });
     }
     const tr = new CommandTracker(persisted);
     const total = tr.commands.reduce((acc, c) => acc + c.output.length, 0);

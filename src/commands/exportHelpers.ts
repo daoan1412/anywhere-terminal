@@ -73,7 +73,7 @@ export function formatCommandBlock(cmd: TrackedCommand): string {
   const exit = cmd.exitCode === null ? "?" : String(cmd.exitCode);
   const cwd = cmd.cwd ?? "?";
   const truncatedSuffix = cmd.outputTruncated
-    ? `\n\n[output truncated — total ${cmd.outputBytes} bytes, captured ${cmd.output.length}]`
+    ? `\n\n[output truncated — produced ${cmd.outputChars} chars, captured ${cmd.output.length}]`
     : "";
   return `$ ${cmdLine}\n[exit ${exit}] [cwd ${cwd}]\n\n${cmd.output}${truncatedSuffix}`;
 }

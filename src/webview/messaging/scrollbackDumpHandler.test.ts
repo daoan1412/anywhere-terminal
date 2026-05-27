@@ -12,6 +12,7 @@ interface FakeTerminal {
   serialised: string;
   bufferLength: number;
   scrollbackCap: number;
+  rows: number;
   // Match the shape the handler reads.
   buffer: { normal: { length: number } };
   options: { scrollback: number };
@@ -23,6 +24,7 @@ function makeTerminal(opts?: Partial<FakeTerminal>): FakeTerminal {
     serialised: "line1\r\nline2\r\nline3\r\n",
     bufferLength: 3,
     scrollbackCap: 1000,
+    rows: 24,
     loadAddon() {
       /* no-op for tests */
     },
@@ -100,13 +102,29 @@ describe("scrollbackDumpHandler: happy path", () => {
     ]);
   });
 
-  it("reports truncated=true when buffer length equals scrollback cap", () => {
-    const terminals = new Map([["tab-1", makeTerminal({ bufferLength: 5000, scrollbackCap: 5000 })]]);
+  it("reports truncated=true when buffer length reaches scrollback cap + viewport rows", () => {
+    // The effective cap on `buffer.normal.length` is `scrollback + rows` —
+    // see W2 in .reviews/round-2.md. lineCount === scrollback + rows is the
+    // boundary that signals "at cap, may be truncating".
+    const terminals = new Map([["tab-1", makeTerminal({ bufferLength: 5024, scrollbackCap: 5000, rows: 24 })]]);
     const posted: ScrollbackDumpMessage[] = [];
     const handler = createScrollbackDumpHandler(makeDeps({ terminals, posted }));
     handler({ type: "requestScrollbackDump", tabId: "tab-1", requestId: "req-1" });
     expect(posted[0].truncated).toBe(true);
-    expect(posted[0].lineCount).toBe(5000);
+    expect(posted[0].lineCount).toBe(5024);
+  });
+
+  it("[W2] does NOT report truncated when buffer is exactly `rows` lines below the scrollback cap", () => {
+    // Pre-fix, a terminal with `rows=24, scrollback=1000, bufferLength=1000`
+    // (i.e. 1000-24 = 976 scrollback lines + 24 viewport = 1000 lines)
+    // wrongly reported truncated=true. The viewport-offset correction makes
+    // this case correctly report false.
+    const terminals = new Map([["tab-1", makeTerminal({ bufferLength: 1000, scrollbackCap: 1000, rows: 24 })]]);
+    const posted: ScrollbackDumpMessage[] = [];
+    const handler = createScrollbackDumpHandler(makeDeps({ terminals, posted }));
+    handler({ type: "requestScrollbackDump", tabId: "tab-1", requestId: "req-1" });
+    expect(posted[0].truncated).toBe(false);
+    expect(posted[0].lineCount).toBe(1000);
   });
 });
 

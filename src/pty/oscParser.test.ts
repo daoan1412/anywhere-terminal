@@ -464,7 +464,7 @@ describe("oscParser: OSC 633 markers", () => {
     expect(events).toEqual([]);
   });
 
-  it("full command lifecycle A → B → E → C → D;0 in one feed", () => {
+  it("full command lifecycle A → B → E → text → C → D;0 in one feed", () => {
     const parser = createOscParser();
     parser.setNonce("nonce-xyz");
     const events: ShellIntegrationEvent[] = [];
@@ -480,6 +480,7 @@ describe("oscParser: OSC 633 markers", () => {
       { kind: "promptStart" },
       { kind: "commandStart" }, // B
       { kind: "commandLine", commandLine: "pnpm test", nonceValid: true },
+      { kind: "text", text: "output from pnpm test...\n" },
       { kind: "commandStart" }, // C — consumer must dedupe
       { kind: "commandEnd", exitCode: 0 },
     ]);
@@ -507,7 +508,98 @@ describe("oscParser: OSC 633 markers", () => {
       const events: ShellIntegrationEvent[] = [];
       parser.feed(seq.slice(0, offset), eventsOf(events));
       parser.feed(seq.slice(offset), eventsOf(events));
-      expect(events, `split at offset ${offset}`).toEqual([{ kind: "commandEnd", exitCode: 0 }]);
+      // Filter text events that may straddle the split.
+      const nonText = events.filter((e) => e.kind !== "text");
+      expect(nonText, `split at offset ${offset}`).toEqual([{ kind: "commandEnd", exitCode: 0 }]);
     }
+  });
+});
+
+// ─── Text-segment emission ([B1]) ────────────────────────────────────
+//
+// The parser MUST emit `text` events for every non-OSC byte range between
+// (or before / after) consumed OSC sequences. This lets downstream
+// `CommandTracker.handleEvent` route output INTO the in-flight command in
+// source order, so a single PTY chunk shaped `[B][output][D]` cannot close
+// the tracker before its output is captured. See:
+// asimov/changes/export-terminal-session/.reviews/round-2.md [B1].
+
+describe("oscParser: text-segment emission ([B1])", () => {
+  it("emits a single text event for a chunk containing only plain output", () => {
+    const parser = createOscParser();
+    const events: ShellIntegrationEvent[] = [];
+    parser.feed("hello world\n", eventsOf(events));
+    expect(events).toEqual([{ kind: "text", text: "hello world\n" }]);
+  });
+
+  it("emits no text event for an empty chunk", () => {
+    const parser = createOscParser();
+    const events: ShellIntegrationEvent[] = [];
+    parser.feed("", eventsOf(events));
+    expect(events).toEqual([]);
+  });
+
+  it("emits text BEFORE, BETWEEN, and AFTER OSC sequences in one feed", () => {
+    const parser = createOscParser();
+    const events: ShellIntegrationEvent[] = [];
+    const stream = `before${osc633("B")}middle${osc633("D;0")}after`;
+    parser.feed(stream, eventsOf(events));
+    expect(events).toEqual([
+      { kind: "text", text: "before" },
+      { kind: "commandStart" },
+      { kind: "text", text: "middle" },
+      { kind: "commandEnd", exitCode: 0 },
+      { kind: "text", text: "after" },
+    ]);
+  });
+
+  it("[B1] single-chunk `[B][output][D]` preserves the output text BEFORE the D event", () => {
+    const parser = createOscParser();
+    const events: ShellIntegrationEvent[] = [];
+    parser.feed(`${osc633("B")}/home/user\n${osc633("D;0")}`, eventsOf(events));
+    // Order is the critical assertion — text MUST land between commandStart
+    // and commandEnd, not be lost entirely.
+    expect(events).toEqual([
+      { kind: "commandStart" },
+      { kind: "text", text: "/home/user\n" },
+      { kind: "commandEnd", exitCode: 0 },
+    ]);
+  });
+
+  it("malformed `\\x1b]<non-digit>` bytes are emitted as text (not silently dropped)", () => {
+    const parser = createOscParser();
+    const events: ShellIntegrationEvent[] = [];
+    parser.feed("\x1b]not-an-osc\x07after", eventsOf(events));
+    // The malformed `\x1b]not-an-osc\x07after` is all garbage text from the
+    // tracker's perspective; the parser emits it as ONE text event.
+    expect(events).toEqual([{ kind: "text", text: "\x1b]not-an-osc\x07after" }]);
+  });
+
+  it("trailing lone ESC is held across feeds (not duplicated as text)", () => {
+    const parser = createOscParser();
+    const events: ShellIntegrationEvent[] = [];
+    parser.feed("hello\x1b", eventsOf(events));
+    parser.feed("]7;file:///x\x07world", eventsOf(events));
+    expect(events).toEqual([
+      { kind: "text", text: "hello" },
+      { kind: "cwd", cwd: "/x" },
+      { kind: "text", text: "world" },
+    ]);
+  });
+
+  it("OSC payload bytes are NEVER leaked as text (regression — bytes inside a consumed OSC)", () => {
+    const parser = createOscParser();
+    const events: ShellIntegrationEvent[] = [];
+    parser.feed(osc633("E;ls -la"), eventsOf(events));
+    expect(events).toEqual([{ kind: "commandLine", commandLine: "ls -la", nonceValid: false }]);
+  });
+
+  it("oversized partial OSC is dropped without leaking its bytes as text", () => {
+    const parser = createOscParser();
+    const events: ShellIntegrationEvent[] = [];
+    // Unterminated OSC 7 of ~5000 chars: the entire partial is dropped.
+    parser.feed(`prefix\x1b]7;file:///${"A".repeat(5000)}`, eventsOf(events));
+    // Only the pre-OSC "prefix" text fires; the partial OSC bytes are gone.
+    expect(events).toEqual([{ kind: "text", text: "prefix" }]);
   });
 });
