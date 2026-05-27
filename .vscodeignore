@@ -4,6 +4,7 @@
 # Include only what's needed in the VSIX
 !dist/**
 !media/**
+!resources/**
 !package.json
 !README.md
 !CHANGELOG.md

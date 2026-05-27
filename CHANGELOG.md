@@ -4,6 +4,12 @@ All notable changes to **AnyWhere Terminal** are documented in this file.
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.14.1] — 2026-05-27
+
+### Fixed
+
+- **Shell integration scripts now ship with the VSIX.** `0.14.0` excluded `resources/shell-integration/*` from the published package via a missing `.vscodeignore` allowlist entry, breaking every shell-integration injection at startup with `ENOENT` when the injector tried to copy `shellIntegration-env.zsh` etc. into the per-session temp ZDOTDIR. Added `!resources/**` to `.vscodeignore` and a `build:check-vsix` gate that runs `vsce ls` and asserts every runtime-required file is in the include set — wired into `pnpm package` so the same class of regression cannot ship again.
+
 ## [0.14.0] — 2026-05-27
 
 ### Added
