@@ -53,12 +53,18 @@ export function evictIndex(index: SessionSnapshotsIndex, now: number): EvictResu
     let latest = 0;
     let oversized = false;
     for (const [, meta] of entries) {
-      if (meta.snapshotAt > latest) latest = meta.snapshotAt;
-      if (meta.bufferBytes > SNAPSHOT_MAX_BUFFER_BYTES) oversized = true;
+      if (meta.snapshotAt > latest) {
+        latest = meta.snapshotAt;
+      }
+      if (meta.bufferBytes > SNAPSHOT_MAX_BUFFER_BYTES) {
+        oversized = true;
+      }
     }
     const aged = now - latest >= SNAPSHOT_MAX_AGE_MS;
     if (aged || oversized) {
-      for (const [sessionId] of entries) dropped.push(sessionId);
+      for (const [sessionId] of entries) {
+        dropped.push(sessionId);
+      }
       continue;
     }
     surviving.push({ latest, entries });
@@ -75,7 +81,9 @@ export function evictIndex(index: SessionSnapshotsIndex, now: number): EvictResu
   let kept = 0;
   for (const group of surviving) {
     if (kept + group.entries.length > SNAPSHOT_MAX_COUNT) {
-      for (const [sessionId] of group.entries) dropped.push(sessionId);
+      for (const [sessionId] of group.entries) {
+        dropped.push(sessionId);
+      }
       continue;
     }
     for (const [sessionId, meta] of group.entries) {

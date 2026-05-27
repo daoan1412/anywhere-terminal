@@ -50,6 +50,89 @@ export interface SessionSnapshotMetadata {
    * See: asimov/changes/export-terminal-session/design.md D6 (follow-up).
    */
   trackedCommands?: TrackedCommand[];
+
+  /**
+   * Forward-evolution slot — keys present in the persisted JSON that this
+   * build does not recognise. Populated on load by sieving the raw metadata
+   * against the known-key set; expanded back at the top level on persist so
+   * a round-trip through an older build does not silently drop newer fields.
+   *
+   * Wire shape: a downgrade from `v(N+1)` to `v(N)` sees an entry like
+   * `{ ..., experimentalFieldX: 42 }`. v(N) sieves `experimentalFieldX` into
+   * `unknownFields`; on the next persist it expands back to the top level.
+   * Re-upgrading to v(N+1) finds `experimentalFieldX: 42` intact.
+   *
+   * Always omitted from the type's persisted shape — `unknownFields` itself
+   * is never written to disk; only its contents are spread at the top level.
+   *
+   * See: asimov/changes/export-terminal-session/.reviews/round-1.md [W3].
+   */
+  unknownFields?: Record<string, unknown>;
+}
+
+/** Keys that this build defines on `SessionSnapshotMetadata`. */
+export const KNOWN_METADATA_KEYS: ReadonlySet<string> = new Set<keyof SessionSnapshotMetadata>([
+  "sessionId",
+  "panelId",
+  "viewLocation",
+  "terminalNumber",
+  "customName",
+  "shell",
+  "shellArgs",
+  "cwd",
+  "currentCwd",
+  "cols",
+  "rows",
+  "bufferFile",
+  "bufferBytes",
+  "isSplitPane",
+  "rootTabId",
+  "snapshotAt",
+  "shellExited",
+  "exitCode",
+  "trackedCommands",
+  "unknownFields",
+]);
+
+/**
+ * Sieve a raw parsed-from-JSON metadata object: keys present in
+ * `KNOWN_METADATA_KEYS` pass through as-is; everything else is collected into
+ * the returned `unknownFields` bucket. Used by the hydrate path to preserve
+ * forward-evolution fields a downgrade doesn't recognise. See [W3].
+ */
+export function siftMetadataUnknownFields(raw: Record<string, unknown>): {
+  known: Record<string, unknown>;
+  unknownFields?: Record<string, unknown>;
+} {
+  const known: Record<string, unknown> = {};
+  const unknown: Record<string, unknown> = {};
+  let hasUnknown = false;
+  for (const k of Object.keys(raw)) {
+    if (KNOWN_METADATA_KEYS.has(k)) {
+      known[k] = raw[k];
+    } else {
+      unknown[k] = raw[k];
+      hasUnknown = true;
+    }
+  }
+  return hasUnknown ? { known, unknownFields: unknown } : { known };
+}
+
+/**
+ * Reverse of `siftMetadataUnknownFields`: expand the `unknownFields` slot
+ * back to the top level so the persisted JSON looks natural (the carry-
+ * through layer is invisible on the wire). `unknownFields` itself is
+ * always stripped from the output. See [W3].
+ */
+export function expandMetadataForPersist(meta: SessionSnapshotMetadata): Record<string, unknown> {
+  const { unknownFields, ...rest } = meta;
+  const restAsRecord = rest as unknown as Record<string, unknown>;
+  if (!unknownFields) {
+    return restAsRecord;
+  }
+  // Spread `rest` LAST so known fields beat any (broken) overlapping keys
+  // that found their way into unknownFields.
+  return { ...unknownFields, ...restAsRecord };
 }
 
 export interface SessionSnapshotsIndex {

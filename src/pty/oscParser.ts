@@ -165,7 +165,9 @@ function handleOsc7(payload: string, onEvent: ShellIntegrationSink): void {
  * unknown letters) is silently ignored.
  */
 function handleOsc633(payload: string, onEvent: ShellIntegrationSink, nonce: string | undefined): void {
-  if (payload.length === 0) return;
+  if (payload.length === 0) {
+    return;
+  }
 
   // Split off the sub-command letter. `;` separates fields; payload[0] is the
   // sub-command. For `A`/`B`/`C` the payload is exactly one char (or `A;...`).
@@ -185,14 +187,18 @@ function handleOsc633(payload: string, onEvent: ShellIntegrationSink, nonce: str
       onEvent({ kind: "commandEnd", exitCode: null });
       return;
     }
-    if (payload[1] !== ";") return; // malformed; drop
+    if (payload[1] !== ";") {
+      return; // malformed; drop
+    }
     const arg = payload.slice(2);
     const parsed = parseExitCode(arg);
     onEvent({ kind: "commandEnd", exitCode: parsed });
     return;
   }
   if (subCmd === "E") {
-    if (payload.length < 2 || payload[1] !== ";") return;
+    if (payload.length < 2 || payload[1] !== ";") {
+      return;
+    }
     // Split at most into [E, escaped-cmd, optional-nonce]. Embedded `;` in cmd
     // is encoded as `\x3b` (literal 4-char) by VS Code's __vsc_escape_value,
     // so a raw `;` split is safe.
@@ -222,10 +228,14 @@ function handleOsc633(payload: string, onEvent: ShellIntegrationSink, nonce: str
 /** OSC 633 P sub-command: property report. Only Cwd= is consumed. */
 function handleOsc633P(payload: string, onEvent: ShellIntegrationSink): void {
   // payload starts with "P;<key>=<value>" or "P;<key>".
-  if (!payload.startsWith("P;")) return;
+  if (!payload.startsWith("P;")) {
+    return;
+  }
   const body = payload.slice(2);
   const eqIdx = body.indexOf("=");
-  if (eqIdx === -1) return;
+  if (eqIdx === -1) {
+    return;
+  }
   const key = body.slice(0, eqIdx);
   const value = body.slice(eqIdx + 1);
   if (key === "Cwd") {
@@ -236,9 +246,13 @@ function handleOsc633P(payload: string, onEvent: ShellIntegrationSink): void {
 
 /** Parse VS Code exit-code argument: decimal integer; non-numeric → null. */
 function parseExitCode(s: string): number | null {
-  if (s.length === 0) return null;
+  if (s.length === 0) {
+    return null;
+  }
   // Allow optional leading '-' for negative codes (signals).
-  if (!/^-?\d+$/.test(s)) return null;
+  if (!/^-?\d+$/.test(s)) {
+    return null;
+  }
   const n = Number.parseInt(s, 10);
   return Number.isFinite(n) ? n : null;
 }
@@ -252,7 +266,9 @@ function parseExitCode(s: string): number | null {
  * backslash is itself part of the escape grammar. We walk left-to-right.
  */
 function unescapeOscValue(s: string): string {
-  if (s.indexOf("\\") === -1) return s;
+  if (s.indexOf("\\") === -1) {
+    return s;
+  }
   let out = "";
   for (let i = 0; i < s.length; i++) {
     const c = s[i];
@@ -285,14 +301,18 @@ const CONTROL_CHARS = /[\x00-\x1f\x7f]/;
 
 /** Apply D3 sanitization and emit a cwd event. */
 function emitCwdIfValid(decoded: string, onEvent: ShellIntegrationSink): void {
-  if (!path.isAbsolute(decoded)) return;
+  if (!path.isAbsolute(decoded)) {
+    return;
+  }
   let normalized: string;
   try {
     normalized = path.resolve(decoded);
   } catch {
     return;
   }
-  if (CONTROL_CHARS.test(normalized)) return;
+  if (CONTROL_CHARS.test(normalized)) {
+    return;
+  }
   onEvent({ kind: "cwd", cwd: normalized });
 }
 

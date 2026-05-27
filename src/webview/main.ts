@@ -11,6 +11,7 @@ declare function acquireVsCodeApi(): {
   setState(state: unknown): void;
 };
 
+import { SerializeAddon } from "@xterm/addon-serialize";
 import type {
   ExtensionToWebViewMessage,
   HoverPreviewSettings,
@@ -26,7 +27,6 @@ import type { HoverPreviewThemeKind } from "./links/HoverPreviewController";
 import { preloadSyntaxHighlighter } from "./links/syntaxRenderer";
 import { createMessageRouter } from "./messaging/MessageRouter";
 import { createScrollbackDumpHandler } from "./messaging/scrollbackDumpHandler";
-import { SerializeAddon } from "@xterm/addon-serialize";
 import { ResizeCoordinator } from "./resize/ResizeCoordinator";
 import { SplitTreeRenderer } from "./split/SplitTreeRenderer";
 import { WebviewStateStore } from "./state/WebviewStateStore";
@@ -445,7 +445,9 @@ const routeMessage = createMessageRouter({
     // reflow between remove + re-add so a rapid second click restarts the
     // animation (same pattern as onInsertPathEffect above).
     const leaf = document.querySelector<HTMLElement>(`.split-leaf[data-session-id="${CSS.escape(msg.sessionId)}"]`);
-    if (!leaf) return;
+    if (!leaf) {
+      return;
+    }
     leaf.classList.remove("export-flash");
     void leaf.offsetWidth;
     leaf.classList.add("export-flash");
@@ -779,7 +781,7 @@ function bootstrap(): void {
       splitRenderer.updateActivePaneVisual(tabId);
       store.persist();
     }
-    const activeSessionId = leafSessionId ?? (store.tabActivePaneIds.get(tabId) ?? tabId);
+    const activeSessionId = leafSessionId ?? store.tabActivePaneIds.get(tabId) ?? tabId;
     vscode.postMessage({ type: "focus", activeSessionId });
   });
   window.addEventListener("message", (event: MessageEvent) => {

@@ -7,7 +7,9 @@ import type { ShellIntegrationEvent, ShellIntegrationSink } from "./ShellIntegra
 /** Collect cwd events into a string array. */
 function cwdsOf(out: string[]): ShellIntegrationSink {
   return (event) => {
-    if (event.kind === "cwd") out.push(event.cwd);
+    if (event.kind === "cwd") {
+      out.push(event.cwd);
+    }
   };
 }
 
@@ -35,7 +37,9 @@ function collect(seq: string): string[] {
   const parser = createOscParser();
   const out: string[] = [];
   parser.feed(seq, (event) => {
-    if (event.kind === "cwd") out.push(event.cwd);
+    if (event.kind === "cwd") {
+      out.push(event.cwd);
+    }
   });
   return out;
 }

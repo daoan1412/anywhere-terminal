@@ -28,10 +28,10 @@ function makeFakeMemento(initial: Record<string, unknown> = {}) {
 function makeFakeFs() {
   const files = new Map<string, string>();
   const dirs = new Set<string>();
-  const writeFileSync = vi.fn((f: string, d: string) => {
+  const writeFileSync = vi.fn((f: string, d: string, _opts?: { mode?: number }) => {
     files.set(f, d);
   });
-  const writeFile = vi.fn(async (f: string, d: string) => {
+  const writeFile = vi.fn(async (f: string, d: string, _opts?: { mode?: number }) => {
     files.set(f, d);
   });
   const fs: FsLike = {
@@ -158,6 +158,50 @@ describe("SessionStorage", () => {
     expect(reread.loadLivePanels()).toEqual(live);
   });
 
+  it("preserves unknown metadata fields across a load → persist round-trip (W3)", () => {
+    // Simulate a sidecar written by a newer build that added two fields this
+    // build doesn't recognise. After load → persist the unknown fields must
+    // round-trip through `unknownFields` and re-appear at the top level on
+    // disk, so a re-upgrade to the newer build finds them intact.
+    const mem = makeFakeMemento();
+    const { fs, files } = makeFakeFs();
+    const s = new SessionStorage(mem as unknown as vscode.Memento, STORAGE_URI, fs);
+    const sidecarPath = `${SNAPS_DIR}/index.json`;
+    // Future-build sidecar shape — `experimentalFlag` + `futureCounter` are
+    // unknown to this build.
+    files.set(
+      sidecarPath,
+      JSON.stringify({
+        version: 1,
+        entries: {
+          s1: {
+            ...makeMeta("s1"),
+            experimentalFlag: "rocket",
+            futureCounter: 42,
+          },
+        },
+      }),
+    );
+
+    const detailed = s.loadIndexDetailed();
+    expect(detailed.kind).toBe("valid");
+    if (detailed.kind !== "valid") {
+      return;
+    }
+    const meta = detailed.index.entries.s1;
+    expect(meta.unknownFields).toEqual({ experimentalFlag: "rocket", futureCounter: 42 });
+
+    // Persist back. The on-disk JSON should show the unknown keys at top
+    // level (not nested under `unknownFields`).
+    s.commitIndexSync(detailed.index);
+    const written = JSON.parse(files.get(sidecarPath) as string) as {
+      entries: Record<string, Record<string, unknown>>;
+    };
+    expect(written.entries.s1.experimentalFlag).toBe("rocket");
+    expect(written.entries.s1.futureCounter).toBe(42);
+    expect(written.entries.s1.unknownFields).toBeUndefined();
+  });
+
   it("commitBufferSync and commitBufferAsync produce identical files", async () => {
     const mem = makeFakeMemento();
     const { fs, files } = makeFakeFs();
@@ -249,7 +293,9 @@ describe("SessionStorage", () => {
     // potential downgrade — though we don't expose that anymore).
     const detailed = s.loadIndexDetailed();
     expect(detailed.kind).toBe("valid");
-    if (detailed.kind === "valid") expect(detailed.index).toEqual(sidecarIndex);
+    if (detailed.kind === "valid") {
+      expect(detailed.index).toEqual(sidecarIndex);
+    }
   });
 
   // ───────────────────────────────────────────────────────────────────

@@ -19,7 +19,9 @@ import type { TrackedCommand } from "../session/TrackedCommand";
  * export filename.
  */
 export function sanitizeFilenameSegment(name: string): string {
-  if (!name) return "terminal";
+  if (!name) {
+    return "terminal";
+  }
   return name.replace(/[^A-Za-z0-9._-]/g, "_");
 }
 

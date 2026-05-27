@@ -9,10 +9,10 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import * as vscode from "vscode";
 import type { TrackedCommand } from "../session/TrackedCommand";
 import {
+  type ExportCommandDeps,
   exportBuffer,
   exportCommand,
   exportLastCommand,
-  type ExportCommandDeps,
   formatOutputPreview,
   formatRelativeTime,
   type VscodeSurface,
@@ -108,7 +108,9 @@ interface FakeSessionManagerState {
 function makeSessionManager(state: FakeSessionManagerState = {}) {
   return {
     async requestScrollbackDump() {
-      if (state.scrollbackDump instanceof Error) throw state.scrollbackDump;
+      if (state.scrollbackDump instanceof Error) {
+        throw state.scrollbackDump;
+      }
       return state.scrollbackDump ?? { data: "", lineCount: 0, truncated: false };
     },
     getTrackedCommands() {

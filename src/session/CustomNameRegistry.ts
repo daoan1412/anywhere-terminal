@@ -61,9 +61,13 @@ export class CustomNameRegistry {
    *   - otherwise → trimmed string
    */
   normalize(input: string | null): string | null {
-    if (input === null) return null;
+    if (input === null) {
+      return null;
+    }
     const trimmed = input.trim();
-    if (trimmed.length === 0) return null;
+    if (trimmed.length === 0) {
+      return null;
+    }
     if (trimmed.length > CUSTOM_NAME_MAX_LENGTH) {
       return trimmed.slice(0, CUSTOM_NAME_MAX_LENGTH);
     }
@@ -77,14 +81,18 @@ export class CustomNameRegistry {
       return result;
     }
     for (const [k, v] of Object.entries(raw as Record<string, unknown>)) {
-      if (typeof v === "string") result.set(k, v);
+      if (typeof v === "string") {
+        result.set(k, v);
+      }
     }
     return result;
   }
 
   private saveSnapshot(): void {
     const snapshot: Record<string, string> = {};
-    for (const [k, v] of this.cache) snapshot[k] = v;
+    for (const [k, v] of this.cache) {
+      snapshot[k] = v;
+    }
     void this.storage.update(CUSTOM_NAMES_STORAGE_KEY, snapshot).then(undefined, (err) => {
       console.error("[AnyWhere Terminal] Failed to persist custom tab names:", err);
     });

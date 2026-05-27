@@ -22,7 +22,6 @@ vi.mock("../pty/PtySession", () => {
     kill = vi.fn();
     pause = vi.fn();
     resume = vi.fn();
-    setCurrentCwdSink = vi.fn();
     onData: any = undefined;
     onExit: any = undefined;
     constructor(id: string) {
@@ -90,7 +89,9 @@ function makeStorageMock(initial: { buffers?: Record<string, string> } = {}) {
       bufferGens.set(id, (bufferGens.get(id) ?? 0) + 1);
     }),
     commitBufferAsync: vi.fn(async (id: string, data: string, capturedGen: number) => {
-      if ((bufferGens.get(id) ?? 0) !== capturedGen) return "stale-skipped" as const;
+      if ((bufferGens.get(id) ?? 0) !== capturedGen) {
+        return "stale-skipped" as const;
+      }
       buffers.set(id, data);
       return "renamed" as const;
     }),
@@ -98,7 +99,9 @@ function makeStorageMock(initial: { buffers?: Record<string, string> } = {}) {
       sidecarGen += 1;
     }),
     commitIndexAsync: vi.fn(async (_idx: unknown, capturedGen: number) => {
-      if (sidecarGen !== capturedGen) return "stale-skipped" as const;
+      if (sidecarGen !== capturedGen) {
+        return "stale-skipped" as const;
+      }
       return "renamed" as const;
     }),
     dropBuffer: vi.fn((id: string) => {

@@ -3,7 +3,7 @@
 // filesystem so we can snapshot args/env without writing real files.
 
 import { describe, expect, it } from "vitest";
-import { injectShellIntegration, type InjectionContext, type InjectorFs } from "./ShellIntegrationInjector";
+import { type InjectionContext, type InjectorFs, injectShellIntegration } from "./ShellIntegrationInjector";
 
 interface FsCall {
   op: "mkdir" | "copy" | "rm";
@@ -124,10 +124,7 @@ describe("ShellIntegrationInjector: fish", () => {
     const { ctx, ids } = fakeCtx();
     const result = injectShellIntegration("/opt/homebrew/bin/fish", [], { HOME: "/u/h" }, ctx);
     expect(result).not.toBeNull();
-    expect(result!.args).toEqual([
-      "--init-command",
-      "source '/ext/resources/shell-integration/shellIntegration.fish'",
-    ]);
+    expect(result!.args).toEqual(["--init-command", "source '/ext/resources/shell-integration/shellIntegration.fish'"]);
     expect(result!.env).toEqual({ HOME: "/u/h", VSCODE_NONCE: ids[0] });
     expect(result!.cleanup).toBeInstanceOf(Function); // no-op but callable
   });
@@ -144,11 +141,7 @@ describe("ShellIntegrationInjector: pwsh", () => {
     const { ctx, ids } = fakeCtx();
     const result = injectShellIntegration("/usr/local/bin/pwsh", [], { PATH: "/usr/bin" }, ctx);
     expect(result).not.toBeNull();
-    expect(result!.args).toEqual([
-      "-noexit",
-      "-command",
-      ". '/ext/resources/shell-integration/shellIntegration.ps1'",
-    ]);
+    expect(result!.args).toEqual(["-noexit", "-command", ". '/ext/resources/shell-integration/shellIntegration.ps1'"]);
     expect(result!.env).toEqual({ PATH: "/usr/bin", VSCODE_NONCE: ids[0] });
   });
 

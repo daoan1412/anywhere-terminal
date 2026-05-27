@@ -1,6 +1,6 @@
 // src/commands/exportHelpers.test.ts — Unit tests for the pure helpers.
 
-import { describe, expect, it, vi } from "vitest";
+import { describe, expect, it } from "vitest";
 import * as vscode from "vscode";
 import type { TrackedCommand } from "../session/TrackedCommand";
 import {
@@ -135,11 +135,15 @@ describe("writeExportAtomically", () => {
         calls.push({ op: "write", path: uri.fsPath, payload: Buffer.from(bytes).toString("utf8") });
       },
       async rename(src, dst) {
-        if (this.failRename) throw new Error("rename failed");
+        if (this.failRename) {
+          throw new Error("rename failed");
+        }
         calls.push({ op: "rename", path: `${src.fsPath} -> ${dst.fsPath}` });
       },
       async delete(uri) {
-        if (this.failDelete) throw new Error("delete failed");
+        if (this.failDelete) {
+          throw new Error("delete failed");
+        }
         calls.push({ op: "delete", path: uri.fsPath });
       },
     };

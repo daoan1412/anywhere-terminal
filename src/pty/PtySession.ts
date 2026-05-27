@@ -2,8 +2,8 @@
 // See: docs/design/pty-manager.md#§5 (Graceful Shutdown)
 
 import { createOscParser, type OscParser } from "./oscParser";
-import type { ShellIntegrationSink } from "./ShellIntegrationEvents";
 import type { NodePtyModule, Pty, PtyForkOptions } from "./PtyManager";
+import type { ShellIntegrationSink } from "./ShellIntegrationEvents";
 
 // ─── Constants ──────────────────────────────────────────────────────
 
@@ -61,9 +61,7 @@ export class PtySession {
   private _onExitCallback: ((code: number) => void) | undefined;
   /** OSC parser for passive cwd extraction; one instance per session. */
   private readonly _oscParser: OscParser = createOscParser();
-  /** Sink that receives parsed cwds. Set by SessionManager via setCurrentCwdSink. */
-  private _setCurrentCwd: ((cwd: string) => void) | undefined;
-  /** Sink that receives ALL shell-integration events (including cwd). Set via setShellIntegrationSink. */
+  /** Sink that receives ALL shell-integration events (cwd + A/B/C/D/E markers). Set via setShellIntegrationSink. */
   private _shellIntegrationSink: ShellIntegrationSink | undefined;
 
   get isAlive(): boolean {
@@ -89,23 +87,14 @@ export class PtySession {
   }
 
   /**
-   * Register a callback that receives sanitized cwd values parsed from
-   * OSC 7 / OSC 633 escape sequences in the PTY data stream.
-   *
-   * The parser is an OBSERVER — bytes flow to the existing onData callback
-   * unchanged regardless of whether a sink is registered.
-   */
-  setCurrentCwdSink(fn: ((cwd: string) => void) | undefined): void {
-    this._setCurrentCwd = fn;
-  }
-
-  /**
    * Register a callback that receives every parsed shell-integration event
    * (cwd + A/B/C/D/E markers). The OSC parser is the source of truth; consumers
-   * (e.g. `TerminalSession` command tracking) wire here.
+   * (e.g. SessionManager) wire here.
    *
-   * Setting both this AND `setCurrentCwdSink` will deliver `cwd` events to
-   * BOTH sinks — callers must decide which they use.
+   * The parser is an OBSERVER — bytes flow to the existing onData callback
+   * unchanged regardless of whether a sink is registered. A throw from the
+   * sink is isolated so the chunk still reaches the user callback byte-
+   * identically (pass-through guarantee / design D9).
    */
   setShellIntegrationSink(fn: ShellIntegrationSink | undefined): void {
     this._shellIntegrationSink = fn;
@@ -170,14 +159,9 @@ export class PtySession {
       // Passive OSC scan — must NOT mutate or swallow `data`. A throw from
       // the parser or sink is isolated so the chunk still reaches the user
       // callback byte-identically (pass-through guarantee / design D9).
-      if (this._setCurrentCwd || this._shellIntegrationSink) {
+      if (this._shellIntegrationSink) {
         try {
-          this._oscParser.feed(data, (event) => {
-            if (event.kind === "cwd") {
-              this._setCurrentCwd?.(event.cwd);
-            }
-            this._shellIntegrationSink?.(event);
-          });
+          this._oscParser.feed(data, this._shellIntegrationSink);
         } catch (err) {
           console.error("[AnyWhere Terminal] OSC parser/sink threw:", err);
         }

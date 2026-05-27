@@ -5,7 +5,7 @@
 
 import type { PtySession } from "../pty/PtySession";
 import type { MessageSender, OutputBuffer } from "./OutputBuffer";
-import type { CommandTrackingRuntime } from "./TrackedCommand";
+import type { CommandTracker } from "./TrackedCommand";
 
 /**
  * Minimal subset of `@xterm/headless` Terminal used by SnapshotPersistence.
@@ -115,12 +115,12 @@ export interface TerminalSession {
   /** Exit code recorded when the shell exits (or null when no code was reported). */
   exitCode?: number | null;
   /**
-   * Per-session tracked commands built from OSC 633 markers. Populated when
-   * shell integration is active (auto-injected on spawn for known shells); an
-   * empty list when integration is absent. Capped per design D5. See:
-   * asimov/changes/export-terminal-session/design.md D1.
+   * Per-session command tracker. Captures OSC 633 markers (A/B/C/D/E) and
+   * builds the bounded `TrackedCommand[]` list consumed by the export
+   * commands. Empty when shell integration is absent. Capped per design D5.
+   * See: asimov/changes/export-terminal-session/design.md D1.
    */
-  commandTracking: CommandTrackingRuntime;
+  commandTracking: CommandTracker;
 }
 
 /** Aggregate memory usage snapshot across all sessions. */

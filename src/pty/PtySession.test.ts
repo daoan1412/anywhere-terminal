@@ -426,13 +426,26 @@ describe("PtySession callbacks", () => {
 });
 
 // ─── OSC cwd sink + pass-through ────────────────────────────────────
+//
+// cwd extraction now flows through the unified `setShellIntegrationSink`
+// (see .reviews/round-1.md [S2] — `setCurrentCwdSink` dual-API removed).
+// Each test filters the sink for `kind === "cwd"` events.
 
-describe("PtySession.setCurrentCwdSink", () => {
+function collectCwds(session: PtySession): string[] {
+  const cwds: string[] = [];
+  session.setShellIntegrationSink((event) => {
+    if (event.kind === "cwd") {
+      cwds.push(event.cwd);
+    }
+  });
+  return cwds;
+}
+
+describe("PtySession cwd sink (via setShellIntegrationSink)", () => {
   it("invokes the sink with decoded cwd when an OSC 7 sequence arrives", () => {
     const session = new PtySession("osc-1");
     const { mockModule, getControls } = createMockNodePty();
-    const cwds: string[] = [];
-    session.setCurrentCwdSink((cwd) => cwds.push(cwd));
+    const cwds = collectCwds(session);
     session.spawn(mockModule, "/bin/zsh", [], {});
 
     getControls().emitData("\x1b]7;file:///home/me/proj\x07");
@@ -443,8 +456,7 @@ describe("PtySession.setCurrentCwdSink", () => {
   it("invokes the sink with raw path for OSC 633 P;Cwd=", () => {
     const session = new PtySession("osc-2");
     const { mockModule, getControls } = createMockNodePty();
-    const cwds: string[] = [];
-    session.setCurrentCwdSink((cwd) => cwds.push(cwd));
+    const cwds = collectCwds(session);
     session.spawn(mockModule, "/bin/zsh", [], {});
 
     getControls().emitData("\x1b]633;P;Cwd=/srv/app\x1b\\");
@@ -457,7 +469,7 @@ describe("PtySession.setCurrentCwdSink", () => {
     const { mockModule, getControls } = createMockNodePty();
     const received: string[] = [];
     session.onData = (data) => received.push(data);
-    session.setCurrentCwdSink(() => {});
+    session.setShellIntegrationSink(() => {});
     session.spawn(mockModule, "/bin/zsh", [], {});
 
     const chunk = "before \x1b]7;file:///x\x07after";
@@ -471,7 +483,7 @@ describe("PtySession.setCurrentCwdSink", () => {
     const { mockModule, getControls } = createMockNodePty();
     const received: string[] = [];
     session.onData = (data) => received.push(data);
-    session.setCurrentCwdSink(() => {});
+    session.setShellIntegrationSink(() => {});
     session.spawn(mockModule, "/bin/zsh", [], {});
 
     const chunks = ["plain", "\x1b[31mcolor\x1b[0m", "\x00\xff\x07bel", "no osc here"];
@@ -487,7 +499,7 @@ describe("PtySession.setCurrentCwdSink", () => {
     const { mockModule, getControls } = createMockNodePty();
     const received: string[] = [];
     session.onData = (data) => received.push(data);
-    // Intentionally do NOT call setCurrentCwdSink.
+    // Intentionally do NOT call setShellIntegrationSink.
     session.spawn(mockModule, "/bin/zsh", [], {});
 
     getControls().emitData("\x1b]7;file:///not-tracked\x07hello");
@@ -500,7 +512,7 @@ describe("PtySession.setCurrentCwdSink", () => {
     const { mockModule, getControls } = createMockNodePty();
     const received: string[] = [];
     session.onData = (data) => received.push(data);
-    session.setCurrentCwdSink(() => {
+    session.setShellIntegrationSink(() => {
       throw new Error("sink boom");
     });
     // Spy on console.error to suppress noise + assert the error was logged.
@@ -520,8 +532,7 @@ describe("PtySession.setCurrentCwdSink", () => {
   it("accepts split-chunk OSC sequences via the parser's pending buffer", () => {
     const session = new PtySession("osc-6");
     const { mockModule, getControls } = createMockNodePty();
-    const cwds: string[] = [];
-    session.setCurrentCwdSink((cwd) => cwds.push(cwd));
+    const cwds = collectCwds(session);
     session.spawn(mockModule, "/bin/zsh", [], {});
 
     getControls().emitData("\x1b]7;file://");

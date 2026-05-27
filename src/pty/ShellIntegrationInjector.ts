@@ -196,7 +196,9 @@ function shellQuote(s: string): string {
 function makeTempDirCleanup(ctx: InjectionContext, target: string): () => void {
   let done = false;
   return (): void => {
-    if (done) return;
+    if (done) {
+      return;
+    }
     done = true;
     try {
       ctx.fs.rmSync(target, { recursive: true, force: true });

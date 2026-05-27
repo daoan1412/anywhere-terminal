@@ -27,7 +27,6 @@ vi.mock("../pty/PtySession", () => {
     kill = vi.fn();
     pause = vi.fn();
     resume = vi.fn();
-    setCurrentCwdSink = vi.fn();
     setShellIntegrationSink = vi.fn();
     setShellIntegrationNonce = vi.fn();
     private _cb: ((data: string) => void) | undefined;
@@ -270,17 +269,12 @@ describe("SessionManager.generateSnapshotMetadata", () => {
     mockPtySessions[0].onData?.("x");
     const session = sm.getSession(id);
     expect(session).toBeDefined();
-    session?.commandTracking.commands.push({
-      id: "cmd-1",
-      commandLine: "echo hello",
-      output: "hello",
-      exitCode: 0,
-      cwd: "/tmp",
-      startedAt: 100,
-      endedAt: 200,
-      outputBytes: 5,
-      outputTruncated: false,
-    });
+    // Drive a real B+D pair so we exercise the tracker's public API rather
+    // than reaching into the (now-readonly) `commands` array.
+    session?.commandTracking.open({ id: "cmd-1", now: 100, cwd: "/tmp" });
+    session?.commandTracking.setCommandLine("echo hello");
+    session?.commandTracking.appendOutput("hello");
+    session?.commandTracking.close({ exitCode: 0, now: 200 });
     const m = sm.generateSnapshotMetadata(id)!.metadata;
     expect(m.trackedCommands).toHaveLength(1);
     expect(m.trackedCommands?.[0].commandLine).toBe("echo hello");

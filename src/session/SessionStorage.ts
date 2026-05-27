@@ -8,31 +8,46 @@
 import * as path from "node:path";
 import type * as vscode from "vscode";
 import {
+  expandMetadataForPersist,
   LIVE_EDITOR_PANELS_KEY,
   type LiveEditorPanelsRecord,
   SESSION_SNAPSHOTS_INDEX_KEY,
+  type SessionSnapshotMetadata,
   type SessionSnapshotsIndex,
+  siftMetadataUnknownFields,
 } from "./SessionSnapshot";
 
 export interface FsLike {
-  writeFileSync: (file: string, data: string) => void;
+  writeFileSync: (file: string, data: string, options?: { mode?: number }) => void;
   readFileSync: (file: string, encoding: "utf8") => string;
-  mkdirSync: (dir: string, options?: { recursive?: boolean }) => void;
+  mkdirSync: (dir: string, options?: { recursive?: boolean; mode?: number }) => void;
   existsSync: (file: string) => boolean;
   unlinkSync: (file: string) => void;
   readdirSync: (dir: string) => string[];
   renameSync: (from: string, to: string) => void;
   rmSync?: (dir: string, options?: { recursive?: boolean; force?: boolean }) => void;
   promises: {
-    writeFile: (file: string, data: string) => Promise<void>;
+    writeFile: (file: string, data: string, options?: { mode?: number }) => Promise<void>;
     readFile: (file: string, encoding: "utf8") => Promise<string>;
-    mkdir: (dir: string, options?: { recursive?: boolean }) => Promise<unknown>;
+    mkdir: (dir: string, options?: { recursive?: boolean; mode?: number }) => Promise<unknown>;
     unlink: (file: string) => Promise<void>;
     rename: (from: string, to: string) => Promise<void>;
   };
 }
 
 const INDEX_DEBOUNCE_MS = 1000;
+
+/**
+ * File mode for persisted snapshot artifacts (buffers + index sidecar). Each
+ * tracked-command entry persisted on disk preserves raw ANSI bytes including
+ * any credentials echoed by the shell (e.g. `aws sts get-session-token`).
+ * Defaulting to `0o600` keeps the artifact readable only by the owning UID
+ * even on multi-user macOS hosts where the home dir mode is 0o755. See:
+ * asimov/changes/export-terminal-session/.reviews/round-1.md [W5].
+ */
+const SNAPSHOT_FILE_MODE = 0o600;
+/** Directory mode for `<storageUri>/snapshots/`. See [W5]. */
+const SNAPSHOT_DIR_MODE = 0o700;
 
 export class SessionStorage {
   private readonly snapshotsDir: string;
@@ -89,13 +104,28 @@ export class SessionStorage {
    */
   loadIndexDetailed(): { kind: "valid"; index: SessionSnapshotsIndex } | { kind: "missing" } | { kind: "unsupported" } {
     const sidecar = this.indexSidecarPath();
-    if (!this.fs.existsSync(sidecar)) return { kind: "missing" };
+    if (!this.fs.existsSync(sidecar)) {
+      return { kind: "missing" };
+    }
     try {
       const raw = this.fs.readFileSync(sidecar, "utf8");
       const parsed = JSON.parse(raw) as Partial<SessionSnapshotsIndex>;
       if (parsed && typeof parsed === "object") {
         if (parsed.version === 1 && parsed.entries && typeof parsed.entries === "object") {
-          return { kind: "valid", index: parsed as SessionSnapshotsIndex };
+          // Sieve each entry's keys against the current KNOWN_METADATA_KEYS
+          // set — unknown keys (likely from a newer build that wrote this
+          // sidecar) get bucketed into the in-memory `unknownFields` slot so
+          // the next persist preserves them at the top level. See [W3].
+          const sieved: Record<string, SessionSnapshotMetadata> = {};
+          for (const [sessionId, rawEntry] of Object.entries(parsed.entries)) {
+            if (!rawEntry || typeof rawEntry !== "object") {
+              continue;
+            }
+            const { known, unknownFields } = siftMetadataUnknownFields(rawEntry as unknown as Record<string, unknown>);
+            const merged = unknownFields ? { ...known, unknownFields } : known;
+            sieved[sessionId] = merged as unknown as SessionSnapshotMetadata;
+          }
+          return { kind: "valid", index: { version: 1, entries: sieved } };
         }
         // Sidecar present but version we don't understand — authoritative
         // rejection. Corrupted state is discarded per spec; no orphan
@@ -111,6 +141,22 @@ export class SessionStorage {
   }
 
   /**
+   * Serialise a snapshot index for the on-disk sidecar. Expands each entry's
+   * in-memory `unknownFields` slot back at the top level so a round-trip
+   * through this build preserves keys from newer builds. See [W3].
+   */
+  private serializeIndex(index: SessionSnapshotsIndex): string {
+    const entries: Record<string, Record<string, unknown>> = {};
+    for (const [sessionId, meta] of Object.entries(index.entries)) {
+      entries[sessionId] = expandMetadataForPersist(meta);
+    }
+    return JSON.stringify({ version: index.version, entries });
+  }
+  // (Type widening below intentional: `siftMetadataUnknownFields` returns a
+  // structural Record bag; the sieve guarantees every known key landed in
+  // `known`. See `loadIndexDetailed`.)
+
+  /**
    * One-time activate-time migration: if no sidecar exists yet and a
    * legacy Memento snapshot index is present, copy it to the sidecar
    * (sync) and delete the Memento entry. After this, all reads + writes
@@ -121,9 +167,13 @@ export class SessionStorage {
    * this before any hydrate.
    */
   migrateMementoIndexToSidecar(): void {
-    if (this.fs.existsSync(this.indexSidecarPath())) return;
+    if (this.fs.existsSync(this.indexSidecarPath())) {
+      return;
+    }
     const mem = this.workspaceState.get<SessionSnapshotsIndex>(SESSION_SNAPSHOTS_INDEX_KEY);
-    if (!mem || typeof mem !== "object") return;
+    if (!mem || typeof mem !== "object") {
+      return;
+    }
     if (mem.version !== 1 || !mem.entries) {
       // Unsupported legacy payload — drop the Memento entry; nothing to migrate.
       try {
@@ -182,7 +232,7 @@ export class SessionStorage {
   }
 
   private ensureSnapshotsDir(): void {
-    this.fs.mkdirSync(this.snapshotsDir, { recursive: true });
+    this.fs.mkdirSync(this.snapshotsDir, { recursive: true, mode: SNAPSHOT_DIR_MODE });
   }
 
   private indexSidecarPath(): string {
@@ -263,7 +313,7 @@ export class SessionStorage {
     this.bumpBufferGen(sessionId);
     this.ensureSnapshotsDir();
     const temp = this.tempPath(canonical, this.nextTempId());
-    this.fs.writeFileSync(temp, data);
+    this.fs.writeFileSync(temp, data, { mode: SNAPSHOT_FILE_MODE });
     this.fs.renameSync(temp, canonical);
   }
 
@@ -280,11 +330,13 @@ export class SessionStorage {
   ): Promise<"renamed" | "stale-skipped" | "stale-post-write" | "stale-post-rename"> {
     // Pre-write check: if the gen already advanced past `capturedGen`,
     // someone else's sync write / drop won the race before we even mkdir'd.
-    if ((this.bufferGens.get(sessionId) ?? 0) !== capturedGen) return "stale-skipped";
+    if ((this.bufferGens.get(sessionId) ?? 0) !== capturedGen) {
+      return "stale-skipped";
+    }
     const canonical = this.bufferFilePath(sessionId);
-    await this.fs.promises.mkdir(this.snapshotsDir, { recursive: true });
+    await this.fs.promises.mkdir(this.snapshotsDir, { recursive: true, mode: SNAPSHOT_DIR_MODE });
     const temp = this.tempPath(canonical, this.nextTempId());
-    await this.fs.promises.writeFile(temp, data);
+    await this.fs.promises.writeFile(temp, data, { mode: SNAPSHOT_FILE_MODE });
     // Post-write, pre-rename check: a sync writer / drop may have run
     // during our await. Mismatch → clean up the temp and bail; never
     // overwrite the canonical with our stale data.
@@ -344,7 +396,7 @@ export class SessionStorage {
     this.ensureSnapshotsDir();
     const canonical = this.indexSidecarPath();
     const temp = this.tempPath(canonical, this.nextTempId());
-    this.fs.writeFileSync(temp, JSON.stringify(index));
+    this.fs.writeFileSync(temp, this.serializeIndex(index), { mode: SNAPSHOT_FILE_MODE });
     this.fs.renameSync(temp, canonical);
   }
 
@@ -353,11 +405,13 @@ export class SessionStorage {
     index: SessionSnapshotsIndex,
     capturedGen: number,
   ): Promise<"renamed" | "stale-skipped" | "stale-post-write" | "stale-post-rename"> {
-    if (this.sidecarGen !== capturedGen) return "stale-skipped";
-    await this.fs.promises.mkdir(this.snapshotsDir, { recursive: true });
+    if (this.sidecarGen !== capturedGen) {
+      return "stale-skipped";
+    }
+    await this.fs.promises.mkdir(this.snapshotsDir, { recursive: true, mode: SNAPSHOT_DIR_MODE });
     const canonical = this.indexSidecarPath();
     const temp = this.tempPath(canonical, this.nextTempId());
-    await this.fs.promises.writeFile(temp, JSON.stringify(index));
+    await this.fs.promises.writeFile(temp, this.serializeIndex(index), { mode: SNAPSHOT_FILE_MODE });
     if (this.sidecarGen !== capturedGen) {
       try {
         await this.fs.promises.unlink(temp);
@@ -388,7 +442,9 @@ export class SessionStorage {
    */
   cleanupOrphanTemps(): void {
     try {
-      if (!this.fs.existsSync(this.snapshotsDir)) return;
+      if (!this.fs.existsSync(this.snapshotsDir)) {
+        return;
+      }
       for (const name of this.fs.readdirSync(this.snapshotsDir)) {
         if (name.includes(".tmp.")) {
           try {

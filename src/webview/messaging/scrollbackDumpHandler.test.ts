@@ -5,7 +5,7 @@
 // dedupe semantics without touching the DOM.
 
 import { describe, expect, it } from "vitest";
-import type { RequestScrollbackDumpMessage, ScrollbackDumpMessage } from "../../types/messages";
+import type { ScrollbackDumpMessage } from "../../types/messages";
 import { createScrollbackDumpHandler, type ScrollbackDumpDeps, type SerializeAddonLike } from "./scrollbackDumpHandler";
 
 interface FakeTerminal {
@@ -101,9 +101,7 @@ describe("scrollbackDumpHandler: happy path", () => {
   });
 
   it("reports truncated=true when buffer length equals scrollback cap", () => {
-    const terminals = new Map([
-      ["tab-1", makeTerminal({ bufferLength: 5000, scrollbackCap: 5000 })],
-    ]);
+    const terminals = new Map([["tab-1", makeTerminal({ bufferLength: 5000, scrollbackCap: 5000 })]]);
     const posted: ScrollbackDumpMessage[] = [];
     const handler = createScrollbackDumpHandler(makeDeps({ terminals, posted }));
     handler({ type: "requestScrollbackDump", tabId: "tab-1", requestId: "req-1" });
@@ -135,9 +133,7 @@ describe("scrollbackDumpHandler: unknown tab (spec scenario)", () => {
 
 describe("scrollbackDumpHandler: dedupe (F5 fix)", () => {
   it("collapses N concurrent requests for the same tabId to ONE serialize call", () => {
-    const terminals = new Map([
-      ["tab-1", makeTerminal({ serialised: "shared-payload", bufferLength: 1 })],
-    ]);
+    const terminals = new Map([["tab-1", makeTerminal({ serialised: "shared-payload", bufferLength: 1 })]]);
     const posted: ScrollbackDumpMessage[] = [];
     const serializeCalls = { count: 0 };
     // Defer microtask so we can flush manually.
@@ -194,9 +190,7 @@ describe("scrollbackDumpHandler: dedupe (F5 fix)", () => {
   });
 
   it("a second wave of requests after a flush triggers a fresh serialize", () => {
-    const terminals = new Map([
-      ["tab-1", makeTerminal({ serialised: "wave-data", bufferLength: 1 })],
-    ]);
+    const terminals = new Map([["tab-1", makeTerminal({ serialised: "wave-data", bufferLength: 1 })]]);
     const posted: ScrollbackDumpMessage[] = [];
     const serializeCalls = { count: 0 };
     const handler = createScrollbackDumpHandler(makeDeps({ terminals, posted, serializeCalls }));

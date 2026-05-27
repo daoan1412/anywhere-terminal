@@ -20,7 +20,9 @@ export class EditorPanelRegistry {
 
   /** Record a new panel. Idempotent — second call with the same panelId is a no-op. */
   register(panelId: string): void {
-    if (this.panels.has(panelId)) return;
+    if (this.panels.has(panelId)) {
+      return;
+    }
     const now = Date.now();
     this.panels.set(panelId, { panelId, sessionIds: [], createdAt: now, updatedAt: now });
     this.notify();
@@ -29,8 +31,12 @@ export class EditorPanelRegistry {
   /** Attach a session to a panel. Idempotent. Silent no-op for unknown panelIds. */
   attachSession(panelId: string, sessionId: string): void {
     const entry = this.panels.get(panelId);
-    if (!entry) return;
-    if (entry.sessionIds.includes(sessionId)) return;
+    if (!entry) {
+      return;
+    }
+    if (entry.sessionIds.includes(sessionId)) {
+      return;
+    }
     entry.sessionIds.push(sessionId);
     entry.updatedAt = Date.now();
     this.notify();
@@ -38,16 +44,22 @@ export class EditorPanelRegistry {
 
   /** Remove a panel from the registry. Called after a grace-period destroy actually fires. */
   unregister(panelId: string): void {
-    if (!this.panels.delete(panelId)) return;
+    if (!this.panels.delete(panelId)) {
+      return;
+    }
     this.notify();
   }
 
   /** Hydrate from the persisted record (post-restart). */
   hydrate(record?: LiveEditorPanelsRecord): void {
     this.panels.clear();
-    if (!record || record.version !== 1 || !Array.isArray(record.panels)) return;
+    if (!record || record.version !== 1 || !Array.isArray(record.panels)) {
+      return;
+    }
     for (const entry of record.panels) {
-      if (!entry || typeof entry.panelId !== "string") continue;
+      if (!entry || typeof entry.panelId !== "string") {
+        continue;
+      }
       this.panels.set(entry.panelId, {
         panelId: entry.panelId,
         sessionIds: Array.isArray(entry.sessionIds) ? entry.sessionIds.slice() : [],
@@ -65,7 +77,9 @@ export class EditorPanelRegistry {
   /** Look up the panelId that owns a given sessionId, or undefined. */
   findPanelForSession(sessionId: string): string | undefined {
     for (const entry of this.panels.values()) {
-      if (entry.sessionIds.includes(sessionId)) return entry.panelId;
+      if (entry.sessionIds.includes(sessionId)) {
+        return entry.panelId;
+      }
     }
     return undefined;
   }

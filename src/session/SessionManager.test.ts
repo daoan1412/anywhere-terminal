@@ -14,8 +14,8 @@ const mockPtySessions: Array<{
   write: ReturnType<typeof vi.fn>;
   resize: ReturnType<typeof vi.fn>;
   kill: ReturnType<typeof vi.fn>;
-  setCurrentCwdSink: ReturnType<typeof vi.fn>;
-  cwdSink: ((cwd: string) => void) | undefined;
+  setShellIntegrationSink: ReturnType<typeof vi.fn>;
+  shellIntegrationSink: ((event: import("../pty/ShellIntegrationEvents").ShellIntegrationEvent) => void) | undefined;
   onData: ((data: string) => void) | undefined;
   onExit: ((code: number) => void) | undefined;
 }> = [];
@@ -52,13 +52,14 @@ vi.mock("../pty/PtySession", () => {
     kill = vi.fn();
     pause = vi.fn();
     resume = vi.fn();
-    setCurrentCwdSink = vi.fn((fn: ((cwd: string) => void) | undefined) => {
-      const tracked = mockPtySessions.find((p) => p.id === this.id);
-      if (tracked) {
-        tracked.cwdSink = fn;
-      }
-    });
-    setShellIntegrationSink = vi.fn();
+    setShellIntegrationSink = vi.fn(
+      (fn: ((event: import("../pty/ShellIntegrationEvents").ShellIntegrationEvent) => void) | undefined) => {
+        const tracked = mockPtySessions.find((p) => p.id === this.id);
+        if (tracked) {
+          tracked.shellIntegrationSink = fn;
+        }
+      },
+    );
     setShellIntegrationNonce = vi.fn();
     private _onDataCallback: ((data: string) => void) | undefined;
     private _onExitCallback: ((code: number) => void) | undefined;
@@ -94,8 +95,8 @@ vi.mock("../pty/PtySession", () => {
         write: this.write,
         resize: this.resize,
         kill: this.kill,
-        setCurrentCwdSink: this.setCurrentCwdSink,
-        cwdSink: undefined,
+        setShellIntegrationSink: this.setShellIntegrationSink,
+        shellIntegrationSink: undefined,
         onData: undefined,
         onExit: undefined,
       });
@@ -417,22 +418,22 @@ describe("SessionManager: getCurrentCwd", () => {
     sm.dispose();
   });
 
-  it("registers a sink with PtySession that routes parsed cwds back via setCurrentCwd", () => {
+  it("registers a unified sink with PtySession that routes parsed cwds back via setCurrentCwd", () => {
     const sm = new SessionManager();
     const webview = createMockWebview();
 
     const id = sm.createSession("sidebar", webview);
     const tracked = mockPtySessions.find((p) => p.id === id);
     expect(tracked).toBeDefined();
-    expect(tracked!.setCurrentCwdSink).toHaveBeenCalledTimes(1);
-    expect(tracked!.cwdSink).toBeDefined();
+    expect(tracked!.setShellIntegrationSink).toHaveBeenCalledTimes(1);
+    expect(tracked!.shellIntegrationSink).toBeDefined();
 
-    // Simulate the parser firing — should land in the session's currentCwd.
-    tracked!.cwdSink!("/tmp/foo");
+    // Simulate the parser firing a cwd event — should land in session.currentCwd.
+    tracked!.shellIntegrationSink!({ kind: "cwd", cwd: "/tmp/foo" });
     expect(sm.getCurrentCwd(id)).toBe("/tmp/foo");
 
     // Subsequent emits replace the previous value.
-    tracked!.cwdSink!("/tmp/bar");
+    tracked!.shellIntegrationSink!({ kind: "cwd", cwd: "/tmp/bar" });
     expect(sm.getCurrentCwd(id)).toBe("/tmp/bar");
 
     sm.dispose();

@@ -586,12 +586,11 @@ export class SnapshotPersistence {
       snapshotAt: Date.now(),
       shellExited: session.shellExited ?? false,
       exitCode: session.exitCode ?? null,
-      // Snapshot a shallow copy so concurrent appendToCommandOutput /
-      // closeCommand calls during JSON.stringify can't mutate what we hand
-      // off to the storage layer. The TrackedCommand objects themselves
-      // are pure data (no methods), so shallow clone is sufficient.
-      trackedCommands:
-        session.commandTracking.commands.length > 0 ? [...session.commandTracking.commands] : undefined,
+      // Snapshot a shallow copy so concurrent appendOutput / close calls
+      // during JSON.stringify can't mutate what we hand off to the storage
+      // layer. The TrackedCommand objects themselves are pure data (no
+      // methods), so shallow clone is sufficient.
+      trackedCommands: session.commandTracking.commands.length > 0 ? [...session.commandTracking.commands] : undefined,
     };
     return { metadata, buffer };
   }

@@ -13,14 +13,15 @@
 //      asimov/changes/restore-terminal-sessions/design.md (D1-D13).
 
 import * as crypto from "node:crypto";
-import { ScrollbackDumpAbortedError, ScrollbackDumpTimeoutError } from "../types/errors";
 import * as PtyManager from "../pty/PtyManager";
 import { PtySession } from "../pty/PtySession";
 import { queryProcessCwd } from "../pty/processCwd";
+import type { InjectionContext } from "../pty/ShellIntegrationInjector";
 import { CustomNameRegistry, type CustomNameStorage, noopCustomNameStorage } from "./CustomNameRegistry";
 import { EditorPanelRegistry } from "./EditorPanelRegistry";
 import type { MessageSender } from "./OutputBuffer";
 import { OutputBuffer } from "./OutputBuffer";
+import { ScrollbackDumpCoordinator, type ScrollbackDumpPayload } from "./ScrollbackDumpCoordinator";
 import type {
   LiveEditorPanelsRecord,
   PendingSnapshot,
@@ -28,18 +29,8 @@ import type {
   SessionSnapshotsIndex,
 } from "./SessionSnapshot";
 import type { SessionStorage } from "./SessionStorage";
+import { ShellIntegrationCoordinator } from "./ShellIntegrationCoordinator";
 import { defaultHeadlessFactory, defaultSerializeAddonFactory, SnapshotPersistence } from "./SnapshotPersistence";
-import { injectShellIntegration, type InjectionContext } from "../pty/ShellIntegrationInjector";
-import type { ShellIntegrationEvent } from "../pty/ShellIntegrationEvents";
-import {
-  appendToCommandOutput,
-  closeCommand,
-  hydrateCommandTrackingRuntime,
-  lastCompleted,
-  openCommand,
-  setInFlightCommandLine,
-  type TrackedCommand,
-} from "./TrackedCommand";
 import type {
   HeadlessFactory,
   MemoryMetrics,
@@ -47,6 +38,7 @@ import type {
   SessionState,
   TerminalSession,
 } from "./TerminalSession";
+import { CommandTracker, type TrackedCommand } from "./TrackedCommand";
 
 // ─── Re-exports (preserve external API for tests + providers) ──────
 
@@ -134,30 +126,19 @@ export class SessionManager {
   /** Default grace window applied when scheduleDestroyForView is called without an explicit delay. */
   private readonly defaultGracePeriodMs: number;
 
-  /** Optional shell-integration injector context (see SessionManagerOptions). */
-  private readonly shellIntegrationCtx: InjectionContext | undefined;
-
-  /** Per-session cleanup callbacks from the shell-integration injector. */
-  private readonly shellIntegrationCleanups = new Map<string, () => void>();
+  /**
+   * Shell-integration coordinator — owns the per-session cleanup map, the
+   * injector wiring, and the OSC 633 event reducer. Extracted from
+   * SessionManager so the central registry stays focused on session lifecycle.
+   * See: .reviews/round-1.md [W1].
+   */
+  private readonly shellIntegration: ShellIntegrationCoordinator;
 
   /**
-   * In-flight scrollback-dump requests, keyed by `requestId`. Resolved when
-   * the webview replies with a matching `ScrollbackDumpMessage`; rejected on
-   * session dispose (Aborted) or 15 s backstop timeout (Timeout).
-   * See: asimov/changes/export-terminal-session/design.md D4.
+   * Scrollback-dump coordinator — owns the in-flight `pendingDumps` map and
+   * the request/reply/abort/timeout state machine. See: design.md D4 + W1.
    */
-  private readonly pendingDumps = new Map<
-    string,
-    {
-      sessionId: string;
-      resolve: (value: { data: string; lineCount: number; truncated: boolean }) => void;
-      reject: (err: Error) => void;
-      timer: ReturnType<typeof setTimeout>;
-    }
-  >();
-
-  /** 15-second backstop timeout for `requestScrollbackDump`. See D4. */
-  private static readonly SCROLLBACK_DUMP_TIMEOUT_MS = 15_000;
+  private readonly scrollbackDumps: ScrollbackDumpCoordinator;
 
   /** Per-number custom-name persistence (workspace-scoped). */
   private readonly customNames: CustomNameRegistry;
@@ -182,7 +163,14 @@ export class SessionManager {
     this.customNames = new CustomNameRegistry(customNameStorage);
     this.storage = options.storage ?? null;
     this.defaultGracePeriodMs = options.gracePeriodMs ?? DEFAULT_GRACE_DESTROY_MS;
-    this.shellIntegrationCtx = options.shellIntegrationContext;
+    this.shellIntegration = new ShellIntegrationCoordinator({
+      ctx: options.shellIntegrationContext,
+      getSession: (id) => this.sessions.get(id),
+      setCurrentCwd: (id, cwd) => this.setCurrentCwd(id, cwd),
+    });
+    this.scrollbackDumps = new ScrollbackDumpCoordinator({
+      postMessage: (webview, msg) => this.safePostMessage(webview, msg),
+    });
     this.editorPanels = new EditorPanelRegistry((record) => {
       // Only write through to storage when restore is enabled; otherwise we
       // produce churn against `workspaceState` for no benefit.
@@ -410,25 +398,19 @@ export class SessionManager {
       // (--noprofile --norc / -NoProfile); the spawn then proceeds with the
       // original args/env, and per-command export commands fall back to the
       // no-tracked-commands toast (design D6).
-      let spawnArgs = resolvedArgs;
-      let spawnEnv = baseEnv;
-      if (this.shellIntegrationCtx) {
-        const injection = injectShellIntegration(resolvedShell, resolvedArgs, baseEnv, this.shellIntegrationCtx);
-        if (injection) {
-          spawnArgs = injection.args;
-          spawnEnv = injection.env;
-          pty.setShellIntegrationNonce(injection.nonce);
-          this.shellIntegrationCleanups.set(id, injection.cleanup);
-        }
+      let spawnArgs: readonly string[] = resolvedArgs;
+      let spawnEnv: Record<string, string> = baseEnv;
+      const injection = this.shellIntegration.injectAtSpawn(id, resolvedShell, resolvedArgs, baseEnv);
+      if (injection) {
+        spawnArgs = injection.args;
+        spawnEnv = injection.env;
+        pty.setShellIntegrationNonce(injection.nonce);
       }
-      pty.spawn(nodePty, resolvedShell, spawnArgs, { cwd, env: spawnEnv });
-      // Wire passive OSC 7 / OSC 633 cwd parser. Sink receives sanitized absolute
-      // paths only; PtySession guarantees byte-identical forwarding to onData.
-      pty.setCurrentCwdSink((cwd) => this.setCurrentCwd(id, cwd));
-      // Wire shell-integration tracker. Subscribes to A/B/C/D/E events from the
-      // same OSC parser (cwd events also surface here but are handled above; we
-      // ignore them in `_handleShellIntegrationEvent` to avoid double-dispatch).
-      pty.setShellIntegrationSink((event) => this._handleShellIntegrationEvent(id, event));
+      pty.spawn(nodePty, resolvedShell, [...spawnArgs], { cwd, env: spawnEnv });
+      // Wire the unified shell-integration sink — receives every parsed event
+      // from the passive OSC 7 / OSC 633 parser (cwd + A/B/C/D/E markers).
+      // PtySession guarantees byte-identical forwarding to onData regardless.
+      pty.setShellIntegrationSink(this.shellIntegration.makeSink(id));
     }
 
     const outputBuffer = new OutputBuffer(id, webview, pty);
@@ -475,8 +457,8 @@ export class SessionManager {
       // Hydrate from snapshot when restoring so "Export Last Command…" /
       // "Export Command…" survive window reload + IDE restart. Fresh
       // sessions and back-compat snapshots (no `trackedCommands` field)
-      // get a clean runtime.
-      commandTracking: hydrateCommandTrackingRuntime(restoreFrom?.metadata.trackedCommands),
+      // get a clean tracker.
+      commandTracking: new CommandTracker(restoreFrom?.metadata.trackedCommands),
     };
 
     // Deactivate other sessions in the same view (only for root tab sessions)
@@ -521,11 +503,9 @@ export class SessionManager {
       this.appendToScrollback(session, data);
       this.snapshots.recordData(session, data);
       // Append to the in-flight tracked command (no-op when nothing is in
-      // flight). Cap is enforced inside appendToCommandOutput so a never-
-      // closing command can't grow `output` past 100 KB.
-      if (session.commandTracking.inFlight) {
-        appendToCommandOutput(session.commandTracking, data);
-      }
+      // flight). Cap is enforced inside CommandTracker.appendOutput so a
+      // never-closing command can't grow `output` past 100 KB.
+      session.commandTracking.appendOutput(data);
     };
 
     pty.onExit = (code: number) => {
@@ -791,51 +771,11 @@ export class SessionManager {
     return session.scrollbackCache.join("");
   }
 
-  // ─── Shell-integration command tracking ────────────────────────────
+  // ─── Shell-integration read API ─────────────────────────────────────
   //
-  // Wired in createTerminalSession via pty.setShellIntegrationSink. The state
-  // machine is driven by OSC 633 markers parsed in src/pty/oscParser.ts:
-  //   promptStart  (A)  → reset any orphan in-flight (defensive)
-  //   commandStart (B/C) → open a new command (idempotent — B+C dual-fire OK)
-  //   commandLine  (E)  → set commandLine on the open in-flight (nonce-checked)
-  //   commandEnd   (D)  → close, push to commands[], evict
-  // See: design.md D2, D5, D6.
-
-  private _handleShellIntegrationEvent(sessionId: string, event: ShellIntegrationEvent): void {
-    const session = this.sessions.get(sessionId);
-    if (!session) return;
-    const runtime = session.commandTracking;
-    switch (event.kind) {
-      case "cwd":
-        // Already routed via setCurrentCwdSink — don't double-handle. Falls
-        // through; kept explicit so the type narrowing is exhaustive.
-        return;
-      case "promptStart":
-        // If a prior command never closed, drop it rather than leak it into
-        // the next command's output. This is rare (shell crash, lost D) but
-        // observable when it happens.
-        runtime.inFlight = null;
-        return;
-      case "commandStart":
-        openCommand(runtime, {
-          id: crypto.randomUUID(),
-          now: Date.now(),
-          cwd: session.currentCwd ?? null,
-        });
-        return;
-      case "commandLine":
-        // Only trust the command-line when the per-session nonce matched.
-        // Forged E markers from untrusted output land with nonceValid=false
-        // and leave commandLine as the empty string (set by openCommand).
-        if (event.nonceValid) {
-          setInFlightCommandLine(runtime, event.commandLine);
-        }
-        return;
-      case "commandEnd":
-        closeCommand(runtime, { exitCode: event.exitCode, now: Date.now() });
-        return;
-    }
-  }
+  // OSC 633 routing + cleanup map live on the ShellIntegrationCoordinator.
+  // SessionManager exposes only the per-session read API for the export
+  // commands. See: .reviews/round-1.md [W1].
 
   /**
    * Return the tracked commands for a session in oldest-first order. Empty
@@ -843,7 +783,9 @@ export class SessionManager {
    */
   getTrackedCommands(sessionId: string): readonly TrackedCommand[] {
     const session = this.sessions.get(sessionId);
-    if (!session) return [];
+    if (!session) {
+      return [];
+    }
     return session.commandTracking.commands;
   }
 
@@ -853,79 +795,36 @@ export class SessionManager {
    */
   getLastCompletedCommand(sessionId: string): TrackedCommand | null {
     const session = this.sessions.get(sessionId);
-    if (!session) return null;
-    return lastCompleted(session.commandTracking);
+    if (!session) {
+      return null;
+    }
+    return session.commandTracking.lastCompleted;
   }
 
-  // ─── Scrollback dump IPC ───────────────────────────────────────────
+  // ─── Scrollback dump IPC (delegated) ───────────────────────────────
   //
   // See: asimov/changes/export-terminal-session/specs/webview-scrollback-dump/spec.md
   // See: asimov/changes/export-terminal-session/design.md D4
+  // See: .reviews/round-1.md [W1] — request/reply/abort/timeout state lives
+  // on ScrollbackDumpCoordinator now.
 
   /**
    * Ask the webview to serialise the full xterm.js scrollback for the given
-   * session and resolve with the payload. Returns a Promise that:
-   *   - resolves with `{ data, lineCount, truncated }` when the matching
-   *     `scrollbackDump` reply arrives.
-   *   - rejects with `ScrollbackDumpAbortedError` if the session is disposed.
-   *   - rejects with `ScrollbackDumpTimeoutError` after 15 s.
-   *
-   * Multiple concurrent calls for the same `sessionId` are dispatched with
-   * distinct `requestId` values. Webview-side dedupe ensures both replies
-   * carry identical payloads (see scrollbackDumpHandler.ts).
+   * session and resolve with the payload. Throws `ScrollbackDumpAbortedError`
+   * synchronously if the session is unknown (no webview to ask).
    */
-  async requestScrollbackDump(
-    sessionId: string,
-  ): Promise<{ data: string; lineCount: number; truncated: boolean }> {
+  async requestScrollbackDump(sessionId: string): Promise<ScrollbackDumpPayload> {
     const session = this.sessions.get(sessionId);
     if (!session) {
+      const { ScrollbackDumpAbortedError } = await import("../types/errors");
       throw new ScrollbackDumpAbortedError(sessionId, "<no-request-yet>");
     }
-    const requestId = crypto.randomUUID();
-    return new Promise((resolve, reject) => {
-      const timer = setTimeout(() => {
-        if (this.pendingDumps.delete(requestId)) {
-          reject(new ScrollbackDumpTimeoutError(sessionId, requestId));
-        }
-      }, SessionManager.SCROLLBACK_DUMP_TIMEOUT_MS);
-      this.pendingDumps.set(requestId, { sessionId, resolve, reject, timer });
-      this.safePostMessage(session.webview, {
-        type: "requestScrollbackDump",
-        tabId: sessionId,
-        requestId,
-      });
-    });
+    return this.scrollbackDumps.request(sessionId, session.webview);
   }
 
-  /**
-   * Resolve a pending `requestScrollbackDump` with the webview's reply.
-   * Called by providers when a `scrollbackDump` IPC message arrives.
-   * Silently ignores unknown / already-settled `requestId`s (defensive
-   * against double-fires + late replies after timeout).
-   */
-  handleScrollbackDump(
-    requestId: string,
-    payload: { data: string; lineCount: number; truncated: boolean },
-  ): void {
-    const pending = this.pendingDumps.get(requestId);
-    if (!pending) return;
-    clearTimeout(pending.timer);
-    this.pendingDumps.delete(requestId);
-    pending.resolve(payload);
-  }
-
-  /**
-   * Reject all pending dump requests targeting `sessionId` with
-   * `ScrollbackDumpAbortedError`. Called from cleanupSession + dispose.
-   */
-  private abortPendingDumpsForSession(sessionId: string): void {
-    for (const [requestId, pending] of this.pendingDumps) {
-      if (pending.sessionId === sessionId) {
-        clearTimeout(pending.timer);
-        this.pendingDumps.delete(requestId);
-        pending.reject(new ScrollbackDumpAbortedError(sessionId, requestId));
-      }
-    }
+  /** Resolve a pending dump request with the webview's reply. */
+  handleScrollbackDump(requestId: string, payload: ScrollbackDumpPayload): void {
+    this.scrollbackDumps.handleReply(requestId, payload);
   }
 
   /** Get aggregate memory usage metrics across all sessions. */
@@ -1174,22 +1073,11 @@ export class SessionManager {
     }
 
     // Reject every still-pending scrollback dump (the webviews are gone).
-    for (const [requestId, pending] of this.pendingDumps) {
-      clearTimeout(pending.timer);
-      pending.reject(new ScrollbackDumpAbortedError(pending.sessionId, requestId));
-    }
-    this.pendingDumps.clear();
+    this.scrollbackDumps.abortAll();
 
     // Run any remaining shell-integration cleanups (sessions that disposed
     // without going through cleanupSession — rare but possible during dispose).
-    for (const cleanup of this.shellIntegrationCleanups.values()) {
-      try {
-        cleanup();
-      } catch {
-        /* best-effort */
-      }
-    }
-    this.shellIntegrationCleanups.clear();
+    this.shellIntegration.cleanupAll();
 
     this.sessions.clear();
     this.viewSessions.clear();
@@ -1253,19 +1141,11 @@ export class SessionManager {
 
     // Reject any in-flight scrollback dumps for this session — the webview
     // is about to disappear and the response will never arrive (D4).
-    this.abortPendingDumpsForSession(sessionId);
+    this.scrollbackDumps.abortForSession(sessionId);
 
     // Run the shell-integration cleanup (per-session temp ZDOTDIR / bash
-    // init-file). Idempotent — see ShellIntegrationInjector.makeTempDirCleanup.
-    const integrationCleanup = this.shellIntegrationCleanups.get(sessionId);
-    if (integrationCleanup) {
-      try {
-        integrationCleanup();
-      } catch {
-        /* best-effort — OS temp cleanup will reclaim later */
-      }
-      this.shellIntegrationCleanups.delete(sessionId);
-    }
+    // init-file). Coordinator owns idempotence + try/catch.
+    this.shellIntegration.cleanupSession(sessionId);
 
     // Branch on lifecycle state — design.md D14+D15. "destroying" means the
     // user explicitly destroyed; we dispatch dropSession. "exited-preserved"

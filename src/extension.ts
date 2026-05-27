@@ -1,15 +1,15 @@
+import * as crypto from "node:crypto";
 import * as fs from "node:fs";
 import * as os from "node:os";
-import * as crypto from "node:crypto";
 import * as path from "node:path";
 import * as vscode from "vscode";
+import { exportBuffer, exportCommand, exportLastCommand, NO_FOCUS_TOAST } from "./commands/exportCommands";
 import { createWatcherPool } from "./providers/fsWatcherPool";
 import { createGitDecorationProvider } from "./providers/gitDecorationProvider";
 import { resolveRenameTargetTabId } from "./providers/resolveRenameTarget";
 import { TerminalEditorProvider } from "./providers/TerminalEditorProvider";
 import { TerminalPanelSerializer } from "./providers/TerminalPanelSerializer";
 import { TerminalViewProvider } from "./providers/TerminalViewProvider";
-import { exportBuffer, exportCommand, exportLastCommand, NO_FOCUS_TOAST } from "./commands/exportCommands";
 import { loadNodePty } from "./pty/PtyManager";
 import { SessionManager } from "./session/SessionManager";
 import { SessionStorage } from "./session/SessionStorage";
@@ -196,17 +196,29 @@ export function activate(context: vscode.ExtensionContext) {
     return lastFocusedProvider;
   };
 
+  // Helper: pick the sessionId to export. If a right-click delivered a
+  // `paneSessionId` AND that session is still live, use it. Otherwise fall
+  // through to the focused provider's active session — handles both the
+  // Command Palette invocation (no ctx) and the stale-ctx race where the
+  // user right-clicked a pane that's been closed in between. Returning
+  // `undefined` lets the downstream command surface NO_FOCUS_TOAST naturally.
+  // See: .reviews/round-1.md [W4].
+  const resolveExportSessionId = (ctx?: { paneSessionId?: string }): string | undefined => {
+    if (ctx?.paneSessionId && sessionManager.getSession(ctx.paneSessionId)) {
+      return ctx.paneSessionId;
+    }
+    return getFocusedProvider().getActiveSessionId();
+  };
+
   // Helper: assemble the dependency bag for the export commands. Resolved
   // lazily so the closure picks up the latest target sessionId at click time.
   // The caller decides whether sessionId comes from a right-click ctx
   // (`ctx.paneSessionId`) or the focused provider's active session.
-  const buildExportDeps = (
-    getSessionId: () => string | undefined,
-    sm: SessionManager,
-  ) => ({
+  const buildExportDeps = (getSessionId: () => string | undefined, sm: SessionManager) => ({
     sessionManager: sm,
     getFocusedSessionId: getSessionId,
-    getSessionName: (sessionId: string) => sm.getSession(sessionId)?.customName ?? sm.getSession(sessionId)?.name ?? "terminal",
+    getSessionName: (sessionId: string) =>
+      sm.getSession(sessionId)?.customName ?? sm.getSession(sessionId)?.name ?? "terminal",
     vsc: {
       showSaveDialog: (opts: vscode.SaveDialogOptions) => vscode.window.showSaveDialog(opts),
       showQuickPick: <T extends vscode.QuickPickItem>(
@@ -220,8 +232,7 @@ export function activate(context: vscode.ExtensionContext) {
       openExternal: (uri: vscode.Uri) => vscode.env.openExternal(uri),
       fs: vscode.workspace.fs,
     },
-    readmeShellIntegrationUrl:
-      "https://github.com/huybuidac/anywhere-terminal/blob/main/README.md#shell-integration",
+    readmeShellIntegrationUrl: "https://github.com/huybuidac/anywhere-terminal/blob/main/README.md#shell-integration",
   });
 
   // ─── Action Helpers ──────────────────────────────────────────
@@ -326,20 +337,21 @@ export function activate(context: vscode.ExtensionContext) {
     // right-click context menu (see package.json `menus.webview/context`). The
     // ctx arg carries the right-clicked pane's sessionId; falls back to the
     // focused provider's active session for Command Palette invocations.
+    //
+    // A right-click after a pane was just closed (race with destroySession)
+    // delivers a stale paneSessionId — `resolveExportSessionId` validates the
+    // id against the session map and silently falls through to the focused
+    // provider in that case, so the no-focus toast surfaces instead of the
+    // confusing "scrollback dump failed" error from `requestScrollbackDump`.
+    // See: .reviews/round-1.md [W4].
     vscode.commands.registerCommand("anywhereTerminal.exportBuffer", (ctx?: { paneSessionId?: string }) =>
-      exportBuffer(
-        buildExportDeps(() => ctx?.paneSessionId ?? getFocusedProvider().getActiveSessionId(), sessionManager),
-      ),
+      exportBuffer(buildExportDeps(() => resolveExportSessionId(ctx), sessionManager)),
     ),
     vscode.commands.registerCommand("anywhereTerminal.exportLastCommand", (ctx?: { paneSessionId?: string }) =>
-      exportLastCommand(
-        buildExportDeps(() => ctx?.paneSessionId ?? getFocusedProvider().getActiveSessionId(), sessionManager),
-      ),
+      exportLastCommand(buildExportDeps(() => resolveExportSessionId(ctx), sessionManager)),
     ),
     vscode.commands.registerCommand("anywhereTerminal.exportCommand", (ctx?: { paneSessionId?: string }) =>
-      exportCommand(
-        buildExportDeps(() => ctx?.paneSessionId ?? getFocusedProvider().getActiveSessionId(), sessionManager),
-      ),
+      exportCommand(buildExportDeps(() => resolveExportSessionId(ctx), sessionManager)),
     ),
     vscode.commands.registerCommand("anywhereTerminal.setFileTreePosition", async () => {
       const view = getFocusedProvider().view;
@@ -421,12 +433,12 @@ export function activate(context: vscode.ExtensionContext) {
         commandId: "anywhereTerminal.exportBuffer",
       },
     ];
-    void vscode.window
-      .showQuickPick(items, { placeHolder: "Export…", matchOnDescription: true })
-      .then((picked) => {
-        if (!picked) return;
-        return vscode.commands.executeCommand(picked.commandId, { paneSessionId: sessionId });
-      });
+    void vscode.window.showQuickPick(items, { placeHolder: "Export…", matchOnDescription: true }).then((picked) => {
+      if (!picked) {
+        return;
+      }
+      return vscode.commands.executeCommand(picked.commandId, { paneSessionId: sessionId });
+    });
   }
 
   // ─── Webview Context Menu Commands ────────────────────────────────
