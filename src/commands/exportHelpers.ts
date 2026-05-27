@@ -92,12 +92,12 @@ export interface FsLike {
  * error propagates.
  */
 export async function writeExportAtomically(target: vscode.Uri, content: string, fs: FsLike): Promise<void> {
-  // Use `.file(...)` rather than `target.with(...)` so callers that pass a
-  // simple `{ fsPath }`-shaped Uri (e.g. test mocks) still work. The real
-  // `vscode.Uri.file` returns a `file://`-scheme Uri — adequate for v1; if
-  // remote/virtual workspaces need scheme preservation later, switch to
-  // `target.with({ path: target.path + ".tmp" })`.
-  const tmpUri = vscode.Uri.file(`${target.fsPath}.tmp`);
+  // Preserve the target's scheme + authority so atomic write works on remote /
+  // virtual filesystems (SSH, container, github1s, etc.) per design D8. Using
+  // `vscode.Uri.file(target.fsPath + ".tmp")` would silently drop scheme back
+  // to `file://`, sending the temp write to the wrong host on a remote
+  // workspace.
+  const tmpUri = target.with({ path: `${target.path}.tmp` });
   const bytes = Buffer.from(content, "utf8");
   // Some VS Code FS providers don't widen Buffer → Uint8Array automatically.
   const payload = new Uint8Array(bytes.buffer, bytes.byteOffset, bytes.byteLength);

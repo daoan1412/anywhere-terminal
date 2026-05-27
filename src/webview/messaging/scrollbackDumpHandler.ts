@@ -3,8 +3,12 @@
 //
 // Serialises the xterm.js scrollback via @xterm/addon-serialize and replies
 // with the typed `scrollbackDump` payload. Concurrent requests for the same
-// `tabId` within one microtask are deduplicated: a single serialise produces
-// one payload, every queued `requestId` receives the same data.
+// `tabId` are deduplicated via an in-flight Promise map: while a serialize
+// is in progress for a tab, additional `requestId`s queue onto the same
+// pending result and all receive the same data when it lands. See
+// external-review [W2] for why a microtask boundary alone wasn't enough —
+// real postMessage events arrive as separate tasks, not microtasks, so the
+// prior coalescing only deduped synchronous spam, never user spam-clicks.
 //
 // See:
 //   asimov/changes/export-terminal-session/specs/webview-scrollback-dump/spec.md
@@ -33,56 +37,13 @@ export interface ScrollbackDumpDeps {
    */
   postMessage(msg: ScrollbackDumpMessage): void;
   /**
-   * Create a fresh `SerializeAddon` instance. Caller decides whether to
-   * lazily instantiate one per-tab or one per-dump. In production we create
-   * one per dump and dispose immediately — the addon's serialize() reads the
-   * Terminal's buffer without attaching to it.
+   * Create a fresh `SerializeAddon` instance. May be synchronous OR async —
+   * production wires this to a `await import("@xterm/addon-serialize")` so
+   * the addon module is pulled into the webview bundle only on first export
+   * (S1 lazy load). The addon's `serialize()` reads the Terminal's buffer
+   * without attaching to it; we create one per dump and dispose immediately.
    */
-  createSerializeAddon(): SerializeAddonLike;
-  /**
-   * Microtask scheduler — `queueMicrotask` in production, controllable from
-   * tests. We use a microtask boundary so multiple synchronous incoming
-   * requests for the same `tabId` collapse to one serialise.
-   */
-  scheduleMicrotask?: (fn: () => void) => void;
-}
-
-interface PendingDump {
-  requestId: string;
-}
-
-/**
- * Construct a handler closure. The returned function is wired into the
- * webview's MessageRouter for the `requestScrollbackDump` message type.
- */
-export function createScrollbackDumpHandler(deps: ScrollbackDumpDeps): (msg: RequestScrollbackDumpMessage) => void {
-  const schedule = deps.scheduleMicrotask ?? queueMicrotask;
-  const pendingByTab = new Map<string, PendingDump[]>();
-
-  return (msg: RequestScrollbackDumpMessage): void => {
-    const queue = pendingByTab.get(msg.tabId);
-    if (queue) {
-      queue.push({ requestId: msg.requestId });
-      return; // Microtask is already scheduled — coalesce.
-    }
-    const fresh: PendingDump[] = [{ requestId: msg.requestId }];
-    pendingByTab.set(msg.tabId, fresh);
-    schedule(() => {
-      const requests = pendingByTab.get(msg.tabId) ?? [];
-      pendingByTab.delete(msg.tabId);
-      const payload = computeDump(deps, msg.tabId);
-      for (const req of requests) {
-        deps.postMessage({
-          type: "scrollbackDump",
-          tabId: msg.tabId,
-          requestId: req.requestId,
-          data: payload.data,
-          lineCount: payload.lineCount,
-          truncated: payload.truncated,
-        });
-      }
-    });
-  };
+  createSerializeAddon(): SerializeAddonLike | Promise<SerializeAddonLike>;
 }
 
 interface DumpPayload {
@@ -91,13 +52,73 @@ interface DumpPayload {
   truncated: boolean;
 }
 
-function computeDump(deps: ScrollbackDumpDeps, tabId: string): DumpPayload {
+interface InFlightEntry {
+  ready: Promise<DumpPayload>;
+  /** Request IDs that have queued onto this in-flight serialize. */
+  requestIds: string[];
+}
+
+/**
+ * Construct a handler closure. The returned function is wired into the
+ * webview's MessageRouter for the `requestScrollbackDump` message type.
+ */
+export function createScrollbackDumpHandler(deps: ScrollbackDumpDeps): (msg: RequestScrollbackDumpMessage) => void {
+  const inFlightByTab = new Map<string, InFlightEntry>();
+
+  return (msg: RequestScrollbackDumpMessage): void => {
+    const existing = inFlightByTab.get(msg.tabId);
+    if (existing) {
+      existing.requestIds.push(msg.requestId);
+      return;
+    }
+    const requestIds: string[] = [msg.requestId];
+    const ready = computeDump(deps, msg.tabId);
+    inFlightByTab.set(msg.tabId, { ready, requestIds });
+    ready.then(
+      (payload) => {
+        // Snapshot + clear BEFORE posting so any re-entrant request landing
+        // during postMessage starts a fresh serialize, not piggybacks onto a
+        // result we've already drained.
+        inFlightByTab.delete(msg.tabId);
+        for (const requestId of requestIds) {
+          deps.postMessage({
+            type: "scrollbackDump",
+            tabId: msg.tabId,
+            requestId,
+            data: payload.data,
+            lineCount: payload.lineCount,
+            truncated: payload.truncated,
+          });
+        }
+      },
+      (err) => {
+        // Reply with empty payload so the extension's request-correlated
+        // Promise resolves — the dump coordinator awaits this and would
+        // otherwise hang. Logged for diagnosis but not user-surfaced.
+        inFlightByTab.delete(msg.tabId);
+        console.error("[AnyWhere Terminal] scrollback dump failed:", err);
+        for (const requestId of requestIds) {
+          deps.postMessage({
+            type: "scrollbackDump",
+            tabId: msg.tabId,
+            requestId,
+            data: "",
+            lineCount: 0,
+            truncated: false,
+          });
+        }
+      },
+    );
+  };
+}
+
+async function computeDump(deps: ScrollbackDumpDeps, tabId: string): Promise<DumpPayload> {
   const terminal = deps.getTerminal(tabId);
   if (!terminal) {
     // Unknown tab → empty payload per spec scenario "Unknown tabId".
     return { data: "", lineCount: 0, truncated: false };
   }
-  const addon = deps.createSerializeAddon();
+  const addon = await deps.createSerializeAddon();
   try {
     terminal.loadAddon(addon as unknown as { activate(t: Terminal): void; dispose(): void });
     const data = addon.serialize();

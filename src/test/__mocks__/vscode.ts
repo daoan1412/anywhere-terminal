@@ -76,12 +76,59 @@ function parseUri(raw: string, strict?: boolean) {
   return { scheme, authority, path: pathPart, query, fragment, fsPath };
 }
 
+// `with()` clones the Uri-like with an updated `path` (and re-derives `fsPath`
+// so consumers reading either field see the post-mutation state). Real
+// `vscode.Uri.with` accepts more fields (scheme/authority/query/fragment) but
+// we only need `path` here.
+interface UriLike {
+  scheme?: string;
+  authority?: string;
+  path: string;
+  query?: string;
+  fragment?: string;
+  fsPath: string;
+  with(change: { scheme?: string; authority?: string; path?: string; query?: string; fragment?: string }): UriLike;
+}
+
+function makeUri(parts: {
+  scheme?: string;
+  authority?: string;
+  path: string;
+  query?: string;
+  fragment?: string;
+  fsPath?: string;
+}): UriLike {
+  const fsPath = parts.fsPath ?? parts.path;
+  return {
+    scheme: parts.scheme,
+    authority: parts.authority,
+    path: parts.path,
+    query: parts.query,
+    fragment: parts.fragment,
+    fsPath,
+    with(change) {
+      return makeUri({
+        scheme: change.scheme ?? parts.scheme,
+        authority: change.authority ?? parts.authority,
+        path: change.path ?? parts.path,
+        query: change.query ?? parts.query,
+        fragment: change.fragment ?? parts.fragment,
+        // Real vscode.Uri re-derives fsPath from path on `with({path})` — match
+        // that semantic so callers see consistent `.fsPath` after mutation.
+        fsPath: change.path ?? parts.fsPath ?? parts.path,
+      });
+    },
+  };
+}
+
 export const Uri = {
-  joinPath: (base: { fsPath: string }, ...pathSegments: string[]) => ({
-    fsPath: [base.fsPath, ...pathSegments].join("/"),
-  }),
-  file: (path: string) => ({ fsPath: path }),
-  parse: parseUri,
+  joinPath: (base: { fsPath: string }, ...pathSegments: string[]) =>
+    makeUri({ path: [base.fsPath, ...pathSegments].join("/") }),
+  file: (filePath: string) => makeUri({ scheme: "file", path: filePath, fsPath: filePath }),
+  // Wrap `parseUri`'s plain object in `makeUri` so callers get a `.with()` method
+  // matching the real `vscode.Uri` shape (needed for atomic-write tmp-path scheme
+  // preservation — see exportHelpers W1).
+  parse: (raw: string, strict?: boolean) => makeUri(parseUri(raw, strict)),
 };
 
 // ─── CancellationToken / Source ─────────────────────────────────────

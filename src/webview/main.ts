@@ -11,7 +11,6 @@ declare function acquireVsCodeApi(): {
   setState(state: unknown): void;
 };
 
-import { SerializeAddon } from "@xterm/addon-serialize";
 import type {
   ExtensionToWebViewMessage,
   HoverPreviewSettings,
@@ -252,10 +251,22 @@ function removeTerminal(id: string): void {
 
 // ─── Scrollback Dump (export-terminal-session) ───────────────────────
 
+// S1: defer `@xterm/addon-serialize` to first-export time. Memoised after the
+// first call so subsequent dumps don't re-import. The handler accepts a
+// Promise-returning factory so this dynamic import composes naturally.
+let _serializeAddonCtor: typeof import("@xterm/addon-serialize").SerializeAddon | null = null;
+async function loadSerializeAddon(): Promise<InstanceType<typeof import("@xterm/addon-serialize").SerializeAddon>> {
+  if (!_serializeAddonCtor) {
+    const mod = await import("@xterm/addon-serialize");
+    _serializeAddonCtor = mod.SerializeAddon;
+  }
+  return new _serializeAddonCtor();
+}
+
 const handleScrollbackDump = createScrollbackDumpHandler({
   getTerminal: (tabId) => store.terminals.get(tabId)?.terminal,
   postMessage: (msg) => vscode.postMessage(msg),
-  createSerializeAddon: () => new SerializeAddon(),
+  createSerializeAddon: loadSerializeAddon,
 });
 
 // ─── Message Router ─────────────────────────────────────────────────

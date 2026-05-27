@@ -183,4 +183,35 @@ describe("writeExportAtomically", () => {
     await writeExportAtomically(target, "héllo — wörld", fs);
     expect(fs.calls[0].payload).toBe("héllo — wörld");
   });
+
+  it("[W1] preserves the target Uri scheme + authority on the tmp file (remote/virtual workspace)", async () => {
+    // Spec D8: must use VS Code workspace FS so remote / virtual workspaces
+    // work. Building the tmp Uri via `Uri.file(target.fsPath + '.tmp')` would
+    // silently downgrade scheme back to `file://`, sending the write to the
+    // wrong host. `target.with({ path })` clones every other field.
+    const calls: Array<{ op: string; scheme?: string; authority?: string; path: string }> = [];
+    const remoteFs: FsLike = {
+      async writeFile(uri, _bytes) {
+        const u = uri as unknown as { scheme?: string; authority?: string; path: string };
+        calls.push({ op: "write", scheme: u.scheme, authority: u.authority, path: u.path });
+      },
+      async rename(src, dst) {
+        const a = src as unknown as { scheme?: string; authority?: string; path: string };
+        const b = dst as unknown as { scheme?: string; authority?: string; path: string };
+        calls.push({ op: "rename:src", scheme: a.scheme, authority: a.authority, path: a.path });
+        calls.push({ op: "rename:dst", scheme: b.scheme, authority: b.authority, path: b.path });
+      },
+      async delete() {
+        /* unused in success path */
+      },
+    };
+    // Build a remote-shaped Uri via the mock's make-with-fields path.
+    const target = vscode.Uri.parse("vscode-remote://ssh-remote+myhost/home/me/out.txt", true) as unknown as vscode.Uri;
+    await writeExportAtomically(target, "x", remoteFs);
+    expect(calls).toEqual([
+      { op: "write", scheme: "vscode-remote", authority: "ssh-remote+myhost", path: "/home/me/out.txt.tmp" },
+      { op: "rename:src", scheme: "vscode-remote", authority: "ssh-remote+myhost", path: "/home/me/out.txt.tmp" },
+      { op: "rename:dst", scheme: "vscode-remote", authority: "ssh-remote+myhost", path: "/home/me/out.txt" },
+    ]);
+  });
 });

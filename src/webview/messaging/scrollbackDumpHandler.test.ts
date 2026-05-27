@@ -51,11 +51,13 @@ function makeAddon(payload: string, calls: { count: number }): SerializeAddonLik
 }
 
 /**
- * Synchronous microtask scheduler — the handler is designed to flush within
- * a microtask, so for tests we invoke immediately and assert.
+ * Flush any pending microtasks so handler replies (which post inside a
+ * `.then()` callback on the internal in-flight Promise) land before assertions.
+ * Two awaits guard against handler chains nesting one extra microtask deep.
  */
-function syncScheduler(fn: () => void): void {
-  fn();
+async function flushMicrotasks(): Promise<void> {
+  await Promise.resolve();
+  await Promise.resolve();
 }
 
 function makeDeps(opts: {
@@ -76,12 +78,11 @@ function makeDeps(opts: {
       const term = [...opts.terminals.values()][0];
       return makeAddon(term?.serialised ?? "", calls);
     },
-    scheduleMicrotask: syncScheduler,
   };
 }
 
 describe("scrollbackDumpHandler: happy path", () => {
-  it("replies with serialized data + lineCount + truncated=false when under cap", () => {
+  it("replies with serialized data + lineCount + truncated=false when under cap", async () => {
     const terminals = new Map([
       ["tab-1", makeTerminal({ serialised: "hello\r\nworld\r\n", bufferLength: 2, scrollbackCap: 1000 })],
     ]);
@@ -89,6 +90,7 @@ describe("scrollbackDumpHandler: happy path", () => {
     const handler = createScrollbackDumpHandler(makeDeps({ terminals, posted }));
 
     handler({ type: "requestScrollbackDump", tabId: "tab-1", requestId: "req-1" });
+    await flushMicrotasks();
 
     expect(posted).toEqual([
       {
@@ -102,7 +104,7 @@ describe("scrollbackDumpHandler: happy path", () => {
     ]);
   });
 
-  it("reports truncated=true when buffer length reaches scrollback cap + viewport rows", () => {
+  it("reports truncated=true when buffer length reaches scrollback cap + viewport rows", async () => {
     // The effective cap on `buffer.normal.length` is `scrollback + rows` —
     // see W2 in .reviews/round-2.md. lineCount === scrollback + rows is the
     // boundary that signals "at cap, may be truncating".
@@ -110,11 +112,12 @@ describe("scrollbackDumpHandler: happy path", () => {
     const posted: ScrollbackDumpMessage[] = [];
     const handler = createScrollbackDumpHandler(makeDeps({ terminals, posted }));
     handler({ type: "requestScrollbackDump", tabId: "tab-1", requestId: "req-1" });
+    await flushMicrotasks();
     expect(posted[0].truncated).toBe(true);
     expect(posted[0].lineCount).toBe(5024);
   });
 
-  it("[W2] does NOT report truncated when buffer is exactly `rows` lines below the scrollback cap", () => {
+  it("[W2 round-2] does NOT report truncated when buffer is exactly `rows` lines below the scrollback cap", async () => {
     // Pre-fix, a terminal with `rows=24, scrollback=1000, bufferLength=1000`
     // (i.e. 1000-24 = 976 scrollback lines + 24 viewport = 1000 lines)
     // wrongly reported truncated=true. The viewport-offset correction makes
@@ -123,18 +126,20 @@ describe("scrollbackDumpHandler: happy path", () => {
     const posted: ScrollbackDumpMessage[] = [];
     const handler = createScrollbackDumpHandler(makeDeps({ terminals, posted }));
     handler({ type: "requestScrollbackDump", tabId: "tab-1", requestId: "req-1" });
+    await flushMicrotasks();
     expect(posted[0].truncated).toBe(false);
     expect(posted[0].lineCount).toBe(1000);
   });
 });
 
 describe("scrollbackDumpHandler: unknown tab (spec scenario)", () => {
-  it("replies with empty payload rather than dropping the request", () => {
+  it("replies with empty payload rather than dropping the request", async () => {
     const terminals = new Map<string, FakeTerminal>();
     const posted: ScrollbackDumpMessage[] = [];
     const handler = createScrollbackDumpHandler(makeDeps({ terminals, posted }));
 
     handler({ type: "requestScrollbackDump", tabId: "nonexistent", requestId: "req-1" });
+    await flushMicrotasks();
 
     expect(posted).toEqual([
       {
@@ -149,28 +154,20 @@ describe("scrollbackDumpHandler: unknown tab (spec scenario)", () => {
   });
 });
 
-describe("scrollbackDumpHandler: dedupe (F5 fix)", () => {
-  it("collapses N concurrent requests for the same tabId to ONE serialize call", () => {
+describe("scrollbackDumpHandler: dedupe via in-flight Promise (external-review W2)", () => {
+  it("collapses N concurrent requests for the same tabId to ONE serialize call (sync arrival)", async () => {
     const terminals = new Map([["tab-1", makeTerminal({ serialised: "shared-payload", bufferLength: 1 })]]);
     const posted: ScrollbackDumpMessage[] = [];
     const serializeCalls = { count: 0 };
-    // Defer microtask so we can flush manually.
-    const scheduledRef: { fn: (() => void) | null } = { fn: null };
-    const deps: ScrollbackDumpDeps = {
-      ...makeDeps({ terminals, posted, serializeCalls }),
-      scheduleMicrotask: (fn) => {
-        scheduledRef.fn = fn;
-      },
-    };
-    const handler = createScrollbackDumpHandler(deps);
+    const handler = createScrollbackDumpHandler(makeDeps({ terminals, posted, serializeCalls }));
 
     handler({ type: "requestScrollbackDump", tabId: "tab-1", requestId: "req-1" });
     handler({ type: "requestScrollbackDump", tabId: "tab-1", requestId: "req-2" });
     handler({ type: "requestScrollbackDump", tabId: "tab-1", requestId: "req-3" });
 
-    // No replies yet — they wait on the microtask.
+    // Pre-resolve nothing has fired yet.
     expect(posted).toEqual([]);
-    scheduledRef.fn?.();
+    await flushMicrotasks();
 
     expect(serializeCalls.count).toBe(1); // one serialize for three requests
     expect(posted).toHaveLength(3);
@@ -182,7 +179,45 @@ describe("scrollbackDumpHandler: dedupe (F5 fix)", () => {
     expect(posted.map((r) => r.requestId)).toEqual(["req-1", "req-2", "req-3"]);
   });
 
-  it("does NOT dedupe across different tabIds", () => {
+  it("[W2] dedupes ACROSS separate task boundaries while a serialize is still in flight", async () => {
+    // The realistic failure mode the microtask design missed: real postMessage
+    // events arrive as DIFFERENT tasks. We simulate that by deferring the
+    // addon's creation behind a manually-resolved Promise, then firing the
+    // second request between two tasks while the first is still in flight.
+    const terminals = new Map([["tab-1", makeTerminal({ serialised: "shared", bufferLength: 1 })]]);
+    const posted: ScrollbackDumpMessage[] = [];
+    const serializeCalls = { count: 0 };
+    let resolveAddon: (a: SerializeAddonLike) => void;
+    const addonReady = new Promise<SerializeAddonLike>((r) => {
+      resolveAddon = r;
+    });
+    const deps: ScrollbackDumpDeps = {
+      getTerminal: (id) => terminals.get(id) as unknown as import("@xterm/xterm").Terminal | undefined,
+      postMessage: (m) => posted.push(m),
+      createSerializeAddon: () => addonReady,
+    };
+    const handler = createScrollbackDumpHandler(deps);
+
+    // First request kicks off the serialize (addon creation pending).
+    handler({ type: "requestScrollbackDump", tabId: "tab-1", requestId: "req-1" });
+    // Yield to event loop — second request arrives "as a separate task".
+    await flushMicrotasks();
+    handler({ type: "requestScrollbackDump", tabId: "tab-1", requestId: "req-2" });
+    await flushMicrotasks();
+
+    // Still in flight, no replies yet.
+    expect(posted).toEqual([]);
+
+    // Resolve the addon → both requests get the SAME payload via one serialize.
+    resolveAddon!(makeAddon("shared", serializeCalls));
+    await flushMicrotasks();
+
+    expect(serializeCalls.count).toBe(1);
+    expect(posted).toHaveLength(2);
+    expect(posted.map((r) => r.requestId).sort()).toEqual(["req-1", "req-2"]);
+  });
+
+  it("does NOT dedupe across different tabIds", async () => {
     const terminals = new Map([
       ["tab-1", makeTerminal({ serialised: "a", bufferLength: 1 })],
       ["tab-2", makeTerminal({ serialised: "b", bufferLength: 1 })],
@@ -198,30 +233,32 @@ describe("scrollbackDumpHandler: dedupe (F5 fix)", () => {
         serializeCalls.count++;
         return { serialize: () => which, dispose() {} };
       },
-      scheduleMicrotask: syncScheduler,
     };
     const handler = createScrollbackDumpHandler(deps);
     handler({ type: "requestScrollbackDump", tabId: "tab-1", requestId: "r1" });
     handler({ type: "requestScrollbackDump", tabId: "tab-2", requestId: "r2" });
+    await flushMicrotasks();
     expect(serializeCalls.count).toBe(2);
     expect(posted).toHaveLength(2);
   });
 
-  it("a second wave of requests after a flush triggers a fresh serialize", () => {
+  it("a second wave of requests after the first completes triggers a fresh serialize", async () => {
     const terminals = new Map([["tab-1", makeTerminal({ serialised: "wave-data", bufferLength: 1 })]]);
     const posted: ScrollbackDumpMessage[] = [];
     const serializeCalls = { count: 0 };
     const handler = createScrollbackDumpHandler(makeDeps({ terminals, posted, serializeCalls }));
 
     handler({ type: "requestScrollbackDump", tabId: "tab-1", requestId: "wave1" });
+    await flushMicrotasks();
     expect(serializeCalls.count).toBe(1);
     handler({ type: "requestScrollbackDump", tabId: "tab-1", requestId: "wave2" });
+    await flushMicrotasks();
     expect(serializeCalls.count).toBe(2); // Fresh serialize after the first flush completed.
   });
 });
 
-describe("scrollbackDumpHandler: side-effect hygiene", () => {
-  it("disposes the addon after every serialize, even on a throw", () => {
+describe("scrollbackDumpHandler: error path", () => {
+  it("disposes the addon after every serialize, even on a throw", async () => {
     let disposed = false;
     const terminals = new Map([["tab-1", makeTerminal()]]);
     const posted: ScrollbackDumpMessage[] = [];
@@ -236,10 +273,17 @@ describe("scrollbackDumpHandler: side-effect hygiene", () => {
           disposed = true;
         },
       }),
-      scheduleMicrotask: syncScheduler,
     };
     const handler = createScrollbackDumpHandler(deps);
-    expect(() => handler({ type: "requestScrollbackDump", tabId: "tab-1", requestId: "r1" })).toThrow();
+    handler({ type: "requestScrollbackDump", tabId: "tab-1", requestId: "r1" });
+    await flushMicrotasks();
+    // Addon disposal happens regardless of serialize() throwing — the `finally`
+    // block in computeDump guarantees it.
     expect(disposed).toBe(true);
+    // The error path emits an empty payload so the extension-side pending
+    // Promise resolves cleanly instead of timing out.
+    expect(posted).toEqual([
+      { type: "scrollbackDump", tabId: "tab-1", requestId: "r1", data: "", lineCount: 0, truncated: false },
+    ]);
   });
 });
