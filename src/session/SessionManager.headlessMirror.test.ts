@@ -236,14 +236,17 @@ describe("SessionManager headless mirror", () => {
     });
 
     // The mirror must be built eagerly + seeded with the prior buffer BEFORE
-    // any pty.onData fires.
+    // any pty.onData fires. A trailing `\r\x1b[2K` wipes the inherited prompt
+    // row so the new PTY's prompt overwrites it cleanly — without this, every
+    // idle reload would append a stale prompt to the next snapshot, stacking
+    // linearly across reloads.
     expect((fx as any).ctorCalls).toBe(1);
-    expect((fx.built[0] as any).writes).toEqual(["PRIOR-CONTENT-FROM-DISK"]);
+    expect((fx.built[0] as any).writes).toEqual(["PRIOR-CONTENT-FROM-DISK\r\x1b[2K"]);
 
     // New PTY output then appends — the seeded content stays in front.
     const pty = mockPtySessions[0];
     pty.onData?.("NEW-PROMPT");
-    expect((fx.built[0] as any).writes).toEqual(["PRIOR-CONTENT-FROM-DISK", "NEW-PROMPT"]);
+    expect((fx.built[0] as any).writes).toEqual(["PRIOR-CONTENT-FROM-DISK\r\x1b[2K", "NEW-PROMPT"]);
 
     sm.dispose();
   });

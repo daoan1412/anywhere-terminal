@@ -90,8 +90,35 @@ describe("CommandTracker: lifecycle", () => {
   it("close with exitCode=null records null (D without arg)", () => {
     const tr = new CommandTracker();
     tr.open({ id: nextId(), now: 1000, cwd: null });
+    tr.setCommandLine("ls");
     tr.close({ exitCode: null, now: 2000 });
     expect(tr.commands[0].exitCode).toBeNull();
+  });
+
+  it("close discards a command with empty commandLine AND empty output (prompt-repaint noise)", () => {
+    const tr = new CommandTracker();
+    tr.open({ id: nextId(), now: 1000, cwd: null });
+    tr.close({ exitCode: 0, now: 2000 });
+    expect(tr.commands).toEqual([]);
+    expect(tr.inFlight).toBeNull();
+  });
+
+  it("close keeps a command with commandLine but no output (e.g. `cd /tmp`)", () => {
+    const tr = new CommandTracker();
+    tr.open({ id: nextId(), now: 1000, cwd: null });
+    tr.setCommandLine("cd /tmp");
+    tr.close({ exitCode: 0, now: 2000 });
+    expect(tr.commands).toHaveLength(1);
+    expect(tr.commands[0].commandLine).toBe("cd /tmp");
+  });
+
+  it("close keeps a command with output but no commandLine (E nonce failed)", () => {
+    const tr = new CommandTracker();
+    tr.open({ id: nextId(), now: 1000, cwd: null });
+    tr.appendOutput("some output");
+    tr.close({ exitCode: 0, now: 2000 });
+    expect(tr.commands).toHaveLength(1);
+    expect(tr.commands[0].output).toBe("some output");
   });
 
   it("abandonInFlight drops the in-flight without pushing to commands", () => {
@@ -171,11 +198,13 @@ describe("CommandTracker: eviction (D5)", () => {
     const tr = new CommandTracker();
     for (let i = 0; i < MAX_COMMANDS_PER_SESSION; i++) {
       tr.open({ id: `cmd-${i}`, now: i, cwd: null });
+      tr.setCommandLine(`c${i}`);
       tr.close({ exitCode: 0, now: i + 1 });
     }
     expect(tr.commands).toHaveLength(MAX_COMMANDS_PER_SESSION);
     // Fire one more — should drop the oldest.
     tr.open({ id: "cmd-overflow", now: 999, cwd: null });
+    tr.setCommandLine("c-overflow");
     tr.close({ exitCode: 0, now: 1000 });
     expect(tr.commands).toHaveLength(MAX_COMMANDS_PER_SESSION);
     expect(tr.commands[0].id).toBe("cmd-1"); // cmd-0 dropped
@@ -210,6 +239,7 @@ describe("CommandTracker: eviction (D5)", () => {
     const tr = new CommandTracker();
     for (let i = 0; i < MAX_COMMANDS_PER_SESSION; i++) {
       tr.open({ id: `cmd-${i}`, now: i, cwd: null });
+      tr.setCommandLine(`c${i}`);
       tr.close({ exitCode: 0, now: i + 1 });
     }
     tr.open({ id: "cmd-pending", now: 999, cwd: null });
@@ -228,8 +258,10 @@ describe("CommandTracker: lastCompleted", () => {
   it("returns the most-recently-closed command", () => {
     const tr = new CommandTracker();
     tr.open({ id: "a", now: 100, cwd: null });
+    tr.setCommandLine("a-cmd");
     tr.close({ exitCode: 0, now: 200 });
     tr.open({ id: "b", now: 300, cwd: null });
+    tr.setCommandLine("b-cmd");
     tr.close({ exitCode: 1, now: 400 });
     expect(tr.lastCompleted?.id).toBe("b");
   });
@@ -237,6 +269,7 @@ describe("CommandTracker: lastCompleted", () => {
   it("skips an in-flight command and returns the previous completed (spec scenario)", () => {
     const tr = new CommandTracker();
     tr.open({ id: "completed", now: 100, cwd: null });
+    tr.setCommandLine("done-cmd");
     tr.close({ exitCode: 0, now: 200 });
     tr.open({ id: "in-flight", now: 300, cwd: null });
     expect(tr.lastCompleted?.id).toBe("completed");
@@ -293,10 +326,19 @@ describe("CommandTracker: handleEvent (W2 — full state machine)", () => {
   it("commandEnd closes + pushes via ctx.now exitCode", () => {
     const tr = new CommandTracker();
     tr.handleEvent({ kind: "commandStart" }, ctx);
+    tr.handleEvent({ kind: "commandLine", commandLine: "x", nonceValid: true }, ctx);
     tr.handleEvent({ kind: "commandEnd", exitCode: 0 }, { ...ctx, now: 2000 });
     expect(tr.inFlight).toBeNull();
     expect(tr.commands).toHaveLength(1);
     expect(tr.commands[0].endedAt).toBe(2000);
+  });
+
+  it("commandEnd with empty commandLine AND no output discards the command (prompt-repaint noise)", () => {
+    const tr = new CommandTracker();
+    tr.handleEvent({ kind: "commandStart" }, ctx);
+    tr.handleEvent({ kind: "commandEnd", exitCode: 0 }, { ...ctx, now: 2000 });
+    expect(tr.inFlight).toBeNull();
+    expect(tr.commands).toEqual([]);
   });
 
   it("cwd events are ignored by the tracker (routed at the session level)", () => {

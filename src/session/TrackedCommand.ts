@@ -219,16 +219,25 @@ export class CommandTracker {
   /**
    * Close the in-flight command and evict per D5 rules. No-op if nothing is
    * in flight (e.g. a stray `D` marker without a preceding `B`/`C`).
+   *
+   * Commands with no `commandLine` AND no `output` are discarded — they carry
+   * no information for the user and accumulate on every reload as the shell
+   * repaints its prompt (B/D cycle without anyone typing). A real no-output
+   * command (e.g. `cd /tmp`) still has its `commandLine` captured via the
+   * `E` marker, so it stays.
    */
   close(params: { exitCode: number | null; now: number }): void {
     const cmd = this._inFlight;
     if (!cmd) {
       return;
     }
+    this._inFlight = null;
+    if (cmd.commandLine === "" && cmd.output === "") {
+      return;
+    }
     cmd.exitCode = params.exitCode;
     cmd.endedAt = params.now;
     this._commands.push(cmd);
-    this._inFlight = null;
     this.evict();
   }
 

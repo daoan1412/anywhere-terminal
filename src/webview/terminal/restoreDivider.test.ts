@@ -8,13 +8,13 @@ const REF_MM = String(new Date(REF).getMinutes()).padStart(2, "0");
 describe("formatRestoreDivider", () => {
   it("returns the exact divider for a live (non-exited) snapshot", () => {
     const out = formatRestoreDivider({ snapshotAt: REF, shellExited: false, exitCode: null });
-    expect(out).toBe(`\x1b[0m\r\n\x1b[2m─── restored — last update at ${REF_HH}:${REF_MM} ───\x1b[0m\r\n`);
+    expect(out).toBe(`\r\x1b[2K\x1b[0m\x1b[2m─── restored — last update at ${REF_HH}:${REF_MM} ───\x1b[0m\r\n`);
   });
 
   it("includes the exit indicator when shellExited === true", () => {
     const out = formatRestoreDivider({ snapshotAt: REF, shellExited: true, exitCode: 137 });
     expect(out).toBe(
-      `\x1b[0m\r\n\x1b[2m─── restored — last update at ${REF_HH}:${REF_MM} (shell exited, code: 137) ───\x1b[0m\r\n`,
+      `\r\x1b[2K\x1b[0m\x1b[2m─── restored — last update at ${REF_HH}:${REF_MM} (shell exited, code: 137) ───\x1b[0m\r\n`,
     );
   });
 
@@ -29,8 +29,8 @@ describe("formatRestoreDivider", () => {
     expect(out).toContain("at 03:07");
   });
 
-  it("always begins with the leading SGR reset", () => {
+  it("begins with row-overlay + SGR reset (overwrites inherited prompt row)", () => {
     const out = formatRestoreDivider({ snapshotAt: REF, shellExited: false, exitCode: null });
-    expect(out.startsWith("\x1b[0m\r\n")).toBe(true);
+    expect(out.startsWith("\r\x1b[2K\x1b[0m")).toBe(true);
   });
 });

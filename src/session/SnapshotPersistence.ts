@@ -210,9 +210,14 @@ export class SnapshotPersistence {
       const seeded = this.headlessFactory(session.cols, session.rows);
       session.headless = seeded;
       // Track the seed write so an immediate snapshot waits for it to parse.
+      // Tail `\r\x1b[2K` wipes the inherited prompt row before the new PTY
+      // prints its own prompt — without this, every idle reload appends a
+      // stale prompt line to the next snapshot, accumulating linearly across
+      // reloads (7 reloads → 6 stacked prompts above the divider).
+      const seededBuffer = `${restoreFrom.buffer}\r\x1b[2K`;
       const seedBarrier = new Promise<void>((resolve) => {
         try {
-          seeded.write(restoreFrom.buffer, () => resolve());
+          seeded.write(seededBuffer, () => resolve());
         } catch (err) {
           console.error("[AnyWhere Terminal] Failed to seed headless mirror from restore buffer:", err);
           resolve();
