@@ -312,12 +312,12 @@
       },
       {
         "command": "anywhereTerminal.toggleFileTree.sidebar",
-        "title": "AnyWhere Terminal: Toggle File Tree (Sidebar)",
+        "title": "Toggle File Tree",
         "icon": "$(list-tree)"
       },
       {
         "command": "anywhereTerminal.toggleFileTree.panel",
-        "title": "AnyWhere Terminal: Toggle File Tree (Panel)",
+        "title": "Toggle File Tree",
         "icon": "$(list-tree)"
       },
       {
@@ -342,12 +342,12 @@
       },
       {
         "command": "anywhereTerminal.exportPick.sidebar",
-        "title": "AnyWhere Terminal: Export… (Sidebar)",
+        "title": "Export…",
         "icon": "$(save-as)"
       },
       {
         "command": "anywhereTerminal.exportPick.panel",
-        "title": "AnyWhere Terminal: Export… (Panel)",
+        "title": "Export…",
         "icon": "$(save-as)"
       }
     ],
@@ -386,22 +386,22 @@
         {
           "command": "anywhereTerminal.exportPick.sidebar",
           "when": "view == anywhereTerminal.sidebar",
-          "group": "navigation"
+          "group": "export@1"
         },
         {
           "command": "anywhereTerminal.exportPick.panel",
           "when": "view == anywhereTerminal.panel",
-          "group": "navigation"
+          "group": "export@1"
         },
         {
           "command": "anywhereTerminal.toggleFileTree.sidebar",
           "when": "view == anywhereTerminal.sidebar",
-          "group": "navigation@99"
+          "group": "view@1"
         },
         {
           "command": "anywhereTerminal.toggleFileTree.panel",
           "when": "view == anywhereTerminal.panel",
-          "group": "navigation@99"
+          "group": "view@1"
         }
       ],
       "webview/context": [

@@ -313,7 +313,7 @@ export function activate(context: vscode.ExtensionContext) {
     vscode.commands.registerCommand("anywhereTerminal.splitVertical", () => doSplit(getFocusedProvider(), "vertical")),
     vscode.commands.registerCommand("anywhereTerminal.closeSplitPane", () => doCloseSplitPane(getFocusedProvider())),
     // File-tree (port-vscode-async-data-tree) — toggle visibility + move position.
-    // Title-bar buttons on both sidebar + panel views invoke these via package.json menus.view/title.
+    // View-title actions on both sidebar + panel views invoke these via package.json menus.view/title.
     vscode.commands.registerCommand("anywhereTerminal.toggleFileTree", () => {
       const view = getFocusedProvider().view;
       if (view) {
@@ -368,7 +368,7 @@ export function activate(context: vscode.ExtensionContext) {
       vscode.commands.registerCommand(`anywhereTerminal.killTerminal.${loc}`, () => doKillTerminal(provider)),
       vscode.commands.registerCommand(`anywhereTerminal.splitHorizontal.${loc}`, () => doSplit(provider, "horizontal")),
       vscode.commands.registerCommand(`anywhereTerminal.splitVertical.${loc}`, () => doSplit(provider, "vertical")),
-      // Toggle button on the view title bar must target THIS view, not whichever
+      // Toggle action on the view title menu must target THIS view, not whichever
       // provider currently holds focus — otherwise clicking on the sidebar's
       // button toggles the panel's tree (and vice-versa) when focus is on the
       // other side. Mirrors the per-loc split commands above.
@@ -377,7 +377,7 @@ export function activate(context: vscode.ExtensionContext) {
           void provider.view.webview.postMessage({ type: "toggle-file-tree" });
         }
       }),
-      // Title-bar "Export…" button — single icon that opens a quickpick of the
+      // View-title "Export…" action — opens a quickpick of the
       // three real export commands. We flash the active pane first so the user
       // visually confirms which pane will be exported (the title bar applies
       // to whichever pane is currently active in THIS view).
