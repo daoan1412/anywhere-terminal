@@ -45,7 +45,9 @@ function ensureWidget(doc: Document): HTMLDivElement {
 
 function show(target: HTMLElement, text: string): void {
   const doc = target.ownerDocument;
-  if (!doc || !doc.body.contains(target)) return;
+  if (!doc || !doc.body.contains(target)) {
+    return;
+  }
   const el = ensureWidget(doc);
   el.textContent = text;
   el.style.left = "0px";
@@ -97,35 +99,53 @@ export function attachTooltip(target: HTMLElement, opts: AttachTooltipOptions = 
   // happens once at attach — callers that re-assign `target.title` later
   // would reintroduce the native tooltip. Prefer `getText` for stateful
   // labels so the title attribute never gets re-set.
-  if (fromTitle) target.removeAttribute("title");
+  if (fromTitle) {
+    target.removeAttribute("title");
+  }
   const resolveText = (): string => (opts.getText ? opts.getText() : staticText).trim();
-  if (!resolveText()) return () => {};
+  if (!resolveText()) {
+    return () => {};
+  }
 
   // Eagerly create the widget so `aria-describedby` resolves immediately
   // (lazy creation would leave the id reference dangling until first show,
   // which some screen readers don't re-resolve).
   const doc = target.ownerDocument;
-  if (doc) ensureWidget(doc);
+  if (doc) {
+    ensureWidget(doc);
+  }
   target.setAttribute("aria-describedby", WIDGET_ID);
 
   const onEnter = (): void => {
-    if (pendingTimer !== null) clearTimeout(pendingTimer);
+    if (pendingTimer !== null) {
+      clearTimeout(pendingTimer);
+    }
     currentTarget = target;
     pendingTimer = setTimeout(() => {
       pendingTimer = null;
-      if (currentTarget !== target) return;
+      if (currentTarget !== target) {
+        return;
+      }
       const live = resolveText();
-      if (live) show(target, live);
+      if (live) {
+        show(target, live);
+      }
     }, SHOW_DELAY_MS);
   };
   const onLeave = (): void => {
-    if (currentTarget === target) hide();
+    if (currentTarget === target) {
+      hide();
+    }
   };
   const onDown = (): void => {
-    if (currentTarget === target) hide();
+    if (currentTarget === target) {
+      hide();
+    }
   };
   const onKey = (ev: KeyboardEvent): void => {
-    if (ev.key === "Escape") hide();
+    if (ev.key === "Escape") {
+      hide();
+    }
   };
   // WCAG 1.4.13 — keyboard-focus must also expose the hint, not just mouse.
   const onFocus = (): void => onEnter();
@@ -148,7 +168,9 @@ export function attachTooltip(target: HTMLElement, opts: AttachTooltipOptions = 
     if (target.getAttribute("aria-describedby") === WIDGET_ID) {
       target.removeAttribute("aria-describedby");
     }
-    if (currentTarget === target) hide();
+    if (currentTarget === target) {
+      hide();
+    }
   };
 }
 
