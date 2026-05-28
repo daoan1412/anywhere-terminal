@@ -700,6 +700,10 @@ function handleInit(msg: InitMessage): void {
       // "This folder only" scope — default off (show all).
       getInitialFolderOnly: () => store.getState().vaultFolderOnly === true,
       persistFolderOnly: (folderOnly) => store.updateState({ vaultFolderOnly: folderOnly }),
+      // Live active-pane cwd, pulled on each render so the folder filter uses
+      // the current OSC 7 value (not a null captured before the shell emitted
+      // it). Toggling "This folder only" then scopes immediately.
+      getContextCwd: () => getActivePaneCwd(),
     });
     // Seed the folder-filter context to the current active pane; it updates on
     // every pane select / tab switch. A vault that restored expanded refreshes

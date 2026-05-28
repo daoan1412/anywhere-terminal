@@ -840,6 +840,104 @@
 }
 
 /* ============================================================
+ * Left/right dock — sections sit SIDE BY SIDE (activity-bar style)
+ *
+ * The region's internal axis follows the dock: column for top/bottom
+ * (two stacked horizontal bands) but ROW for left/right (two vertical
+ * columns side by side). A collapsed section then becomes a thin
+ * VERTICAL strip with a rotated header instead of a fat horizontal bar —
+ * each section collapses independently (vault can be a strip while the
+ * file tree stays open, and vice-versa). The thin strip hugs the window's
+ * OUTER edge: left dock lays out start→end (vault on the far left), right
+ * dock reverses so the first child (vault) sits on the far right.
+ * See: add-ai-coding-vault/design.md D11 (revised per user).
+ * ============================================================ */
+.webview-layout.file-tree--left .aux-region {
+  flex-direction: row;
+}
+.webview-layout.file-tree--right .aux-region {
+  flex-direction: row-reverse;
+}
+
+/* The vault's divider faces the file tree (the inter-section seam), not the
+ * bottom, once the two are side by side. */
+.webview-layout.file-tree--left .aux-region > .vault-panel,
+.webview-layout.file-tree--right .aux-region > .vault-panel {
+  border-bottom: none;
+}
+.webview-layout.file-tree--left .aux-region > .vault-panel {
+  border-right: 1px solid var(--vscode-widget-border, var(--vscode-panel-border, rgba(128, 128, 128, 0.35)));
+}
+.webview-layout.file-tree--right .aux-region > .vault-panel {
+  border-left: 1px solid var(--vscode-widget-border, var(--vscode-panel-border, rgba(128, 128, 128, 0.35)));
+}
+
+/* ── Collapsed vault → vertical strip (left/right only) ── */
+.webview-layout.file-tree--left .aux-region > .vault-panel.vault-collapsed .vault-header,
+.webview-layout.file-tree--right .aux-region > .vault-panel.vault-collapsed .vault-header {
+  flex: 1 1 auto;
+  height: auto;
+  writing-mode: vertical-rl;
+  text-orientation: mixed;
+  justify-content: flex-start;
+  padding: 8px 0;
+}
+/* The chevron + count read awkwardly tilted in a vertical strip — keep the
+ * chevron upright (a quick-expand affordance) and drop the count badge. */
+.webview-layout.file-tree--left .aux-region > .vault-panel.vault-collapsed .vault-header__chevron,
+.webview-layout.file-tree--right .aux-region > .vault-panel.vault-collapsed .vault-header__chevron {
+  text-orientation: upright;
+  transform: none;
+}
+.webview-layout.file-tree--left .aux-region > .vault-panel.vault-collapsed .vault-header__count,
+.webview-layout.file-tree--right .aux-region > .vault-panel.vault-collapsed .vault-header__count {
+  display: none;
+}
+
+/* ── Collapsed file tree → vertical strip (left/right only) ──
+ * Restores the pre-vault activity-bar UX: the header fills the strip
+ * vertically and the root row's label reads top-to-bottom. Action buttons
+ * hide (collapsed = quick-access; expand to interact). Mirrors the original
+ * rules removed in the placement pivot. */
+.webview-layout.file-tree--left.file-tree--root-collapsed .file-tree-header,
+.webview-layout.file-tree--right.file-tree--root-collapsed .file-tree-header {
+  flex: 1 1 auto;
+  flex-direction: column;
+  padding: 4px 0;
+  align-items: stretch;
+  justify-content: flex-start;
+  height: auto;
+}
+.webview-layout.file-tree--left.file-tree--root-collapsed .file-tree-header__actions,
+.webview-layout.file-tree--right.file-tree--root-collapsed .file-tree-header__actions {
+  display: none;
+}
+.webview-layout.file-tree--left.file-tree--root-collapsed .file-tree-header__root,
+.webview-layout.file-tree--right.file-tree--root-collapsed .file-tree-header__root {
+  flex: 1 1 auto;
+  height: auto;
+  width: 100%;
+  writing-mode: vertical-rl;
+  text-orientation: mixed;
+  padding: 8px 0;
+  justify-content: flex-start;
+}
+.webview-layout.file-tree--left.file-tree--root-collapsed .file-tree-header__root .name,
+.webview-layout.file-tree--right.file-tree--root-collapsed .file-tree-header__root .name {
+  max-height: 100%;
+}
+/* Chevron upright, then flip on the right dock so it points toward the
+ * terminal (left-collapsed: terminal is right → `›`; right-collapsed:
+ * terminal is left → `‹`). */
+.webview-layout.file-tree--left.file-tree--root-collapsed .file-tree-header__root .chevron,
+.webview-layout.file-tree--right.file-tree--root-collapsed .file-tree-header__root .chevron {
+  text-orientation: upright;
+}
+.webview-layout.file-tree--right.file-tree--root-collapsed .file-tree-header__root .chevron {
+  transform: rotate(180deg);
+}
+
+/* ============================================================
  * Custom hover tooltip — replaces native title tooltips which
  * render unreliably inside VSCode webviews. Mounted on
  * document.body by Tooltip.ts so panel `overflow: hidden`

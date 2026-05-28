@@ -219,6 +219,28 @@ describe("VaultPanel 'This folder only' filter", () => {
     expect(host.querySelectorAll(".vault-row")).toHaveLength(2);
   });
 
+  it("pulls the live context cwd via getContextCwd on render (not just pushed setContextCwd)", () => {
+    const host = createHost();
+    let cwd: string | null = null; // OSC 7 hasn't fired yet
+    const panel = new VaultPanel({
+      host,
+      postMessage: () => {},
+      getInitialFolderOnly: () => true,
+      getContextCwd: () => cwd,
+    });
+
+    const data = result([entry({ id: "a", cwd: "/work/repo" }), entry({ id: "b", cwd: "/other" })]);
+    panel.render(data);
+    // No cwd resolvable → filter falls through to show all (the old no-op bug).
+    expect(host.querySelectorAll(".vault-row")).toHaveLength(2);
+
+    // OSC 7 lands; the next render pulls the live value and scopes the list —
+    // without any explicit setContextCwd push.
+    cwd = "/work/repo";
+    panel.render(data);
+    expect(host.querySelectorAll(".vault-row")).toHaveLength(1);
+  });
+
   it("seeds + persists the folder-only toggle", () => {
     const host = createHost();
     const persisted: boolean[] = [];

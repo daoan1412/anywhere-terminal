@@ -26,6 +26,15 @@ export interface VaultPanelDeps {
   getInitialFolderOnly?: () => boolean;
   /** Persist the "This folder only" filter state whenever it changes. */
   persistFolderOnly?: (folderOnly: boolean) => void;
+  /**
+   * Resolve the active terminal pane's CURRENT cwd on demand (live, OSC 7
+   * tracked). Pulled on every render so "This folder only" reflects where the
+   * focused terminal is right now — not a value captured before OSC 7 fired
+   * (e.g. the user opening the vault and toggling the filter on a shell that
+   * had already `cd`'d). Falls back to the pushed `setContextCwd` value in
+   * tests where this getter is absent.
+   */
+  getContextCwd?: () => string | null;
 }
 
 /** True iff `child` equals `parent` or sits inside its subtree (either separator). */
@@ -92,6 +101,7 @@ export class VaultPanel {
   private readonly listEl: HTMLElement;
   private readonly persistCollapsed?: (collapsed: boolean) => void;
   private readonly persistFolderOnly?: (folderOnly: boolean) => void;
+  private readonly getContextCwd?: () => string | null;
 
   private entries: VaultSessionEntry[] = [];
   private unreadable = 0;
@@ -107,6 +117,7 @@ export class VaultPanel {
     this.postMessage = deps.postMessage;
     this.persistCollapsed = deps.persistCollapsed;
     this.persistFolderOnly = deps.persistFolderOnly;
+    this.getContextCwd = deps.getContextCwd;
 
     this.host.classList.add("vault-panel");
     this.host.replaceChildren();
@@ -312,6 +323,15 @@ export class VaultPanel {
   }
 
   private renderList(): void {
+    // Pull the freshest active-pane cwd before filtering so "This folder only"
+    // reflects where the focused terminal is NOW. The pushed `setContextCwd`
+    // value is captured at mount / pane-change, which can be null if OSC 7
+    // hadn't fired yet — without this live pull the toggle is a no-op (the
+    // filter falls through to "show all" on a null contextCwd).
+    if (this.getContextCwd) {
+      this.contextCwd = this.getContextCwd();
+      this.syncFolderToggleTitle();
+    }
     const visible = this.entries.filter((e) => this.matchesFolder(e) && this.matchesQuery(e));
     // The badge reflects what the list actually shows (folder + search scoped),
     // not the unfiltered total — otherwise it over-reports under an active
