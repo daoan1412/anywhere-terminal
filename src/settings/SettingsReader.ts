@@ -43,10 +43,12 @@ export interface ResolvedTerminalSettings extends TerminalConfig {
  *
  * Font size resolution: anywhereTerminal.fontSize (if >0) → terminal.integrated.fontSize (if >0) → editor.fontSize (if >0) → 14
  * Font family resolution: anywhereTerminal.fontFamily (if non-empty) → terminal.integrated.fontFamily (if non-empty) → editor.fontFamily (if non-empty) → 'monospace'
- * Shell resolution: anywhereTerminal.shell.macOS (if non-empty) → auto-detect via PtyManager.detectShell()
+ * Shell resolution: anywhereTerminal.shell.<platform> (if non-empty) → auto-detect via PtyManager.detectShell()
  * CWD resolution: anywhereTerminal.defaultCwd (if non-empty and valid) → workspace root → home directory
+ *
+ * `platform` is injectable for cross-platform unit testing.
  */
-export function readTerminalSettings(): ResolvedTerminalSettings {
+export function readTerminalSettings(platform: NodeJS.Platform = process.platform): ResolvedTerminalSettings {
   const config = vscode.workspace.getConfiguration("anywhereTerminal");
   const terminalConfig = vscode.workspace.getConfiguration("terminal.integrated");
   const editorConfig = vscode.workspace.getConfiguration("editor");
@@ -71,8 +73,12 @@ export function readTerminalSettings(): ResolvedTerminalSettings {
   // Scrollback
   const scrollback = config.get<number>("scrollback") ?? DEFAULT_SCROLLBACK;
 
-  // Shell resolution
-  const { shell, shellArgs } = resolveShell(config.get<string>("shell.macOS"), config.get<string[]>("shell.args"));
+  // Shell resolution — select the setting key matching the running platform
+  const { shell, shellArgs } = resolveShell(
+    config.get<string>(getPlatformShellKey(platform)),
+    config.get<string[]>("shell.args"),
+    platform,
+  );
 
   // CWD resolution
   const cwd = resolveCwd(config.get<string>("defaultCwd"));
@@ -186,13 +192,25 @@ function resolveFontFamily(
   return DEFAULT_FONT_FAMILY;
 }
 
+/** Map the running platform to its `anywhereTerminal.shell.*` setting key. */
+function getPlatformShellKey(platform: NodeJS.Platform): string {
+  if (platform === "darwin") {
+    return "shell.macOS";
+  }
+  if (platform === "win32") {
+    return "shell.windows";
+  }
+  return "shell.linux";
+}
+
 /**
  * Resolve shell path and arguments.
- * anywhereTerminal.shell.macOS (if non-empty) → auto-detect via PtyManager.detectShell()
+ * Custom per-platform shell (if non-empty) → auto-detect via PtyManager.detectShell()
  */
 function resolveShell(
   customShell: string | undefined,
   customArgs: string[] | undefined,
+  platform: NodeJS.Platform,
 ): { shell: string; shellArgs: string[] } {
   if (customShell?.trim()) {
     return {
@@ -202,7 +220,7 @@ function resolveShell(
   }
 
   // Fall back to auto-detection
-  const detected = PtyManager.detectShell();
+  const detected = PtyManager.detectShell(platform);
   return {
     shell: detected.shell,
     shellArgs: customArgs && customArgs.length > 0 ? customArgs : detected.args,

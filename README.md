@@ -4,7 +4,7 @@
 
 ![License](https://img.shields.io/badge/license-MIT-blue.svg)
 ![VS Code](https://img.shields.io/badge/VS%20Code-1.105%2B-007ACC.svg)
-![Platform](https://img.shields.io/badge/platform-macOS-lightgrey.svg)
+![Platform](https://img.shields.io/badge/platform-macOS%20%7C%20Linux%20%7C%20Windows-lightgrey.svg)
 
 ![AnyWhere Terminal demo](images/demo.png)
 
@@ -60,7 +60,9 @@ All under `anywhereTerminal.*`:
 
 | Setting | Default | Description |
 |---------|---------|-------------|
-| `shell.macOS` | `""` | Custom shell path. Empty = auto-detect. |
+| `shell.macOS` | `""` | Custom shell path on macOS. Empty = auto-detect. |
+| `shell.linux` | `""` | Custom shell path on Linux. Empty = auto-detect. |
+| `shell.windows` | `""` | Custom shell path on Windows. Empty = auto-detect. |
 | `shell.args` | `[]` | Custom shell args. Empty = sensible defaults. |
 | `scrollback` | `10000` | Scrollback buffer lines. |
 | `fontSize` | `0` | `0` = inherit from VS Code. |
@@ -68,6 +70,10 @@ All under `anywhereTerminal.*`:
 | `cursorBlink` | `true` | Cursor blink. |
 | `defaultCwd` | `""` | Empty = workspace root or `$HOME`. |
 | `sessionRestore.enabled` | `true` | Restore terminal scrollback and metadata across VS Code restarts. |
+
+> **Shell auto-detect** (empty `shell.<platform>`): uses VS Code's resolved default shell (`vscode.env.shell`, which honors `terminal.integrated.defaultProfile` and the remote host), then falls back per platform — macOS `$SHELL → /bin/zsh → /bin/bash → /bin/sh`, Linux `$SHELL → /bin/bash → /bin/sh`, Windows `%ComSpec% → cmd.exe`.
+>
+> **Migrating from a single `shell.macOS`:** the shell setting is now per-platform. If you previously set `shell.macOS` on Linux or Windows as a workaround, move that value to `shell.linux` / `shell.windows` — the macOS key now applies only on macOS.
 
 ## Session restore
 
@@ -120,7 +126,7 @@ After a window reload, tracked commands reset to empty — the scrollback is res
 ## Requirements
 
 - VS Code 1.105+ or Cursor 3.2.21+
-- macOS (Windows/Linux on the roadmap)
+- macOS, Linux, or Windows
 
 ## Contributing
 

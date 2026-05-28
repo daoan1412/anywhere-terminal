@@ -32,26 +32,25 @@ The system SHALL load the `node-pty` native module from VS Code's internal insta
 
 ### Requirement: Shell Detection
 
-The system SHALL detect the user's preferred shell on macOS using a fallback chain: `$SHELL` env var, then `/bin/zsh`, then `/bin/bash`, then `/bin/sh`.
+The system SHALL detect the user's preferred shell using a platform-aware resolution order, returning `{ shell: string; args: string[] }`. `detectShell(platform, env, vscodeShell)` SHALL accept injectable `platform` (default `process.platform`), `env` (default `process.env`), and `vscodeShell` (default `vscode.env.shell`) parameters for testability.
 
-- Each candidate SHALL be validated: file exists AND is executable (`fs.statSync` + mode check for `X_OK`).
-- If no args are configured, default args SHALL be `['--login']` (login shell, matching VS Code behavior).
+Resolution order (first validated candidate wins):
+1. `vscodeShell` — when non-empty (VS Code's resolved default; honors `terminal.integrated.defaultProfile` and the remote extension host).
+2. Platform env hint — `env.SHELL` on non-Windows; `env.ComSpec` (or `env.COMSPEC`) on Windows.
+3. Platform default chain — macOS `/bin/zsh` → `/bin/bash` → `/bin/sh`; Linux `/bin/bash` → `/bin/sh`; Windows `%ComSpec%` else `cmd.exe`.
 
-#### Scenario: $SHELL is valid
+When no candidate validates, the system SHALL return a last-resort default unconditionally — POSIX `/bin/sh` (the final chain entry), Windows `%ComSpec%` else the literal `cmd.exe` — so detection does not throw on supported platforms.
 
-- **WHEN** `process.env.SHELL` is `/bin/zsh` and the file exists and is executable
-- **THEN** `detectShell()` returns `{ shell: '/bin/zsh', args: ['--login'] }`
+#### Scenario: Windows resolves a shell instead of throwing
 
-#### Scenario: $SHELL is invalid, fallback succeeds
+- **WHEN** `platform` is `win32`, `vscodeShell` is empty, and `env.ComSpec` is `C:\Windows\System32\cmd.exe`
+- **THEN** `detectShell()` returns `{ shell: 'C:\\Windows\\System32\\cmd.exe', args: [] }`
+- **AND** no `ShellNotFoundError` is thrown
 
-- **WHEN** `process.env.SHELL` points to a non-existent path
-- **AND** `/bin/zsh` exists and is executable
-- **THEN** `detectShell()` returns `{ shell: '/bin/zsh', args: ['--login'] }`
+#### Scenario: vscode.env.shell takes priority when present
 
-#### Scenario: All shells invalid except /bin/sh
-
-- **WHEN** only `/bin/sh` is available
-- **THEN** `detectShell()` returns `{ shell: '/bin/sh', args: ['--login'] }`
+- **WHEN** `vscodeShell` is a non-empty validated path (e.g. the user's `terminal.integrated.defaultProfile` shell)
+- **THEN** `detectShell()` returns that shell
 
 ### Requirement: PTY Environment Setup
 
@@ -147,4 +146,22 @@ The system SHALL define typed error classes for PTY-related failures.
 - **WHEN** a `PtyLoadError` is caught
 - **THEN** `error instanceof AnyWhereTerminalError` is `true`
 - **AND** `error.code` equals `ErrorCode.PtyLoadFailed`
+
+### Requirement: Shell Validation
+
+The system SHALL validate a shell path via `validateShell(shellPath, platform)`. On non-Windows platforms validation SHALL require the path to exist, be a file, and have an execute bit (`stat.mode & 0o111`). On Windows validation SHALL require only that the path exists and is a file — Node does not expose reliable Unix execute bits for Windows executables, so an execute-bit check would reject valid `.exe` shells.
+
+#### Scenario: Windows executable without Unix execute bit is valid
+
+- **WHEN** `platform` is `win32` and `shellPath` is an existing file with mode lacking `0o111`
+- **THEN** `validateShell()` returns `true`
+
+### Requirement: Shell Arguments
+
+The system SHALL derive default shell arguments via `getShellArgs(shellPath)`, keyed on the path's basename (backslashes normalised first, so Windows paths resolve correctly). Login shells (`zsh`, `bash`) SHALL receive `['--login']`; all other shells (`sh`, `fish`, `cmd.exe`, `powershell.exe`, `pwsh.exe`, …) SHALL receive `[]`.
+
+#### Scenario: Windows shell gets no login flag
+
+- **WHEN** `shellPath` basename is `cmd.exe` or `powershell.exe`
+- **THEN** `getShellArgs()` returns `[]`
 
