@@ -847,29 +847,32 @@
  * columns side by side). A collapsed section then becomes a thin
  * VERTICAL strip with a rotated header instead of a fat horizontal bar —
  * each section collapses independently (vault can be a strip while the
- * file tree stays open, and vice-versa). The thin strip hugs the window's
- * OUTER edge: left dock lays out start→end (vault on the far left), right
- * dock reverses so the first child (vault) sits on the far right.
+ * file tree stays open, and vice-versa). Reading order is consistent in
+ * both docks: AI Vault first, then File Tree (plain `row`, DOM order).
  * See: add-ai-coding-vault/design.md D11 (revised per user).
  * ============================================================ */
-.webview-layout.file-tree--left .aux-region {
-  flex-direction: row;
-}
+.webview-layout.file-tree--left .aux-region,
 .webview-layout.file-tree--right .aux-region {
-  flex-direction: row-reverse;
+  flex-direction: row;
 }
 
 /* The vault's divider faces the file tree (the inter-section seam), not the
- * bottom, once the two are side by side. */
+ * bottom, once the two sit side by side. The vault is always the left column
+ * (DOM order), so the seam is on its right edge for both docks. */
 .webview-layout.file-tree--left .aux-region > .vault-panel,
 .webview-layout.file-tree--right .aux-region > .vault-panel {
   border-bottom: none;
-}
-.webview-layout.file-tree--left .aux-region > .vault-panel {
   border-right: 1px solid var(--vscode-widget-border, var(--vscode-panel-border, rgba(128, 128, 128, 0.35)));
 }
-.webview-layout.file-tree--right .aux-region > .vault-panel {
-  border-left: 1px solid var(--vscode-widget-border, var(--vscode-panel-border, rgba(128, 128, 128, 0.35)));
+
+/* No collapse tween for left/right: animating the panel width while its
+ * header flips to vertical text reflows every frame and reads as jank. Snap
+ * cleanly instead — top/bottom keep the smooth height animation above. */
+.webview-layout.file-tree--anim.file-tree--left .aux-region > .file-tree-panel,
+.webview-layout.file-tree--anim.file-tree--left .aux-region > .vault-panel,
+.webview-layout.file-tree--anim.file-tree--right .aux-region > .file-tree-panel,
+.webview-layout.file-tree--anim.file-tree--right .aux-region > .vault-panel {
+  transition: none;
 }
 
 /* ── Collapsed vault → vertical strip (left/right only) ── */
