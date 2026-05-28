@@ -865,16 +865,6 @@
   border-right: 1px solid var(--vscode-widget-border, var(--vscode-panel-border, rgba(128, 128, 128, 0.35)));
 }
 
-/* No collapse tween for left/right: animating the panel width while its
- * header flips to vertical text reflows every frame and reads as jank. Snap
- * cleanly instead — top/bottom keep the smooth height animation above. */
-.webview-layout.file-tree--anim.file-tree--left .aux-region > .file-tree-panel,
-.webview-layout.file-tree--anim.file-tree--left .aux-region > .vault-panel,
-.webview-layout.file-tree--anim.file-tree--right .aux-region > .file-tree-panel,
-.webview-layout.file-tree--anim.file-tree--right .aux-region > .vault-panel {
-  transition: none;
-}
-
 /* ── Collapsed vault → vertical strip (left/right only) ── */
 .webview-layout.file-tree--left .aux-region > .vault-panel.vault-collapsed .vault-header,
 .webview-layout.file-tree--right .aux-region > .vault-panel.vault-collapsed .vault-header {

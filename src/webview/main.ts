@@ -704,6 +704,9 @@ function handleInit(msg: InitMessage): void {
       // the current OSC 7 value (not a null captured before the shell emitted
       // it). Toggling "This folder only" then scopes immediately.
       getContextCwd: () => getActivePaneCwd(),
+      // Reuse the file tree's collapse-animation gate so the vault's
+      // expand/collapse animates in step with it (shared `#aux-region`).
+      armAnimation: () => fileTreeController?.panel.armCollapseAnimation(),
     });
     // Seed the folder-filter context to the current active pane; it updates on
     // every pane select / tab switch. A vault that restored expanded refreshes

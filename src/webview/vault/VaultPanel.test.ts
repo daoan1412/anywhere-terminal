@@ -125,6 +125,24 @@ describe("VaultPanel collapse", () => {
     expect(count?.textContent).toBe("2");
   });
 
+  it("arms the shared collapse animation on user toggles but not on the seed", () => {
+    const host = createHost();
+    let arms = 0;
+    const panel = new VaultPanel({ host, postMessage: () => {}, armAnimation: () => arms++ });
+    // Constructor seed (persist:false) must NOT animate.
+    expect(arms).toBe(0);
+
+    panel.toggleCollapsed(); // collapsed -> expanded (user)
+    expect(arms).toBe(1);
+    panel.toggleCollapsed(); // expanded -> collapsed (user)
+    expect(arms).toBe(2);
+
+    // A no-op (already expanded) should not arm.
+    panel.expand();
+    panel.expand();
+    expect(arms).toBe(3);
+  });
+
   it("requests the session list when expanding (refresh on open)", () => {
     const host = createHost();
     const posted: { type: string }[] = [];

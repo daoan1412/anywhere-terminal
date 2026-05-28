@@ -35,6 +35,13 @@ export interface VaultPanelDeps {
    * tests where this getter is absent.
    */
   getContextCwd?: () => string | null;
+  /**
+   * Arm the shared layout collapse animation (`FileTreePanel.armCollapseAnimation`)
+   * so the vault's expand/collapse animates in step with the file tree — both
+   * sections share `#aux-region` and the same `.file-tree--anim` transition.
+   * Called just before the collapsed-class toggle on user-initiated toggles.
+   */
+  armAnimation?: () => void;
 }
 
 /** True iff `child` equals `parent` or sits inside its subtree (either separator). */
@@ -102,6 +109,7 @@ export class VaultPanel {
   private readonly persistCollapsed?: (collapsed: boolean) => void;
   private readonly persistFolderOnly?: (folderOnly: boolean) => void;
   private readonly getContextCwd?: () => string | null;
+  private readonly armAnimation?: () => void;
 
   private entries: VaultSessionEntry[] = [];
   private unreadable = 0;
@@ -118,6 +126,7 @@ export class VaultPanel {
     this.persistCollapsed = deps.persistCollapsed;
     this.persistFolderOnly = deps.persistFolderOnly;
     this.getContextCwd = deps.getContextCwd;
+    this.armAnimation = deps.armAnimation;
 
     this.host.classList.add("vault-panel");
     this.host.replaceChildren();
@@ -198,6 +207,13 @@ export class VaultPanel {
   setCollapsed(collapsed: boolean, opts: { persist?: boolean } = {}): void {
     const wasCollapsed = this.collapsed;
     this.collapsed = collapsed;
+    // Arm the shared layout collapse transition BEFORE toggling the class so
+    // the browser captures the current flex as the animation's "from" value
+    // (same ordering the file tree uses). User-initiated toggles only — the
+    // constructor seed passes persist:false and must stay instant.
+    if (collapsed !== wasCollapsed && opts.persist !== false) {
+      this.armAnimation?.();
+    }
     this.host.classList.toggle("vault-collapsed", collapsed);
     this.headerEl.setAttribute("aria-expanded", collapsed ? "false" : "true");
     if (opts.persist !== false) {
