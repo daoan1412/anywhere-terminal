@@ -434,6 +434,60 @@
 }
 
 /* ============================================================
+ * Position menu (anchored dropdown for the Move File Tree button)
+ *
+ * Mounted on document.body (not the panel host) so it isn't clipped by the
+ * panel's `overflow: hidden`. Positioned absolutely via inline styles set
+ * by FileTreePanel.openPositionMenu(); only the visual treatment lives here.
+ * ============================================================ */
+.file-tree-position-menu {
+  position: absolute;
+  z-index: 40;
+  min-width: 120px;
+  padding: 4px 0;
+  background: var(--vscode-menu-background, var(--vscode-editorWidget-background, var(--vscode-sideBar-background)));
+  color: var(--vscode-menu-foreground, var(--vscode-foreground));
+  border: 1px solid
+    var(--vscode-menu-border, var(--vscode-widget-border, var(--vscode-panel-border, rgba(128, 128, 128, 0.35))));
+  border-radius: 4px;
+  box-shadow: 0 4px 10px rgba(0, 0, 0, 0.25);
+  display: flex;
+  flex-direction: column;
+}
+
+.file-tree-position-menu__item {
+  display: block;
+  width: 100%;
+  text-align: left;
+  /* Extra left padding reserves the ✓ slot so every label aligns at the
+   * same x-offset regardless of whether the row is the active position. */
+  padding: 4px 12px 4px 26px;
+  background: transparent;
+  color: inherit;
+  border: none;
+  cursor: pointer;
+  font: inherit;
+  line-height: 22px;
+  position: relative;
+}
+.file-tree-position-menu__item:hover,
+.file-tree-position-menu__item:focus {
+  background: var(--vscode-menu-selectionBackground, var(--vscode-list-hoverBackground));
+  color: var(--vscode-menu-selectionForeground, var(--vscode-list-hoverForeground, inherit));
+  outline: none;
+}
+.file-tree-position-menu__item[aria-checked="true"]::before {
+  content: "✓";
+  position: absolute;
+  left: 10px;
+  top: 0;
+  bottom: 0;
+  display: flex;
+  align-items: center;
+  opacity: 0.9;
+}
+
+/* ============================================================
  * Search bar (add-file-tree-search)
  * ============================================================ */
 
@@ -534,6 +588,24 @@
   min-width: 0;
 }
 
+/* Re-root visual feedback — brief inset focus-border pulse around the
+ * entire panel. Triggered by FileTreePanel.playRerootAnimation() after
+ * `remount()` swaps in a new tree (Open Folder click, OSC 7 cd outside
+ * workspace, workspace folder change). Uses `inset` box-shadow (not outline
+ * / border) so it doesn't shift layout and works under the panel's existing
+ * `overflow: hidden`. */
+@keyframes file-tree-reroot-pulse {
+  0% {
+    box-shadow: inset 0 0 0 2px var(--vscode-focusBorder, rgba(0, 122, 204, 0.9));
+  }
+  100% {
+    box-shadow: inset 0 0 0 2px transparent;
+  }
+}
+.file-tree-panel--reroot {
+  animation: file-tree-reroot-pulse 600ms ease-out;
+}
+
 /* ============================================================
  * 4-side layout (design D5)
  *
@@ -594,6 +666,7 @@
 .webview-layout.file-tree--bottom .file-tree-panel {
   order: 1;
   flex: 0 0 var(--file-tree-size, 200px);
+  border-top: 1px solid var(--vscode-widget-border, var(--vscode-panel-border, rgba(128, 128, 128, 0.35)));
 }
 
 .webview-layout.file-tree--left {
@@ -700,25 +773,154 @@
 .file-tree-panel .sash.sash-active::before {
   transition-delay: 0s;
 }
-
-/* When the file tree is closed, the terminal area takes the whole space. */
-.webview-layout.file-tree--closed .file-tree-panel {
-  display: none;
+/* Bottom position owns its own always-visible 1px border-top on the panel
+ * (see `.webview-layout.file-tree--bottom .file-tree-panel`), so the sash's
+ * idle-state divider would render as a duplicate 1px line. Suppress the
+ * idle paint with a bottom-only override; this rule's specificity (0,4,1)
+ * also overrides the generic hover rule (0,3,1), so we must re-state the
+ * hover/active rules with matching bottom-prefix specificity (0,5,1) to
+ * preserve the highlight on drag. */
+.webview-layout.file-tree--bottom .file-tree-panel .sash::before {
+  background: transparent;
+}
+.webview-layout.file-tree--bottom .file-tree-panel .sash:hover::before,
+.webview-layout.file-tree--bottom .file-tree-panel .sash.sash-active::before {
+  background: var(--vscode-sash-hoverBorder, var(--vscode-focusBorder));
 }
 
 /* Root-collapsed (header-only) mode. The wrapper class is stamped by
  * FileTreePanel.syncRootCollapsedClass() — it's NOT derived from
  * aria-expanded because the no-root and search-active states also set
- * aria-expanded="false" but must keep their bodies visible. */
-.webview-layout.file-tree--root-collapsed .file-tree-body,
+ * aria-expanded="false" but must keep their bodies visible.
+ *
+ * The body stays in the DOM (not display:none) so the panel's height/width
+ * animation has a stable contained child to clip via `overflow: hidden`.
+ * The body has `flex: 1 1 auto; min-height/-width: 0` so it naturally
+ * collapses to 0 as the panel shrinks — visually equivalent to display:none
+ * at the end of the transition, but smooth during it. */
 .webview-layout.file-tree--root-collapsed .file-tree-panel .sash {
   display: none;
 }
 
-/* Top/bottom only: shrink panel to header height so terminal reclaims the
- * saved `--file-tree-size`. Left/right keeps its width — the horizontal
- * header cluster needs room for chevron + name + action buttons. */
+/* Top/bottom: shrink panel to the 24px header height. Hard-coded to match
+ * `.file-tree-header { flex: 0 0 24px }` — using `auto` was visually
+ * identical but not transitionable (auto can't be interpolated). */
 .webview-layout.file-tree--top.file-tree--root-collapsed .file-tree-panel,
 .webview-layout.file-tree--bottom.file-tree--root-collapsed .file-tree-panel {
-  flex: 0 0 auto;
+  flex: 0 0 24px;
+}
+
+/* Animation gate — added by FileTreePanel.armCollapseAnimation() for 200 ms
+ * around each user-initiated collapse/expand toggle. Without the gate the
+ * transition would also fire on sash drag (which already feels instant)
+ * and on initial mount with a persisted collapsed state. Pattern mirrors
+ * VS Code's `.monaco-pane-view.animated` flag in paneview.css. */
+.webview-layout.file-tree--anim .file-tree-panel {
+  transition: flex 150ms ease-out;
+}
+@media (prefers-reduced-motion: reduce) {
+  .webview-layout.file-tree--anim .file-tree-panel {
+    transition: none;
+  }
+}
+
+/* Left/right + collapsed: shrink panel to a 28px vertical strip and rotate
+ * the header content so the folder name reads top-to-bottom along the edge
+ * (VS Code activity-bar style). Action buttons (search / open-folder / move)
+ * are hidden — collapsed = quick-access only; expand to interact. The whole
+ * strip stays clickable so users can hit anywhere on it to expand. */
+.webview-layout.file-tree--left.file-tree--root-collapsed .file-tree-panel,
+.webview-layout.file-tree--right.file-tree--root-collapsed .file-tree-panel {
+  flex: 0 0 28px;
+  min-width: 0;
+}
+
+/* The sash (resize boundary) is `display: none` while collapsed, so the
+ * subtle 1px divider it normally paints is gone too. Restore the boundary
+ * with a static border on the side facing the terminal so users can still
+ * see where the strip ends. */
+.webview-layout.file-tree--left.file-tree--root-collapsed .file-tree-panel {
+  border-right: 1px solid var(--vscode-widget-border, var(--vscode-panel-border, rgba(128, 128, 128, 0.35)));
+}
+.webview-layout.file-tree--right.file-tree--root-collapsed .file-tree-panel {
+  border-left: 1px solid var(--vscode-widget-border, var(--vscode-panel-border, rgba(128, 128, 128, 0.35)));
+}
+
+.webview-layout.file-tree--left.file-tree--root-collapsed .file-tree-header,
+.webview-layout.file-tree--right.file-tree--root-collapsed .file-tree-header {
+  /* Fill the panel vertically; the header is now the entire visible chrome. */
+  flex: 1 1 auto;
+  flex-direction: column;
+  padding: 4px 0;
+  align-items: stretch;
+  justify-content: flex-start;
+  /* Header normally has a fixed 24px main-axis size for the horizontal
+   * layout; release it so the vertical strip can stretch to full height. */
+  height: auto;
+}
+
+.webview-layout.file-tree--left.file-tree--root-collapsed .file-tree-header__actions,
+.webview-layout.file-tree--right.file-tree--root-collapsed .file-tree-header__actions {
+  display: none;
+}
+
+/* Root row turns into the vertical clickable strip. `writing-mode:
+ * vertical-rl` lays children top-to-bottom and tilts text 90° clockwise so
+ * the folder name reads naturally from top down. The chevron `›` glyph
+ * tilts the same way, which reads as "click to push panel out toward the
+ * terminal" on both sides — acceptable affordance for v1. */
+.webview-layout.file-tree--left.file-tree--root-collapsed .file-tree-header__root,
+.webview-layout.file-tree--right.file-tree--root-collapsed .file-tree-header__root {
+  flex: 1 1 auto;
+  height: auto;
+  width: 100%;
+  writing-mode: vertical-rl;
+  text-orientation: mixed;
+  padding: 8px 0;
+  justify-content: flex-start;
+}
+
+/* Truncating the name uses overflow + ellipsis; on the vertical axis this
+ * clips the bottom of the label (consistent with how vertical text wraps
+ * elsewhere — VS Code activity bar does the same). */
+.webview-layout.file-tree--left.file-tree--root-collapsed .file-tree-header__root .name,
+.webview-layout.file-tree--right.file-tree--root-collapsed .file-tree-header__root .name {
+  max-height: 100%;
+}
+
+/* Chevron orientation in collapsed-vertical mode. `writing-mode: vertical-rl`
+ * on the parent rotates Latin glyphs 90° clockwise (text-orientation: mixed
+ * default), so the `›` ends up pointing DOWN — uninformative. Force it
+ * upright, then flip it to point toward the terminal area:
+ *   - left-collapsed:  terminal is on the right  → `›` (no transform).
+ *   - right-collapsed: terminal is on the left   → `‹` (rotate 180°). */
+.webview-layout.file-tree--left.file-tree--root-collapsed .file-tree-header__root .chevron,
+.webview-layout.file-tree--right.file-tree--root-collapsed .file-tree-header__root .chevron {
+  text-orientation: upright;
+}
+.webview-layout.file-tree--right.file-tree--root-collapsed .file-tree-header__root .chevron {
+  transform: rotate(180deg);
+}
+
+/* ============================================================
+ * Custom hover tooltip — replaces native title tooltips which
+ * render unreliably inside VSCode webviews. Mounted on
+ * document.body by Tooltip.ts so panel `overflow: hidden`
+ * doesn't clip it.
+ * ============================================================ */
+.file-tree-tooltip {
+  position: absolute;
+  pointer-events: none;
+  z-index: 1000;
+  max-width: 240px;
+  padding: 3px 7px;
+  font-size: 12px;
+  line-height: 1.4;
+  border-radius: 3px;
+  white-space: normal;
+  word-break: break-word;
+  background: var(--vscode-editorHoverWidget-background, #252526);
+  color: var(--vscode-editorHoverWidget-foreground, #cccccc);
+  border: 1px solid var(--vscode-editorHoverWidget-border, #454545);
+  box-shadow: 0 2px 8px var(--vscode-widget-shadow, rgba(0, 0, 0, 0.36));
 }

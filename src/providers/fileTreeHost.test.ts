@@ -56,6 +56,96 @@ describe("FileTreeHost.handleMessage", () => {
     expect(host.handleMessage(unrelated, noopPost)).toBe(false);
     expect(noopPost).not.toHaveBeenCalled();
   });
+
+  it("handles `request-open-folder` by showing the native folder picker", async () => {
+    const host = new FileTreeHost();
+    const postSpy = vi.fn();
+    const dialogSpy = vi.spyOn(vscode.window, "showOpenDialog").mockResolvedValue(undefined);
+
+    try {
+      const handled = host.handleMessage({ type: "request-open-folder" }, postSpy);
+      expect(handled).toBe(true);
+      // The dialog is async; let it resolve.
+      await new Promise((r) => setTimeout(r, 0));
+      expect(dialogSpy).toHaveBeenCalledTimes(1);
+      expect(dialogSpy).toHaveBeenCalledWith(
+        expect.objectContaining({
+          canSelectFolders: true,
+          canSelectFiles: false,
+          canSelectMany: false,
+        }),
+      );
+      // User cancelled (resolved undefined) → no reveal posted.
+      expect(postSpy).not.toHaveBeenCalled();
+    } finally {
+      dialogSpy.mockRestore();
+    }
+  });
+
+  it("posts `reveal-in-file-tree` with the picked path via attachPost after `request-open-folder` resolves", async () => {
+    const host = new FileTreeHost();
+    const attachPostSpy = vi.fn();
+    // attach() wires the host's stable channel; pass a stub isReady=true so
+    // the post is not gated out.
+    host.attach({ isReady: () => true, post: attachPostSpy });
+
+    const dialogSpy = vi
+      .spyOn(vscode.window, "showOpenDialog")
+      .mockResolvedValue([{ fsPath: "/picked/folder" } as vscode.Uri]);
+
+    try {
+      const handled = host.handleMessage({ type: "request-open-folder" }, vi.fn());
+      expect(handled).toBe(true);
+      await new Promise((r) => setTimeout(r, 0));
+      expect(attachPostSpy).toHaveBeenCalledTimes(1);
+      expect(attachPostSpy).toHaveBeenCalledWith({
+        type: "reveal-in-file-tree",
+        absPath: "/picked/folder",
+        source: "openFolder",
+      });
+    } finally {
+      dialogSpy.mockRestore();
+    }
+  });
+
+  it("warns when a picked folder cannot be posted because the webview is no longer ready", async () => {
+    const host = new FileTreeHost();
+    const attachPostSpy = vi.fn();
+    host.attach({ isReady: () => false, post: attachPostSpy });
+    const dialogSpy = vi
+      .spyOn(vscode.window, "showOpenDialog")
+      .mockResolvedValue([{ fsPath: "/picked/folder" } as vscode.Uri]);
+    const warningSpy = vi.spyOn(vscode.window, "showWarningMessage").mockResolvedValue(undefined);
+
+    try {
+      const handled = host.handleMessage({ type: "request-open-folder" }, vi.fn());
+      expect(handled).toBe(true);
+      await new Promise((r) => setTimeout(r, 0));
+      expect(attachPostSpy).not.toHaveBeenCalled();
+      expect(warningSpy).toHaveBeenCalledWith(
+        "AnyWhere Terminal file tree is no longer available. Reopen it and try again.",
+      );
+    } finally {
+      dialogSpy.mockRestore();
+      warningSpy.mockRestore();
+    }
+  });
+
+  it("surfaces an error message when the folder picker rejects", async () => {
+    const host = new FileTreeHost();
+    const dialogSpy = vi.spyOn(vscode.window, "showOpenDialog").mockRejectedValue(new Error("boom"));
+    const errorSpy = vi.spyOn(vscode.window, "showErrorMessage").mockResolvedValue(undefined);
+
+    try {
+      const handled = host.handleMessage({ type: "request-open-folder" }, vi.fn());
+      expect(handled).toBe(true);
+      await new Promise((r) => setTimeout(r, 0));
+      expect(errorSpy).toHaveBeenCalledWith("AnyWhere Terminal could not open the folder picker.");
+    } finally {
+      dialogSpy.mockRestore();
+      errorSpy.mockRestore();
+    }
+  });
 });
 
 describe("FileTreeHost — git decoration stamping on read-directory", () => {

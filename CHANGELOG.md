@@ -4,6 +4,18 @@ All notable changes to **AnyWhere Terminal** are documented in this file.
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- **Open Folder button** in the file tree header — browse another folder into the tree via a native picker, without reloading the workspace or touching terminals.
+- **In-panel position menu** (top/bottom/left/right) replacing the QuickPick modal, with keyboard nav and ARIA `menuitemradio` semantics.
+- Hover tooltips on header buttons, a bottom-position divider, a re-root pulse, and a collapse/expand animation. Collapsing the tree at left/right folds it into a thin vertical strip.
+
+### Changed
+
+- The file tree panel is **always present** — minimize it by collapsing the root row instead. Removed the Close button and the title-bar Toggle commands.
+
 ## [0.14.1] — 2026-05-27
 
 ### Fixed

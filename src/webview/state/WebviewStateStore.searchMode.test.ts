@@ -24,7 +24,7 @@ describe("WebviewStateStore — FileTreeState.searchMode", () => {
     const api = createMockVsCodeApi();
     api.setState({
       fileTreeByLocation: {
-        sidebar: { open: true, position: "left", expandedPaths: [] },
+        sidebar: { position: "left", expandedPaths: [] },
       },
     });
     const store = new WebviewStateStore(api);
@@ -40,7 +40,7 @@ describe("WebviewStateStore — FileTreeState.searchMode", () => {
     const store = new WebviewStateStore(api);
     store.updateState({
       fileTreeByLocation: {
-        sidebar: { open: true, position: "left", expandedPaths: [], searchMode: "highlight" },
+        sidebar: { position: "left", expandedPaths: [], searchMode: "highlight" },
       },
     });
     const state = store.getState();
@@ -52,8 +52,8 @@ describe("WebviewStateStore — FileTreeState.searchMode", () => {
     const store = new WebviewStateStore(api);
     store.updateState({
       fileTreeByLocation: {
-        sidebar: { open: true, position: "left", expandedPaths: [], searchMode: "filter" },
-        panel: { open: true, position: "bottom", expandedPaths: [], searchMode: "highlight" },
+        sidebar: { position: "left", expandedPaths: [], searchMode: "filter" },
+        panel: { position: "bottom", expandedPaths: [], searchMode: "highlight" },
       },
     });
     const state = store.getState();

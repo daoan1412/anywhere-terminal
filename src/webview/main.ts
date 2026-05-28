@@ -412,9 +412,6 @@ const routeMessage = createMessageRouter({
   onWorkspaceRootChanged(msg) {
     fileTreeController?.handleWorkspaceRootChanged(msg);
   },
-  onToggleFileTree() {
-    fileTreeController?.handleToggle();
-  },
   onSetFileTreePosition(msg) {
     fileTreeController?.handleSetPosition(msg);
   },

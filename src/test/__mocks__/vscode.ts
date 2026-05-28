@@ -386,6 +386,7 @@ export const window = {
   showWarningMessage: (_msg?: string, ..._rest: unknown[]) => Promise.resolve(undefined),
   showTextDocument: (_uri?: unknown, _opts?: unknown) => Promise.resolve({}),
   showQuickPick: (items: readonly unknown[], options?: unknown) => _showQuickPickImpl(items, options),
+  showOpenDialog: (_options?: unknown) => Promise.resolve(undefined),
   createWebviewPanel: createMockWebviewPanel,
   registerWebviewViewProvider: (_viewType: string, _provider: unknown, _options?: unknown) => ({
     dispose: () => {},

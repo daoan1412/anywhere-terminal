@@ -125,16 +125,7 @@ export class FileTreeController {
 
     // Seed default position from location only if NO persisted state. A
     // previously-persisted position must not be overridden by the default.
-    // First-install UX: panel is visible by default so the user discovers
-    // the file-tree without having to find the toggle command. Once they
-    // close it explicitly, `persisted.open` carries that decision forward.
-    if (!persisted) {
-      panel.setPosition(defaultPositionFor(locationKey));
-      panel.setOpen(true);
-    } else {
-      panel.setPosition(persisted.position);
-      panel.setOpen(persisted.open);
-    }
+    panel.setPosition(persisted ? persisted.position : defaultPositionFor(locationKey));
 
     return new FileTreeController(panel, deps.init.workspaceRoot, deps);
   }
@@ -164,10 +155,6 @@ export class FileTreeController {
       return;
     }
     this.panel.handleGitStatusChanged(msg.revision, msg.changes);
-  }
-
-  handleToggle(): void {
-    this.panel.setOpen(!this.panel.isOpen());
   }
 
   handleSetPosition(msg: SetFileTreePositionMessage): void {

@@ -556,9 +556,9 @@ export function getTerminalHtml(
   <!-- Webview layout wrapper. File-tree panel + terminal area are siblings;
        CSS in fileTreePanel.css drives flex direction and child order via the
        file-tree--{top|bottom|left|right} classes set at runtime by
-       FileTreePanel.setPosition(). Default = bottom + closed; the toggle
-       command shows it. -->
-  <div id="webview-layout" class="webview-layout file-tree--bottom file-tree--closed">
+       FileTreePanel.setPosition(). The panel is always shown; users minimize
+       by collapsing the root row (.file-tree--root-collapsed). -->
+  <div id="webview-layout" class="webview-layout file-tree--bottom">
     <div class="terminal-area">
       <div id="terminal-container"></div>
     </div>

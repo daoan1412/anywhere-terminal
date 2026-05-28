@@ -261,13 +261,13 @@ export interface RequestReadDirectoryMessage {
 }
 
 /**
- * Webview → Extension: user clicked the in-panel "Move file tree" button.
- * The extension responds by showing a QuickPick for top/bottom/left/right and
- * posting a `SetFileTreePositionMessage` back (same flow as the
- * `anywhereTerminal.setFileTreePosition` command).
+ * Webview → Extension: user clicked the in-panel "Open Folder" button.
+ * The extension shows a folder picker and, on confirm, posts
+ * `reveal-in-file-tree` with `source: "openFolder"` on the host's stable
+ * attach channel.
  */
-export interface RequestSetFileTreePositionMessage {
-  type: "request-set-file-tree-position";
+export interface RequestOpenFolderMessage {
+  type: "request-open-folder";
 }
 
 /**
@@ -347,7 +347,7 @@ export type WebViewToExtensionMessage =
   | RequestReadDirectoryMessage
   | RequestFileTreeSearchMessage
   | CancelFileTreeSearchMessage
-  | RequestSetFileTreePositionMessage
+  | RequestOpenFolderMessage
   | RequestSubscribeFsChangesMessage
   | RequestUnsubscribeFsChangesMessage
   | UpdateHoverPreviewSettingMessage
@@ -701,11 +701,6 @@ export interface FileTreeSearchResponseMessage {
   error?: { code: string; message: string };
 }
 
-/** Extension → Webview: show or hide the file-tree panel. */
-export interface ToggleFileTreeMessage {
-  type: "toggle-file-tree";
-}
-
 /** Extension → Webview: move the file-tree panel to one of four sides. */
 export interface SetFileTreePositionMessage {
   type: "set-file-tree-position";
@@ -779,8 +774,8 @@ export interface FsRehydrateMessage {
  *    `focusNoScroll`). Triggered by `ActiveFileRevealer` when the active
  *    editor tab changes. Bypasses cwd resolution. When `focusNoScroll` is
  *    true, the webview selects + focuses the row without scrolling the tree.
- *    When the file tree panel is closed, the webview short-circuits silently
- *    instead of opening the panel.
+ *    When the root is collapsed, the webview short-circuits silently instead
+ *    of expanding the panel.
  */
 export interface RevealInFileTreeMessage {
   type: "reveal-in-file-tree";
@@ -788,7 +783,10 @@ export interface RevealInFileTreeMessage {
   cwd?: string | null;
   absPath?: string;
   focusNoScroll?: boolean;
-  source?: "osc7" | "autoReveal";
+  /** Where this reveal originated. Drives focus/scroll/bail-out behavior.
+   * `openFolder` = user picked a folder via the Open Folder header button —
+   * treat as a user-initiated reveal (always proceeds, no bail-out). */
+  source?: "osc7" | "autoReveal" | "openFolder";
 }
 
 /**
@@ -818,7 +816,6 @@ export type ExtensionToWebViewMessage =
   | HoverPreviewSettingsMessage
   | ReadDirectoryResponseMessage
   | FileTreeSearchResponseMessage
-  | ToggleFileTreeMessage
   | SetFileTreePositionMessage
   | WorkspaceRootChangedMessage
   | GitStatusChangedMessage

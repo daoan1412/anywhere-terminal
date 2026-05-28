@@ -306,21 +306,6 @@
         "title": "Insert Path in AnyWhere Terminal"
       },
       {
-        "command": "anywhereTerminal.toggleFileTree",
-        "title": "AnyWhere Terminal: Toggle File Tree",
-        "icon": "$(list-tree)"
-      },
-      {
-        "command": "anywhereTerminal.toggleFileTree.sidebar",
-        "title": "Toggle File Tree",
-        "icon": "$(list-tree)"
-      },
-      {
-        "command": "anywhereTerminal.toggleFileTree.panel",
-        "title": "Toggle File Tree",
-        "icon": "$(list-tree)"
-      },
-      {
         "command": "anywhereTerminal.setFileTreePosition",
         "title": "AnyWhere Terminal: Move File Tree…",
         "icon": "$(layout)"
@@ -392,16 +377,6 @@
           "command": "anywhereTerminal.exportPick.panel",
           "when": "view == anywhereTerminal.panel",
           "group": "export@1"
-        },
-        {
-          "command": "anywhereTerminal.toggleFileTree.sidebar",
-          "when": "view == anywhereTerminal.sidebar",
-          "group": "view@1"
-        },
-        {
-          "command": "anywhereTerminal.toggleFileTree.panel",
-          "when": "view == anywhereTerminal.panel",
-          "group": "view@1"
         }
       ],
       "webview/context": [
@@ -521,14 +496,6 @@
         },
         {
           "command": "anywhereTerminal.splitVertical.panel",
-          "when": "false"
-        },
-        {
-          "command": "anywhereTerminal.toggleFileTree.sidebar",
-          "when": "false"
-        },
-        {
-          "command": "anywhereTerminal.toggleFileTree.panel",
           "when": "false"
         },
         {

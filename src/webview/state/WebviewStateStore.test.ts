@@ -130,15 +130,17 @@ describe("WebviewStateStore", () => {
 
   it("legacy fileTree slot is migrated into fileTreeByLocation.sidebar on first read", () => {
     // Simulate a state blob written before per-location bucketing was added.
+    // The legacy shape included `open: true`, which is no longer part of
+    // FileTreeState — cast to `unknown` so the fixture compiles. Migration
+    // spread-preserves the field at runtime; consumers ignore it.
     api.setState({
-      fileTree: { open: true, position: "left", expandedPaths: ["/repo", "/repo/src"] },
+      fileTree: { open: true, position: "left", expandedPaths: ["/repo", "/repo/src"] } as unknown,
     });
 
     const restored = store.getState();
     expect(restored.fileTree).toBeUndefined();
-    expect(restored.fileTreeByLocation).toEqual({
-      sidebar: { open: true, position: "left", expandedPaths: ["/repo", "/repo/src"] },
-    });
+    expect(restored.fileTreeByLocation?.sidebar?.position).toBe("left");
+    expect(restored.fileTreeByLocation?.sidebar?.expandedPaths).toEqual(["/repo", "/repo/src"]);
     // Migration is persisted so a second read sees the new shape directly.
     const second = store.getState();
     expect(second.fileTree).toBeUndefined();
@@ -147,10 +149,11 @@ describe("WebviewStateStore", () => {
 
   it("migration preserves existing sidebar bucket (new shape wins over legacy slot)", () => {
     // Both slots populated — the new shape takes priority; legacy is dropped.
+    // Legacy `open` cast as `unknown` (see above).
     api.setState({
-      fileTree: { open: true, position: "left", expandedPaths: ["/old"] },
+      fileTree: { open: true, position: "left", expandedPaths: ["/old"] } as unknown,
       fileTreeByLocation: {
-        sidebar: { open: false, position: "right", expandedPaths: ["/new"] },
+        sidebar: { position: "right", expandedPaths: ["/new"] },
       },
     });
 
@@ -180,14 +183,13 @@ describe("WebviewStateStore", () => {
 
     store.updateState({
       fileTreeByLocation: {
-        sidebar: { open: false, position: "bottom", expandedPaths: [] },
+        sidebar: { position: "bottom", expandedPaths: [] },
       },
     });
 
     const restored = store.getState();
     expect(restored.tabLayouts).toEqual({ "tab-1": layout });
     expect(restored.fileTreeByLocation?.sidebar).toEqual({
-      open: false,
       position: "bottom",
       expandedPaths: [],
     });

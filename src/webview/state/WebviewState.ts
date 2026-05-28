@@ -13,8 +13,6 @@ import type { SplitNode } from "../SplitModel";
 
 /** Per-tab persisted file-tree state. */
 export interface FileTreeState {
-  /** Whether the panel is currently shown. */
-  open: boolean;
   /** Position relative to the terminal area. */
   position: FileTreePosition;
   /** Absolute paths of currently-expanded folders — used to restore tree state on reveal. */

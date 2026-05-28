@@ -29,8 +29,8 @@ import type {
   OpenFileMessage,
   ReadDirectoryResponseMessage,
   RequestFileTreeSearchMessage,
+  RequestOpenFolderMessage,
   RequestReadDirectoryMessage,
-  RequestSetFileTreePositionMessage,
   RequestSubscribeFsChangesMessage,
   RequestUnsubscribeFsChangesMessage,
 } from "../../types/messages";
@@ -41,6 +41,7 @@ import type { FileNode } from "./IFileSystemProvider";
 import { FILE_TREE_DRAG_MIME, ReadOnlyFileRenderer } from "./ReadOnlyFileRenderer";
 import { FileTreeSearchController, isSyntheticSearchRow } from "./search/FileTreeSearchController";
 import type { SearchMode } from "./search/matching";
+import { attachTooltip } from "./Tooltip";
 import { Tree } from "./Tree";
 
 // `postMessage` accepts all outbound types this panel can send. Kept as a
@@ -50,7 +51,7 @@ export type FileTreePostMessage = (
   m:
     | RequestReadDirectoryMessage
     | OpenFileMessage
-    | RequestSetFileTreePositionMessage
+    | RequestOpenFolderMessage
     | RequestFileTreeSearchMessage
     | CancelFileTreeSearchMessage
     | RequestSubscribeFsChangesMessage
@@ -87,20 +88,20 @@ export interface FileTreePanelDeps {
    */
   layoutWrapper?: HTMLElement;
   /**
-   * Called after every `setPosition`, `setOpen(true)`, `setOpen(false)`, and
-   * `handleRootChanged` so the caller can re-trigger xterm `fit()` (typically
-   * `ResizeCoordinator.debouncedFit`). Optional in tests.
+   * Called after every `setPosition` and `handleRootChanged` so the caller
+   * can re-trigger xterm `fit()` (typically `ResizeCoordinator.debouncedFit`).
+   * Optional in tests.
    */
   onLayoutChange?: () => void;
   /**
    * Returns the previously-persisted `FileTreeState`, or `undefined` if the
-   * panel has never been shown before. Read once on mount to seed `open`,
-   * `position`, and `expandedPaths`. Optional in tests.
+   * panel has never been shown before. Read once on mount to seed `position`
+   * and `expandedPaths`. Optional in tests.
    */
   getPersistedState?: () => FileTreeState | undefined;
   /**
    * Called whenever the persisted-state-relevant inputs change
-   * (`setPosition`, `setOpen`, expand, collapse). Optional in tests.
+   * (`setPosition`, expand, collapse). Optional in tests.
    */
   persistState?: (state: FileTreeState) => void;
 }
@@ -124,10 +125,8 @@ export class FileTreePanel {
   private disposed = false;
   /** Listener detacher for the tree's dragover-reject — re-bound after re-mount. */
   private dragoverDetach: (() => void) | null = null;
-  /** Latest position applied — kept so `setOpen` can re-stamp after toggling closed. */
+  /** Latest position applied. */
   private currentPosition: FileTreePosition = "bottom";
-  /** Latest open state — keeps `setOpen(true|false)` idempotent. */
-  private open = true;
   /**
    * Forwards host size changes down to `Tree.layout()`. Without this, the
    * vendored List widget never knows its viewport height, so virtualisation
@@ -173,6 +172,22 @@ export class FileTreePanel {
   private searchModeHighlightBtn: HTMLButtonElement | null = null;
   /** Currently-resolved search scope (absolute path). Captured at entry. */
   private currentSearchScope: string | null = null;
+  /** Move button — kept so the position menu can anchor + return focus on close. */
+  private headerMoveBtnEl: HTMLButtonElement | null = null;
+  /** Position menu state: DOM, doc-level dismiss handlers, open flag. */
+  private positionMenuEl: HTMLElement | null = null;
+  private positionMenuPointerDownHandler: ((ev: PointerEvent) => void) | null = null;
+  private positionMenuKeyDownHandler: ((ev: KeyboardEvent) => void) | null = null;
+  /** Whether `syncRootCollapsedClass` has run at least once. Subsequent
+   * toggles arm the CSS transition; the first call doesn't (initial mount
+   * shouldn't animate state that was already persisted). */
+  private hasSyncedRootCollapseOnce = false;
+  /** Last collapsed state stamped onto the wrapper — drives change-detection. */
+  private lastRootCollapsedStamped = false;
+  /** Pending timer that strips the `.file-tree--anim` gate from the wrapper. */
+  private collapseAnimDisarmTimer: ReturnType<typeof setTimeout> | null = null;
+  /** Hover-tooltip detachers — invoked in dispose() to remove listeners. */
+  private readonly tooltipDisposers: Array<() => void> = [];
 
   constructor(private readonly deps: FileTreePanelDeps) {
     // Stamp the panel CSS class on the host so theme / position rules in
@@ -186,10 +201,9 @@ export class FileTreePanel {
     this.mountHeader();
     this.mountBody();
 
-    // Seed open + position + expandedPaths from persisted state if present.
+    // Seed position + expandedPaths from persisted state if present.
     const persisted = deps.getPersistedState?.();
     if (persisted) {
-      this.open = persisted.open;
       this.currentPosition = persisted.position;
       for (const path of persisted.expandedPaths) {
         this.expandedPaths.add(path);
@@ -237,31 +251,32 @@ export class FileTreePanel {
    * re-roots it at `absPath`. The new root becomes the tree's top-level
    * folder; the user can browse inside it but won't see ancestors above it.
    *
-   * Opens the panel if it's currently closed.
+   * Explicit user-initiated reveals proceed even when the root is collapsed;
+   * passive auto-reveals and OSC 7 updates preserve the collapsed state.
    */
-  async revealPath(absPath: string, opts?: { focusNoScroll?: boolean; source?: "osc7" | "autoReveal" }): Promise<void> {
+  async revealPath(
+    absPath: string,
+    opts?: { focusNoScroll?: boolean; source?: "osc7" | "autoReveal" | "openFolder" },
+  ): Promise<void> {
     if (this.disposed) {
       return;
     }
     const rootCollapsed = !!this.tree && !!this.rootNode && !this.tree.isExpanded(this.rootNode);
-    // Auto-reveal: never disturb a hidden or collapsed panel — the user is
+    // Auto-reveal: never disturb a collapsed panel — the user is
     // interacting with VS Code's editor / explorer, not us.
-    if (opts?.source === "autoReveal" && (!this.open || rootCollapsed)) {
+    if (opts?.source === "autoReveal" && rootCollapsed) {
       return;
     }
     // Root-collapsed + osc7: keep the tree's root in sync with shell PWD if
     // the cd left the current root, but preserve the collapsed visual state.
-    // No expand / focus / scroll — user explicitly minimized the panel.
-    if (rootCollapsed) {
+    // Explicit user actions (e.g. Open Folder / Reveal in File Tree) continue
+    // below so they can expand + focus the picked target.
+    if (rootCollapsed && opts?.source === "osc7") {
       const wsRoot = this.workspaceRootPath as string;
       if (!isPathInside(absPath, wsRoot)) {
         this.setRoot(absPath, { mountCollapsed: true });
       }
       return;
-    }
-    // Make sure the panel is visible before we try to scroll the row.
-    if (!this.open) {
-      this.setOpen(true);
     }
 
     const focusNoScroll = opts?.focusNoScroll === true;
@@ -313,6 +328,14 @@ export class FileTreePanel {
     const rootPath = this.workspaceRootPath as string;
     const rel = absPath.slice(rootPath.length).replace(/^[\\/]+/, "");
     const segments = rel.length === 0 ? [] : rel.split(/[\\/]+/);
+
+    // Explicit Open Folder on the current root: segments is empty, so the
+    // per-segment expand loop below never runs. Root is hidden (hideRoot:
+    // true), so leaving it collapsed leaves the panel visually empty after
+    // an explicit user action. Force the root open for this branch.
+    if (opts?.source === "openFolder" && this.tree && !this.tree.isExpanded(root)) {
+      this.tree.expand(root);
+    }
 
     let current: FileNode = root;
     for (const segment of segments) {
@@ -433,38 +456,6 @@ export class FileTreePanel {
   /** Current position — useful for persisting in WebviewState. */
   getPosition(): FileTreePosition {
     return this.currentPosition;
-  }
-
-  /**
-   * Show or hide the panel. Toggling does NOT destroy the Tree — `setOpen(true)`
-   * later re-shows the same instance. Use `dispose()` for full teardown.
-   *
-   * The DOM class is ALWAYS synced even when `open` matches the current
-   * value, because the constructor inherits `this.open` from persisted
-   * state before `main.ts` calls `setOpen(persisted.open)` — a same-value
-   * early-return would leave the HTML's default `file-tree--closed` class
-   * stranded out of sync with the in-memory state. Persist + layout-fit
-   * side effects still only fire on actual changes.
-   */
-  setOpen(open: boolean): void {
-    if (this.disposed) {
-      return;
-    }
-    const changed = this.open !== open;
-    this.open = open;
-    const wrapper = this.deps.layoutWrapper;
-    if (wrapper) {
-      wrapper.classList.toggle("file-tree--closed", !open);
-    }
-    if (changed) {
-      this.persistCurrentState();
-      this.deps.onLayoutChange?.();
-    }
-  }
-
-  /** True if the panel is currently shown. */
-  isOpen(): boolean {
-    return this.open;
   }
 
   /**
@@ -601,6 +592,27 @@ export class FileTreePanel {
     this.applySize(this.currentSize);
     this.recreateSash();
     this.deps.onLayoutChange?.();
+
+    // Visual cue that the root changed — fade the body in, pulse the header.
+    // Skipped when the new root is `null` (empty state has its own appearance
+    // and doesn't need a pulse). Matches VS Code's subtle "the view just
+    // changed" feedback in the Explorer.
+    if (args.rootPath !== null) {
+      this.playRerootAnimation();
+    }
+  }
+
+  /**
+   * Flash the entire panel with a brief focus-border pulse to signal a
+   * re-root. CSS animations only run once per class application; remove,
+   * force a reflow, then re-add so subsequent re-roots replay the animation.
+   */
+  private playRerootAnimation(): void {
+    const host = this.deps.host;
+    host.classList.remove("file-tree-panel--reroot");
+    // Force reflow so the browser registers the class removal before re-add.
+    void host.offsetWidth;
+    host.classList.add("file-tree-panel--reroot");
   }
 
   /**
@@ -725,6 +737,18 @@ export class FileTreePanel {
     if (this.searchActive) {
       this.exitSearch();
     }
+    if (this.positionMenuEl) {
+      this.closePositionMenu({ restoreFocus: false });
+    }
+    if (this.collapseAnimDisarmTimer !== null) {
+      clearTimeout(this.collapseAnimDisarmTimer);
+      this.collapseAnimDisarmTimer = null;
+      this.deps.layoutWrapper?.classList.remove("file-tree--anim");
+    }
+    for (const disposeTooltip of this.tooltipDisposers) {
+      disposeTooltip();
+    }
+    this.tooltipDisposers.length = 0;
     this.searchController = null;
     this.disposed = true;
     this.dragoverDetach?.();
@@ -758,6 +782,8 @@ export class FileTreePanel {
     rootRow.setAttribute("tabindex", "0");
     rootRow.setAttribute("aria-label", "Toggle root folder");
     rootRow.setAttribute("aria-expanded", "false");
+    rootRow.title = "Click to collapse / expand";
+    this.tooltipDisposers.push(attachTooltip(rootRow));
 
     const chevron = doc.createElement("span");
     chevron.className = "chevron";
@@ -793,33 +819,49 @@ export class FileTreePanel {
     const actions = doc.createElement("div");
     actions.className = "file-tree-header__actions";
 
-    // Inline SVG provenance: microsoft/vscode codicon set (search / close /
-    // layout). Glyph paths copied verbatim for CSP compliance.
+    // Inline SVGs: the search and move (layout) glyphs are codicon-derived
+    // outlines; the open-folder glyph is a custom simple outline. Inlined
+    // (not <link>'d) so they ship under CSP without an extra font request.
     const searchBtn = makeHeaderButton(doc, {
       label: "Search files",
+      title: "Search files in tree",
       svg: `<svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="7" cy="7" r="4.5"/><line x1="10.5" y1="10.5" x2="14" y2="14"/></svg>`,
       onClick: () => this.toggleSearch(),
     });
     this.headerSearchBtnEl = searchBtn;
 
-    const closeBtn = makeHeaderButton(doc, {
-      label: "Close File Tree",
-      svg: `<svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" aria-hidden="true"><line x1="4" y1="4" x2="12" y2="12"/><line x1="12" y1="4" x2="4" y2="12"/></svg>`,
-      onClick: () => this.setOpen(false),
+    const openFolderBtn = makeHeaderButton(doc, {
+      label: "Open Folder",
+      title: "Browse another folder (workspace unchanged, no reload)",
+      svg: `<svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.2" stroke-linejoin="round" aria-hidden="true"><path d="M1.5 3.5h4l1.5 1.5h7.5v8.5h-13z"/><path d="M1.5 6h13"/></svg>`,
+      onClick: () => this.deps.postMessage({ type: "request-open-folder" }),
     });
 
     const moveBtn = makeHeaderButton(doc, {
       label: "Move File Tree",
-      title: "Move File Tree…",
+      title: "Move tree to top / bottom / left / right",
       svg: `<svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.2" aria-hidden="true"><rect x="1.5" y="1.5" width="13" height="13" rx="0.5"/><line x1="6" y1="1.5" x2="6" y2="14.5"/></svg>`,
-      onClick: () => this.deps.postMessage({ type: "request-set-file-tree-position" }),
+      onClick: () => this.togglePositionMenu(),
     });
+    moveBtn.setAttribute("aria-haspopup", "menu");
+    moveBtn.setAttribute("aria-expanded", "false");
+    this.headerMoveBtnEl = moveBtn;
+    // Search button hint is stateful (toggles with searchActive). Pass a
+    // dynamic getter so the tooltip re-reads on every show instead of being
+    // frozen at attach-time.
+    this.tooltipDisposers.push(
+      attachTooltip(searchBtn, {
+        getText: () => (this.searchActive ? "Close search" : "Search files in tree"),
+      }),
+      attachTooltip(openFolderBtn),
+      attachTooltip(moveBtn),
+    );
 
-    // Order: search → move → close. Close sits at the far right (matches
-    // VS Code panel chrome where the "X" is always the outermost action).
+    // Order: search → open-folder → move. Move sits at the far right so the
+    // panel-positioning affordance is the outermost action.
     actions.appendChild(searchBtn);
+    actions.appendChild(openFolderBtn);
     actions.appendChild(moveBtn);
-    actions.appendChild(closeBtn);
 
     header.appendChild(rootRow);
 
@@ -868,6 +910,8 @@ export class FileTreePanel {
       input.focus();
     });
 
+    this.tooltipDisposers.push(attachTooltip(filterBtn), attachTooltip(highlightBtn));
+
     modeToggle.appendChild(filterBtn);
     modeToggle.appendChild(highlightBtn);
     searchBar.appendChild(modeToggle);
@@ -882,6 +926,162 @@ export class FileTreePanel {
     this.searchInputEl = input;
     this.searchModeFilterBtn = filterBtn;
     this.searchModeHighlightBtn = highlightBtn;
+  }
+
+  // ─── Position menu (anchored dropdown for the move button) ────────
+
+  private togglePositionMenu(): void {
+    if (this.positionMenuEl) {
+      this.closePositionMenu();
+    } else {
+      this.openPositionMenu();
+    }
+  }
+
+  private openPositionMenu(): void {
+    if (this.disposed || this.positionMenuEl || !this.headerMoveBtnEl) {
+      return;
+    }
+    const doc = this.deps.host.ownerDocument;
+    const menu = doc.createElement("div");
+    menu.className = "file-tree-position-menu";
+    menu.setAttribute("role", "menu");
+    menu.setAttribute("aria-label", "Move File Tree");
+
+    const items: ReadonlyArray<{ label: string; value: FileTreePosition }> = [
+      { label: "Top", value: "top" },
+      { label: "Bottom", value: "bottom" },
+      { label: "Left", value: "left" },
+      { label: "Right", value: "right" },
+    ];
+    const itemEls: HTMLButtonElement[] = [];
+    for (const it of items) {
+      const btn = doc.createElement("button");
+      btn.type = "button";
+      btn.className = "file-tree-position-menu__item";
+      // `menuitemradio` + `aria-checked` is the WAI-ARIA pattern for a
+      // single-select group inside a menu. `aria-current` (the prior choice)
+      // is for navigation landmarks and isn't announced by NVDA/JAWS/VO for
+      // menu state, leaving AT users unable to tell which position is active.
+      btn.setAttribute("role", "menuitemradio");
+      btn.setAttribute("aria-checked", it.value === this.currentPosition ? "true" : "false");
+      btn.textContent = it.label;
+      btn.addEventListener("click", (ev) => {
+        ev.preventDefault();
+        ev.stopPropagation();
+        this.closePositionMenu();
+        this.setPosition(it.value);
+      });
+      menu.appendChild(btn);
+      itemEls.push(btn);
+    }
+
+    // Anchor below the move button. Mounted on document.body (not the panel
+    // host) so it isn't clipped by the panel's `overflow: hidden` when the
+    // root is collapsed and the panel shrinks to header height.
+    doc.body.appendChild(menu);
+    const btnRect = this.headerMoveBtnEl.getBoundingClientRect();
+    // Default: flip below the button, right-aligned with the button's right
+    // edge. Read menu dimensions after mount to clamp into the viewport.
+    menu.style.top = `${btnRect.bottom + 2}px`;
+    const menuRect = menu.getBoundingClientRect();
+    let left = btnRect.right - menuRect.width;
+    if (left < 4) {
+      left = 4;
+    }
+    const viewportRight = doc.defaultView?.innerWidth ?? btnRect.right;
+    if (left + menuRect.width > viewportRight - 4) {
+      left = Math.max(4, viewportRight - menuRect.width - 4);
+    }
+    menu.style.left = `${left}px`;
+    // Vertical flip: when the menu would overflow the viewport bottom
+    // (panel-bottom position, short webview), place it above the button
+    // instead. Without this the bottom-most items are clipped.
+    const viewportBottom = doc.defaultView?.innerHeight ?? btnRect.bottom + menuRect.height;
+    if (btnRect.bottom + 2 + menuRect.height > viewportBottom - 4) {
+      const flipped = btnRect.top - menuRect.height - 2;
+      menu.style.top = `${Math.max(4, flipped)}px`;
+    }
+
+    this.positionMenuEl = menu;
+    this.headerMoveBtnEl.setAttribute("aria-expanded", "true");
+
+    // Document-level dismiss handlers. Captured at document so they fire
+    // before the menu's own click handlers swallow propagation — pointerdown
+    // is used (not click) to dismiss on the down-stroke for snappier feel.
+    const pointerDown = (ev: PointerEvent) => {
+      const target = ev.target as Node | null;
+      if (!target) {
+        return;
+      }
+      if (menu.contains(target) || this.headerMoveBtnEl?.contains(target)) {
+        return;
+      }
+      this.closePositionMenu({ restoreFocus: false });
+    };
+    const keyDown = (ev: KeyboardEvent) => {
+      if (!this.positionMenuEl) {
+        return;
+      }
+      switch (ev.key) {
+        case "Escape":
+          ev.preventDefault();
+          ev.stopPropagation();
+          this.closePositionMenu();
+          break;
+        case "ArrowDown":
+        case "ArrowUp": {
+          ev.preventDefault();
+          const dir = ev.key === "ArrowDown" ? 1 : -1;
+          const active = doc.activeElement as HTMLElement | null;
+          const idx = active ? itemEls.indexOf(active as HTMLButtonElement) : -1;
+          const next = (idx + dir + itemEls.length) % itemEls.length;
+          itemEls[next]?.focus();
+          break;
+        }
+        case "Home":
+          ev.preventDefault();
+          itemEls[0]?.focus();
+          break;
+        case "End":
+          ev.preventDefault();
+          itemEls[itemEls.length - 1]?.focus();
+          break;
+        case "Tab":
+          // Let the browser advance focus naturally; just release the document handlers.
+          this.closePositionMenu({ restoreFocus: false });
+          break;
+      }
+    };
+    doc.addEventListener("pointerdown", pointerDown, true);
+    doc.addEventListener("keydown", keyDown, true);
+    this.positionMenuPointerDownHandler = pointerDown;
+    this.positionMenuKeyDownHandler = keyDown;
+
+    // Initial focus: the currently-checked position's item if present, else the first.
+    const current = itemEls.find((el) => el.getAttribute("aria-checked") === "true");
+    (current ?? itemEls[0])?.focus();
+  }
+
+  private closePositionMenu(opts: { restoreFocus?: boolean } = {}): void {
+    if (!this.positionMenuEl) {
+      return;
+    }
+    const doc = this.deps.host.ownerDocument;
+    if (this.positionMenuPointerDownHandler) {
+      doc.removeEventListener("pointerdown", this.positionMenuPointerDownHandler, true);
+      this.positionMenuPointerDownHandler = null;
+    }
+    if (this.positionMenuKeyDownHandler) {
+      doc.removeEventListener("keydown", this.positionMenuKeyDownHandler, true);
+      this.positionMenuKeyDownHandler = null;
+    }
+    this.positionMenuEl.remove();
+    this.positionMenuEl = null;
+    this.headerMoveBtnEl?.setAttribute("aria-expanded", "false");
+    if (!this.disposed && opts.restoreFocus !== false) {
+      this.headerMoveBtnEl?.focus();
+    }
   }
 
   /**
@@ -1002,7 +1202,11 @@ export class FileTreePanel {
     }
     if (this.headerSearchBtnEl) {
       this.headerSearchBtnEl.setAttribute("aria-label", "Close search");
-      this.headerSearchBtnEl.setAttribute("title", "Close search");
+      // NOTE: don't reassign `title` here — the custom tooltip widget
+      // captured + stripped it at attach-time and now reads the state-aware
+      // label via the getText closure passed in mountHeader. Reassigning
+      // title would reintroduce the native browser tooltip AND leave the
+      // custom one stale.
     }
     if (this.searchInputEl) {
       this.searchInputEl.value = "";
@@ -1041,7 +1245,9 @@ export class FileTreePanel {
     }
     if (this.headerSearchBtnEl) {
       this.headerSearchBtnEl.setAttribute("aria-label", "Search files");
-      this.headerSearchBtnEl.setAttribute("title", "Search files");
+      // See note in `enterSearch` — custom tooltip reads dynamic state via
+      // the getText closure; reassigning `title` would reintroduce the
+      // native browser tooltip and a stale custom hint.
     }
     this.searchController?.exit();
   }
@@ -1121,7 +1327,37 @@ export class FileTreePanel {
       return;
     }
     const collapsed = !!this.tree && !!this.rootNode && !this.searchActive && !this.tree.isExpanded(this.rootNode);
+    const changed = this.hasSyncedRootCollapseOnce && collapsed !== this.lastRootCollapsedStamped;
+    if (changed) {
+      // Arm the CSS transition BEFORE we toggle the class so the browser
+      // captures the starting flex-basis as the "from" value of the
+      // transition. Without this ordering the transition can no-op.
+      this.armCollapseAnimation();
+    }
     wrapper.classList.toggle("file-tree--root-collapsed", collapsed);
+    this.lastRootCollapsedStamped = collapsed;
+    this.hasSyncedRootCollapseOnce = true;
+  }
+
+  /**
+   * Stamp `.file-tree--anim` on the layout wrapper for 200 ms so the CSS
+   * transition on the panel's flex-basis runs only for user-initiated
+   * collapse/expand toggles — sash drags and initial mount stay instant.
+   * Pattern mirrors VS Code's `setupAnimation` in `paneview.ts`.
+   */
+  private armCollapseAnimation(): void {
+    const wrapper = this.deps.layoutWrapper;
+    if (!wrapper) {
+      return;
+    }
+    wrapper.classList.add("file-tree--anim");
+    if (this.collapseAnimDisarmTimer !== null) {
+      clearTimeout(this.collapseAnimDisarmTimer);
+    }
+    this.collapseAnimDisarmTimer = setTimeout(() => {
+      wrapper.classList.remove("file-tree--anim");
+      this.collapseAnimDisarmTimer = null;
+    }, 200);
   }
 
   private mountBody(): void {
@@ -1227,9 +1463,8 @@ export class FileTreePanel {
 
     // Bridge host dimensions into the underlying List widget. ResizeObserver
     // fires once synchronously on `observe()` (covering initial mount) and
-    // then on every host resize, including the display:none↔flex flip from
-    // `.file-tree--closed`. Zero-sized entries are skipped because layout(0,0)
-    // would tear down virtualisation state we want to retain across hide/show.
+    // then on every host resize. Zero-sized entries are skipped because
+    // layout(0,0) would tear down virtualisation state we want to retain.
     this.installResizeObserver();
   }
 
@@ -1272,12 +1507,13 @@ export class FileTreePanel {
     }
     // Preserve fields owned by other writers (currently `searchMode`,
     // written via writePersistedSearchMode) — without this read-merge a
-    // routine expand/collapse/setOpen/setPosition would clobber the
-    // user's saved search-mode preference.
+    // routine expand/collapse/setPosition would clobber the user's
+    // saved search-mode preference. Picked explicitly (not spread) so
+    // legacy runtime-only fields like the removed `open: boolean` are
+    // dropped on the first persist after upgrade.
     const existing = this.deps.getPersistedState?.();
     this.deps.persistState({
-      ...(existing ?? {}),
-      open: this.open,
+      ...(existing?.searchMode !== undefined ? { searchMode: existing.searchMode } : {}),
       position: this.currentPosition,
       expandedPaths: Array.from(this.expandedPaths),
       size: this.currentSize,

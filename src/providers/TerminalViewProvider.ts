@@ -529,7 +529,7 @@ export class TerminalViewProvider implements vscode.WebviewViewProvider {
           break;
 
         case "request-read-directory":
-        case "request-set-file-tree-position":
+        case "request-open-folder":
         case "request-file-tree-search":
         case "cancel-file-tree-search":
         case "request-subscribe-fs-changes":

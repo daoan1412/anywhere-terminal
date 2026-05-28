@@ -15,7 +15,6 @@ import type {
   OpenFileMessage,
   RequestFileTreeSearchMessage,
   RequestReadDirectoryMessage,
-  RequestSetFileTreePositionMessage,
 } from "../../types/messages";
 import { FileTreePanel } from "./FileTreePanel";
 import type { FileNode } from "./IFileSystemProvider";
@@ -45,7 +44,7 @@ beforeAll(() => {
 type AnyMsg =
   | RequestReadDirectoryMessage
   | OpenFileMessage
-  | RequestSetFileTreePositionMessage
+  | import("../../types/messages").RequestOpenFolderMessage
   | RequestFileTreeSearchMessage
   | CancelFileTreeSearchMessage
   | import("../../types/messages").RequestSubscribeFsChangesMessage
@@ -584,6 +583,33 @@ describe("FileTreePanel — root-collapsed (header-only) mode", () => {
     wrapper.remove();
   });
 
+  it("revealPath(openFolder) expands and focuses the picked folder even while collapsed", async () => {
+    const { panel, posted, wrapper, internals, respond } = setupCollapsedPanel();
+    respond(readDirectoryPosts(posted)[0].requestId, []);
+    await Promise.resolve();
+    await Promise.resolve();
+
+    const root = internals.rootNode;
+    if (!root || !internals.tree) {
+      throw new Error("test setup: tree or rootNode missing after mount");
+    }
+    internals.tree.collapse(root);
+    expect(wrapper.classList.contains("file-tree--root-collapsed")).toBe(true);
+
+    await panel.revealPath("/other/repo", { source: "openFolder" });
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(internals.workspaceRootPath).toBe("/other/repo");
+    expect(wrapper.classList.contains("file-tree--root-collapsed")).toBe(false);
+    if (internals.rootNode && internals.tree) {
+      expect(internals.tree.isExpanded(internals.rootNode)).toBe(true);
+    }
+
+    panel.dispose();
+    wrapper.remove();
+  });
+
   it("handleRootChanged preserves collapse intent across workspace folder change", async () => {
     const { panel, posted, wrapper, internals, respond } = setupCollapsedPanel();
     respond(readDirectoryPosts(posted)[0].requestId, []);
@@ -633,5 +659,125 @@ describe("FileTreePanel — root-collapsed (header-only) mode", () => {
 
     panel.dispose();
     wrapper.remove();
+  });
+
+  // ─── Position menu (anchored dropdown for the Move File Tree button) ──
+  it("position menu: opens with 4 items, selecting one calls setPosition and closes the menu", () => {
+    const host = createHost();
+    const posted: AnyMsg[] = [];
+    const panel = new FileTreePanel({
+      host,
+      workspaceRoot: null,
+      rootGeneration: 0,
+      getActiveSessionId: () => null,
+      postMessage: (m) => posted.push(m),
+    });
+
+    const moveBtn = host.querySelector<HTMLButtonElement>('.file-tree-header__btn[aria-haspopup="menu"]');
+    expect(moveBtn).not.toBeNull();
+    expect(moveBtn?.getAttribute("aria-expanded")).toBe("false");
+
+    moveBtn?.click();
+
+    const menu = document.querySelector<HTMLElement>(".file-tree-position-menu");
+    expect(menu).not.toBeNull();
+    expect(moveBtn?.getAttribute("aria-expanded")).toBe("true");
+    const items = menu?.querySelectorAll<HTMLButtonElement>('[role="menuitemradio"]') ?? [];
+    expect(items).toHaveLength(4);
+    expect(Array.from(items).map((el) => el.textContent)).toEqual(["Top", "Bottom", "Left", "Right"]);
+
+    // Click "Right" — panel should record the new position; menu unmounts.
+    items[3]?.click();
+    expect(document.querySelector(".file-tree-position-menu")).toBeNull();
+    expect(moveBtn?.getAttribute("aria-expanded")).toBe("false");
+    expect(panel.getPosition()).toBe("right");
+
+    // No request-set-file-tree-position should ever be posted — the menu
+    // calls setPosition locally without an IPC roundtrip.
+    expect(posted.some((m) => (m as { type: string }).type === "request-set-file-tree-position")).toBe(false);
+
+    panel.dispose();
+  });
+
+  it("position menu: Escape closes the menu and returns focus to the move button", () => {
+    const host = createHost();
+    const panel = new FileTreePanel({
+      host,
+      workspaceRoot: null,
+      rootGeneration: 0,
+      getActiveSessionId: () => null,
+      postMessage: () => {},
+    });
+
+    const moveBtn = host.querySelector<HTMLButtonElement>('.file-tree-header__btn[aria-haspopup="menu"]');
+    moveBtn?.click();
+    expect(document.querySelector(".file-tree-position-menu")).not.toBeNull();
+
+    document.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
+    expect(document.querySelector(".file-tree-position-menu")).toBeNull();
+    expect(document.activeElement).toBe(moveBtn);
+
+    panel.dispose();
+  });
+
+  it("position menu: Tab closes the menu without forcing focus back to the move button", () => {
+    const host = createHost();
+    const panel = new FileTreePanel({
+      host,
+      workspaceRoot: null,
+      rootGeneration: 0,
+      getActiveSessionId: () => null,
+      postMessage: () => {},
+    });
+
+    const moveBtn = host.querySelector<HTMLButtonElement>('.file-tree-header__btn[aria-haspopup="menu"]');
+    moveBtn?.click();
+    const firstItem = document.querySelector<HTMLButtonElement>('.file-tree-position-menu [role="menuitemradio"]');
+    expect(firstItem).not.toBeNull();
+    firstItem?.focus();
+
+    document.dispatchEvent(new KeyboardEvent("keydown", { key: "Tab", bubbles: true, cancelable: true }));
+    expect(document.querySelector(".file-tree-position-menu")).toBeNull();
+    expect(moveBtn?.getAttribute("aria-expanded")).toBe("false");
+    expect(document.activeElement).not.toBe(moveBtn);
+
+    panel.dispose();
+  });
+
+  it("position menu: re-clicking the button closes the menu", () => {
+    const host = createHost();
+    const panel = new FileTreePanel({
+      host,
+      workspaceRoot: null,
+      rootGeneration: 0,
+      getActiveSessionId: () => null,
+      postMessage: () => {},
+    });
+
+    const moveBtn = host.querySelector<HTMLButtonElement>('.file-tree-header__btn[aria-haspopup="menu"]');
+    moveBtn?.click();
+    expect(document.querySelector(".file-tree-position-menu")).not.toBeNull();
+    moveBtn?.click();
+    expect(document.querySelector(".file-tree-position-menu")).toBeNull();
+
+    panel.dispose();
+  });
+
+  it("position menu: dispose cleans up an open menu", () => {
+    const host = createHost();
+    const panel = new FileTreePanel({
+      host,
+      workspaceRoot: null,
+      rootGeneration: 0,
+      getActiveSessionId: () => null,
+      postMessage: () => {},
+    });
+
+    const moveBtn = host.querySelector<HTMLButtonElement>('.file-tree-header__btn[aria-haspopup="menu"]');
+    moveBtn?.click();
+    expect(document.querySelector(".file-tree-position-menu")).not.toBeNull();
+
+    panel.dispose();
+    expect(document.querySelector(".file-tree-position-menu")).toBeNull();
   });
 });

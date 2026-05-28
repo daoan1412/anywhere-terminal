@@ -35,7 +35,6 @@ import type {
   TabRemovedMessage,
   TabRenamedMessage,
   ThemeChangedMessage,
-  ToggleFileTreeMessage,
   WorkspaceRootChangedMessage,
 } from "../../types/messages";
 
@@ -71,7 +70,6 @@ export interface MessageHandlers {
   // ── File-tree (port-vscode-async-data-tree) ──
   onReadDirectoryResponse(msg: ReadDirectoryResponseMessage): void;
   onWorkspaceRootChanged(msg: WorkspaceRootChangedMessage): void;
-  onToggleFileTree(msg: ToggleFileTreeMessage): void;
   onSetFileTreePosition(msg: SetFileTreePositionMessage): void;
   onRevealInFileTree(msg: RevealInFileTreeMessage): void;
   // ── File-tree search (add-file-tree-search) ──
@@ -166,9 +164,6 @@ export function createMessageRouter(handlers: MessageHandlers): (msg: ExtensionT
         break;
       case "workspace-root-changed":
         handlers.onWorkspaceRootChanged(msg);
-        break;
-      case "toggle-file-tree":
-        handlers.onToggleFileTree(msg);
         break;
       case "set-file-tree-position":
         handlers.onSetFileTreePosition(msg);

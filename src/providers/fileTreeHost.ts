@@ -8,8 +8,6 @@
 //     posts `workspace-root-changed`
 //   - `request-read-directory` message handler that delegates to
 //     `handleRequestReadDirectory`
-//   - `request-set-file-tree-position` handler that shows a QuickPick and
-//     posts the response back to THIS provider's webview
 //   - `rootGeneration` + `workspaceRoot` fields in the `init` payload
 //
 // `FileTreeHost` collects those pieces into one composable companion object.
@@ -315,22 +313,42 @@ export class FileTreeHost implements RootProvider {
         // handler is null when nothing's in flight.
         this.searchHandler?.cancelCurrent();
         return true;
-      case "request-set-file-tree-position":
-        // Drive the QuickPick locally so the response lands on THIS webview
-        // (the shared `anywhereTerminal.setFileTreePosition` command routes
-        // via `getFocusedProvider()`, which only knows about sidebar/panel —
-        // not the editor instance).
+      case "request-open-folder":
+        // Show the native folder picker and, on confirm, route the absolute
+        // path through the existing `reveal-in-file-tree` channel. The
+        // webview's `revealPath` calls `setRoot` when the path is outside
+        // the current root — which means the file tree re-roots at the
+        // picked folder WITHOUT touching the VS Code workspace (no reload,
+        // no extension-host restart, no impact on terminal sessions). Posts
+        // via `attachPost` because the dialog is async and outlives the
+        // inbound RPC's `post` closure.
         void (async () => {
-          const choice = await vscode.window.showQuickPick(["Top", "Bottom", "Left", "Right"], {
-            placeHolder: "Move AnyWhere Terminal file tree to…",
-          });
-          if (!choice) {
-            return;
+          try {
+            const picked = await vscode.window.showOpenDialog({
+              canSelectFolders: true,
+              canSelectFiles: false,
+              canSelectMany: false,
+              openLabel: "Open Folder",
+              title: "Open Folder in AnyWhere Terminal File Tree",
+            });
+            if (!picked || picked.length === 0) {
+              return;
+            }
+            if (!this.attachPost || !this.attachReady?.()) {
+              void vscode.window.showWarningMessage(
+                "AnyWhere Terminal file tree is no longer available. Reopen it and try again.",
+              );
+              return;
+            }
+            this.attachPost({
+              type: "reveal-in-file-tree",
+              absPath: picked[0].fsPath,
+              source: "openFolder",
+            });
+          } catch (err) {
+            console.error("[AnyWhere Terminal] Open Folder dialog failed:", err);
+            void vscode.window.showErrorMessage("AnyWhere Terminal could not open the folder picker.");
           }
-          post({
-            type: "set-file-tree-position",
-            position: choice.toLowerCase() as "top" | "bottom" | "left" | "right",
-          });
         })();
         return true;
       default:
