@@ -712,7 +712,10 @@
   flex: 0 0 24px;
 }
 .webview-layout.file-tree--root-collapsed .aux-region:has(> .vault-panel.vault-collapsed) {
-  flex-basis: auto;
+  /* Both collapsed → hug the two 24px header strips. A FIXED basis (not `auto`)
+     so the region's size is animatable: opening one section transitions the
+     region from 48px back to `--file-tree-size` instead of snapping. */
+  flex-basis: 48px;
 }
 
 /* ============================================================
@@ -828,11 +831,23 @@
  * transition runs only then (sash drags + initial mount stay instant).
  * Pattern mirrors VS Code's `.monaco-pane-view.animated` flag. The vault
  * section reuses the same gate for its own collapse transition. */
+/* Animate the explicit, interpolable bits only — `flex-grow` (the section's
+   share of free space) and `flex-basis` (its fixed collapsed size). The `flex`
+   SHORTHAND tween also drags `flex-shrink` and can read as jank; naming the two
+   properties that actually change the size gives a cleaner, VS-Code-like glide.
+   The region itself transitions `flex-basis` so the both-collapsed hug (48px)
+   eases back to `--file-tree-size` instead of snapping. */
+.webview-layout.file-tree--anim .aux-region {
+  transition: flex-basis 150ms ease-out;
+}
 .webview-layout.file-tree--anim .aux-region > .file-tree-panel,
 .webview-layout.file-tree--anim .aux-region > .vault-panel {
-  transition: flex 150ms ease-out;
+  transition-property: flex-grow, flex-basis;
+  transition-duration: 150ms;
+  transition-timing-function: ease-out;
 }
 @media (prefers-reduced-motion: reduce) {
+  .webview-layout.file-tree--anim .aux-region,
   .webview-layout.file-tree--anim .aux-region > .file-tree-panel,
   .webview-layout.file-tree--anim .aux-region > .vault-panel {
     transition: none;

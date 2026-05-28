@@ -146,10 +146,23 @@ function refreshVaultIfOpen(): void {
   }
 }
 
-/** Point the vault's folder filter at the active pane, then refresh if open. */
+/** Last active-pane cwd the vault was synced/refreshed against (dedupe guard). */
+let lastSyncedVaultCwd: string | null = null;
+
+/**
+ * Point the vault's folder filter at the active pane, then refresh if open.
+ * Only re-reads the agent stores when the active-pane cwd actually CHANGED —
+ * switching between two panes in the same folder would otherwise trigger a
+ * redundant disk scan with no visible change. `setContextCwd` still runs every
+ * call so the folder filter re-scopes correctly.
+ */
 function syncVaultToActivePane(): void {
-  vaultPanel?.setContextCwd(getActivePaneCwd());
-  refreshVaultIfOpen();
+  const cwd = getActivePaneCwd();
+  vaultPanel?.setContextCwd(cwd);
+  if (cwd !== lastSyncedVaultCwd) {
+    lastSyncedVaultCwd = cwd;
+    refreshVaultIfOpen();
+  }
 }
 
 // File-tree controller — instantiated lazily on init once we know workspaceRoot +
