@@ -322,10 +322,6 @@
   min-width: 0;
 }
 
-.file-tree-panel.file-tree-hidden {
-  display: none;
-}
-
 /* Header strip — root row on the left (chevron + folder name), actions on
  * the right (close + move buttons). Height matches the body row height
  * (22px-ish) so visual rhythm with the list below stays consistent. */
@@ -638,16 +634,26 @@
   min-height: 0;
 }
 
-/* The flex basis for each side comes from the `--file-tree-size` custom
- * property which `FileTreePanel.applySize()` sets on the layout wrapper.
- * Fallbacks differ by orientation so the panel still has a sensible default
- * width/height before JS runs the first apply. */
+/* The flex basis for the sidebar region comes from the `--file-tree-size`
+ * custom property which `FileTreePanel.applySize()` sets on the layout wrapper.
+ * `#aux-region` is the sized edge element: it stacks the vault section above the
+ * file tree (always a column) and owns the resize sash. Fallbacks differ by
+ * orientation so the region has a sensible default before JS's first apply. */
+.aux-region {
+  display: flex;
+  flex-direction: column;
+  position: relative;
+  overflow: hidden;
+  min-width: 0;
+  min-height: 0;
+  flex: 0 0 var(--file-tree-size, 200px);
+}
+
 .webview-layout.file-tree--top {
   flex-direction: column;
 }
-.webview-layout.file-tree--top .file-tree-panel {
+.webview-layout.file-tree--top .aux-region {
   order: 0;
-  flex: 0 0 var(--file-tree-size, 200px);
 }
 .webview-layout.file-tree--top .terminal-area {
   order: 1;
@@ -663,18 +669,17 @@
   flex: 1 1 auto;
   min-height: 0;
 }
-.webview-layout.file-tree--bottom .file-tree-panel {
+.webview-layout.file-tree--bottom .aux-region {
   order: 1;
-  flex: 0 0 var(--file-tree-size, 200px);
   border-top: 1px solid var(--vscode-widget-border, var(--vscode-panel-border, rgba(128, 128, 128, 0.35)));
 }
 
 .webview-layout.file-tree--left {
   flex-direction: row;
 }
-.webview-layout.file-tree--left .file-tree-panel {
+.webview-layout.file-tree--left .aux-region {
   order: 0;
-  flex: 0 0 var(--file-tree-size, 240px);
+  flex-basis: var(--file-tree-size, 240px);
 }
 .webview-layout.file-tree--left .terminal-area {
   order: 1;
@@ -690,9 +695,24 @@
   flex: 1 1 auto;
   min-width: 0;
 }
-.webview-layout.file-tree--right .file-tree-panel {
+.webview-layout.file-tree--right .aux-region {
   order: 1;
-  flex: 0 0 var(--file-tree-size, 240px);
+  flex-basis: var(--file-tree-size, 240px);
+}
+
+/* Sections inside the region split the space; collapsing one to a header strip
+ * lets the other fill (`flex: 1 1 0`). The file tree fills the remainder after
+ * the vault section. When BOTH are collapsed the region hugs the two header
+ * strips instead of leaving an empty fixed-size gap (`:has`). */
+.aux-region > .file-tree-panel {
+  flex: 1 1 0;
+  min-height: 0;
+}
+.webview-layout.file-tree--root-collapsed .aux-region > .file-tree-panel {
+  flex: 0 0 24px;
+}
+.webview-layout.file-tree--root-collapsed .aux-region:has(> .vault-panel.vault-collapsed) {
+  flex-basis: auto;
 }
 
 /* ============================================================
@@ -704,34 +724,34 @@
  * terminal area; cursor switches to col-resize / row-resize depending on
  * the panel's position.
  * ============================================================ */
-.file-tree-panel .sash {
+.aux-region .sash {
   position: absolute;
   z-index: 35;
   touch-action: none;
 }
 
-.webview-layout.file-tree--left .file-tree-panel .sash {
+.webview-layout.file-tree--left .aux-region .sash {
   cursor: col-resize;
   width: 4px;
   height: 100%;
   right: -2px;
   top: 0;
 }
-.webview-layout.file-tree--right .file-tree-panel .sash {
+.webview-layout.file-tree--right .aux-region .sash {
   cursor: col-resize;
   width: 4px;
   height: 100%;
   left: -2px;
   top: 0;
 }
-.webview-layout.file-tree--top .file-tree-panel .sash {
+.webview-layout.file-tree--top .aux-region .sash {
   cursor: row-resize;
   height: 4px;
   width: 100%;
   bottom: -2px;
   left: 0;
 }
-.webview-layout.file-tree--bottom .file-tree-panel .sash {
+.webview-layout.file-tree--bottom .aux-region .sash {
   cursor: row-resize;
   height: 4px;
   width: 100%;
@@ -742,164 +762,81 @@
 /* The sash always paints a subtle 1px divider in the panel-border colour so
  * users can SEE the boundary between terminal and explorer at all times.
  * Hover / active brighten the line to the sash-hover colour. */
-.file-tree-panel .sash::before {
+.aux-region .sash::before {
   content: "";
   position: absolute;
   background: var(--vscode-panel-border, var(--vscode-sideBar-border, transparent));
   transition: background-color 0.1s ease-out;
   pointer-events: none;
 }
-.webview-layout.file-tree--left .file-tree-panel .sash::before,
-.webview-layout.file-tree--right .file-tree-panel .sash::before {
+.webview-layout.file-tree--left .aux-region .sash::before,
+.webview-layout.file-tree--right .aux-region .sash::before {
   top: 0;
   left: 50%;
   transform: translateX(-50%);
   width: 1px;
   height: 100%;
 }
-.webview-layout.file-tree--top .file-tree-panel .sash::before,
-.webview-layout.file-tree--bottom .file-tree-panel .sash::before {
+.webview-layout.file-tree--top .aux-region .sash::before,
+.webview-layout.file-tree--bottom .aux-region .sash::before {
   left: 0;
   top: 50%;
   transform: translateY(-50%);
   height: 1px;
   width: 100%;
 }
-.file-tree-panel .sash:hover::before,
-.file-tree-panel .sash.sash-active::before {
+.aux-region .sash:hover::before,
+.aux-region .sash.sash-active::before {
   background: var(--vscode-sash-hoverBorder, var(--vscode-focusBorder));
   transition-delay: 0.2s;
 }
-.file-tree-panel .sash.sash-active::before {
+.aux-region .sash.sash-active::before {
   transition-delay: 0s;
 }
-/* Bottom position owns its own always-visible 1px border-top on the panel
- * (see `.webview-layout.file-tree--bottom .file-tree-panel`), so the sash's
+/* Bottom position owns its own always-visible 1px border-top on the region
+ * (see `.webview-layout.file-tree--bottom .aux-region`), so the sash's
  * idle-state divider would render as a duplicate 1px line. Suppress the
- * idle paint with a bottom-only override; this rule's specificity (0,4,1)
- * also overrides the generic hover rule (0,3,1), so we must re-state the
- * hover/active rules with matching bottom-prefix specificity (0,5,1) to
- * preserve the highlight on drag. */
-.webview-layout.file-tree--bottom .file-tree-panel .sash::before {
+ * idle paint with a bottom-only override; this rule's specificity also
+ * overrides the generic hover rule, so we must re-state the hover/active
+ * rules with matching bottom-prefix specificity to preserve the highlight on
+ * drag. */
+.webview-layout.file-tree--bottom .aux-region .sash::before {
   background: transparent;
 }
-.webview-layout.file-tree--bottom .file-tree-panel .sash:hover::before,
-.webview-layout.file-tree--bottom .file-tree-panel .sash.sash-active::before {
+.webview-layout.file-tree--bottom .aux-region .sash:hover::before,
+.webview-layout.file-tree--bottom .aux-region .sash.sash-active::before {
   background: var(--vscode-sash-hoverBorder, var(--vscode-focusBorder));
+}
+
+/* Hide the resize sash when BOTH sections are collapsed — the region hugs its
+ * two header strips (via the `:has` rule above) and there's nothing to size. */
+.webview-layout.file-tree--root-collapsed .aux-region:has(> .vault-panel.vault-collapsed) .sash {
+  display: none;
 }
 
 /* Root-collapsed (header-only) mode. The wrapper class is stamped by
  * FileTreePanel.syncRootCollapsedClass() — it's NOT derived from
  * aria-expanded because the no-root and search-active states also set
- * aria-expanded="false" but must keep their bodies visible.
+ * aria-expanded="false" but must keep their bodies visible. The file-tree
+ * section shrinks to its 24px header for ALL positions now that the vault +
+ * file tree stack vertically inside #aux-region (the old left/right vertical
+ * activity-bar strip is gone). The collapse `flex` overrides live in the
+ * in-region sizing rules above.
  *
- * The body stays in the DOM (not display:none) so the panel's height/width
- * animation has a stable contained child to clip via `overflow: hidden`.
- * The body has `flex: 1 1 auto; min-height/-width: 0` so it naturally
- * collapses to 0 as the panel shrinks — visually equivalent to display:none
- * at the end of the transition, but smooth during it. */
-.webview-layout.file-tree--root-collapsed .file-tree-panel .sash {
-  display: none;
-}
-
-/* Top/bottom: shrink panel to the 24px header height. Hard-coded to match
- * `.file-tree-header { flex: 0 0 24px }` — using `auto` was visually
- * identical but not transitionable (auto can't be interpolated). */
-.webview-layout.file-tree--top.file-tree--root-collapsed .file-tree-panel,
-.webview-layout.file-tree--bottom.file-tree--root-collapsed .file-tree-panel {
-  flex: 0 0 24px;
-}
-
-/* Animation gate — added by FileTreePanel.armCollapseAnimation() for 200 ms
- * around each user-initiated collapse/expand toggle. Without the gate the
- * transition would also fire on sash drag (which already feels instant)
- * and on initial mount with a persisted collapsed state. Pattern mirrors
- * VS Code's `.monaco-pane-view.animated` flag in paneview.css. */
-.webview-layout.file-tree--anim .file-tree-panel {
+ * Animation gate — `.file-tree--anim` is stamped by armCollapseAnimation()
+ * for ~200 ms around each user-initiated collapse/expand so the flex
+ * transition runs only then (sash drags + initial mount stay instant).
+ * Pattern mirrors VS Code's `.monaco-pane-view.animated` flag. The vault
+ * section reuses the same gate for its own collapse transition. */
+.webview-layout.file-tree--anim .aux-region > .file-tree-panel,
+.webview-layout.file-tree--anim .aux-region > .vault-panel {
   transition: flex 150ms ease-out;
 }
 @media (prefers-reduced-motion: reduce) {
-  .webview-layout.file-tree--anim .file-tree-panel {
+  .webview-layout.file-tree--anim .aux-region > .file-tree-panel,
+  .webview-layout.file-tree--anim .aux-region > .vault-panel {
     transition: none;
   }
-}
-
-/* Left/right + collapsed: shrink panel to a 28px vertical strip and rotate
- * the header content so the folder name reads top-to-bottom along the edge
- * (VS Code activity-bar style). Action buttons (search / open-folder / move)
- * are hidden — collapsed = quick-access only; expand to interact. The whole
- * strip stays clickable so users can hit anywhere on it to expand. */
-.webview-layout.file-tree--left.file-tree--root-collapsed .file-tree-panel,
-.webview-layout.file-tree--right.file-tree--root-collapsed .file-tree-panel {
-  flex: 0 0 28px;
-  min-width: 0;
-}
-
-/* The sash (resize boundary) is `display: none` while collapsed, so the
- * subtle 1px divider it normally paints is gone too. Restore the boundary
- * with a static border on the side facing the terminal so users can still
- * see where the strip ends. */
-.webview-layout.file-tree--left.file-tree--root-collapsed .file-tree-panel {
-  border-right: 1px solid var(--vscode-widget-border, var(--vscode-panel-border, rgba(128, 128, 128, 0.35)));
-}
-.webview-layout.file-tree--right.file-tree--root-collapsed .file-tree-panel {
-  border-left: 1px solid var(--vscode-widget-border, var(--vscode-panel-border, rgba(128, 128, 128, 0.35)));
-}
-
-.webview-layout.file-tree--left.file-tree--root-collapsed .file-tree-header,
-.webview-layout.file-tree--right.file-tree--root-collapsed .file-tree-header {
-  /* Fill the panel vertically; the header is now the entire visible chrome. */
-  flex: 1 1 auto;
-  flex-direction: column;
-  padding: 4px 0;
-  align-items: stretch;
-  justify-content: flex-start;
-  /* Header normally has a fixed 24px main-axis size for the horizontal
-   * layout; release it so the vertical strip can stretch to full height. */
-  height: auto;
-}
-
-.webview-layout.file-tree--left.file-tree--root-collapsed .file-tree-header__actions,
-.webview-layout.file-tree--right.file-tree--root-collapsed .file-tree-header__actions {
-  display: none;
-}
-
-/* Root row turns into the vertical clickable strip. `writing-mode:
- * vertical-rl` lays children top-to-bottom and tilts text 90° clockwise so
- * the folder name reads naturally from top down. The chevron `›` glyph
- * tilts the same way, which reads as "click to push panel out toward the
- * terminal" on both sides — acceptable affordance for v1. */
-.webview-layout.file-tree--left.file-tree--root-collapsed .file-tree-header__root,
-.webview-layout.file-tree--right.file-tree--root-collapsed .file-tree-header__root {
-  flex: 1 1 auto;
-  height: auto;
-  width: 100%;
-  writing-mode: vertical-rl;
-  text-orientation: mixed;
-  padding: 8px 0;
-  justify-content: flex-start;
-}
-
-/* Truncating the name uses overflow + ellipsis; on the vertical axis this
- * clips the bottom of the label (consistent with how vertical text wraps
- * elsewhere — VS Code activity bar does the same). */
-.webview-layout.file-tree--left.file-tree--root-collapsed .file-tree-header__root .name,
-.webview-layout.file-tree--right.file-tree--root-collapsed .file-tree-header__root .name {
-  max-height: 100%;
-}
-
-/* Chevron orientation in collapsed-vertical mode. `writing-mode: vertical-rl`
- * on the parent rotates Latin glyphs 90° clockwise (text-orientation: mixed
- * default), so the `›` ends up pointing DOWN — uninformative. Force it
- * upright, then flip it to point toward the terminal area:
- *   - left-collapsed:  terminal is on the right  → `›` (no transform).
- *   - right-collapsed: terminal is on the left   → `‹` (rotate 180°). */
-.webview-layout.file-tree--left.file-tree--root-collapsed .file-tree-header__root .chevron,
-.webview-layout.file-tree--right.file-tree--root-collapsed .file-tree-header__root .chevron {
-  text-orientation: upright;
-}
-.webview-layout.file-tree--right.file-tree--root-collapsed .file-tree-header__root .chevron {
-  transform: rotate(180deg);
 }
 
 /* ============================================================

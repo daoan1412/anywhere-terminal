@@ -20,6 +20,7 @@ import type {
   GitStatusChangedMessage,
   HoverPreviewSettingsMessage,
   InsertPathEffectMessage,
+  OpenVaultMessage,
   OutputMessage,
   ReadDirectoryResponseMessage,
   RequestScrollbackDumpMessage,
@@ -35,6 +36,7 @@ import type {
   TabRemovedMessage,
   TabRenamedMessage,
   ThemeChangedMessage,
+  VaultSessionsResponseMessage,
   WorkspaceRootChangedMessage,
 } from "../../types/messages";
 
@@ -85,6 +87,10 @@ export interface MessageHandlers {
   // ── Export terminal session (export-terminal-session) ──
   onRequestScrollbackDump(msg: RequestScrollbackDumpMessage): void;
   onFlashPane(msg: FlashPaneMessage): void;
+  // ── AI coding vault (add-ai-coding-vault) ──
+  // Optional: a webview without a mounted vault panel safely ignores these.
+  onVaultSessionsResponse?(msg: VaultSessionsResponseMessage): void;
+  onOpenVault?(msg: OpenVaultMessage): void;
 }
 
 // ─── Factory ────────────────────────────────────────────────────────
@@ -194,6 +200,12 @@ export function createMessageRouter(handlers: MessageHandlers): (msg: ExtensionT
         break;
       case "flashPane":
         handlers.onFlashPane(msg);
+        break;
+      case "vaultSessionsResponse":
+        handlers.onVaultSessionsResponse?.(msg);
+        break;
+      case "openVault":
+        handlers.onOpenVault?.(msg);
         break;
       case "init":
         // init is handled directly by main.ts — not routed

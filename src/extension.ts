@@ -22,6 +22,8 @@ import {
 } from "./settings/SettingsReader";
 import { PtyLoadError } from "./types/errors";
 import { escapePathForShell } from "./utils/shellEscape";
+import { VaultLauncher } from "./vault/VaultLauncher";
+import { VaultService } from "./vault/VaultService";
 
 export function activate(context: vscode.ExtensionContext) {
   // Validate node-pty availability early — show user-facing error if missing
@@ -114,6 +116,12 @@ export function activate(context: vscode.ExtensionContext) {
   const fsWatcherPool = createWatcherPool();
   context.subscriptions.push(fsWatcherPool);
 
+  // AI coding vault — reads the user's existing CLI-agent session stores and
+  // resumes/forks them. Stateless; re-reads on each list() (D2). Shared across
+  // the sidebar + panel providers. See: add-ai-coding-vault design.md.
+  const vaultService = new VaultService();
+  const vaultLauncher = new VaultLauncher(vaultService);
+
   // Sidebar view
   const sidebarProvider = new TerminalViewProvider(
     context.extensionUri,
@@ -121,6 +129,8 @@ export function activate(context: vscode.ExtensionContext) {
     "sidebar",
     gitDecorationProvider,
     fsWatcherPool,
+    vaultService,
+    vaultLauncher,
   );
 
   context.subscriptions.push(
@@ -136,6 +146,8 @@ export function activate(context: vscode.ExtensionContext) {
     "panel",
     gitDecorationProvider,
     fsWatcherPool,
+    vaultService,
+    vaultLauncher,
   );
 
   context.subscriptions.push(
@@ -245,6 +257,14 @@ export function activate(context: vscode.ExtensionContext) {
   });
 
   // ─── Action Helpers ──────────────────────────────────────────
+
+  const doOpenVault = (provider: TerminalViewProvider): void => {
+    const view = provider.view;
+    if (!view) {
+      return;
+    }
+    void view.webview.postMessage({ type: "openVault" });
+  };
 
   const doNewTerminal = (provider: TerminalViewProvider): void => {
     const view = provider.view;
@@ -370,6 +390,13 @@ export function activate(context: vscode.ExtensionContext) {
         position: choice.toLowerCase() as "top" | "bottom" | "left" | "right",
       });
     }),
+    // Open AI Vault — focus the sidebar terminal view, then expand the vault
+    // section stacked above the file tree (the webview re-reads the agents'
+    // session stores). See: add-ai-coding-vault D11.
+    vscode.commands.registerCommand("anywhereTerminal.openVault", async () => {
+      await vscode.commands.executeCommand("anywhereTerminal.sidebar.focus");
+      doOpenVault(sidebarProvider);
+    }),
   );
 
   // ─── View-Specific Commands (for view/title menus — directly target correct provider) ──
@@ -386,6 +413,7 @@ export function activate(context: vscode.ExtensionContext) {
       // visually confirms which pane will be exported (the title bar applies
       // to whichever pane is currently active in THIS view).
       vscode.commands.registerCommand(`anywhereTerminal.exportPick.${loc}`, () => runExportPick(provider)),
+      vscode.commands.registerCommand(`anywhereTerminal.openVault.${loc}`, () => doOpenVault(provider)),
     );
   }
 

@@ -334,6 +334,22 @@
         "command": "anywhereTerminal.exportPick.panel",
         "title": "Export…",
         "icon": "$(save-as)"
+      },
+      {
+        "command": "anywhereTerminal.openVault",
+        "category": "AnyWhere Terminal",
+        "title": "Open AI Vault",
+        "icon": "$(archive)"
+      },
+      {
+        "command": "anywhereTerminal.openVault.sidebar",
+        "title": "Open AI Vault",
+        "icon": "$(archive)"
+      },
+      {
+        "command": "anywhereTerminal.openVault.panel",
+        "title": "Open AI Vault",
+        "icon": "$(archive)"
       }
     ],
     "menus": {
@@ -377,6 +393,16 @@
           "command": "anywhereTerminal.exportPick.panel",
           "when": "view == anywhereTerminal.panel",
           "group": "export@1"
+        },
+        {
+          "command": "anywhereTerminal.openVault.sidebar",
+          "when": "view == anywhereTerminal.sidebar",
+          "group": "navigation"
+        },
+        {
+          "command": "anywhereTerminal.openVault.panel",
+          "when": "view == anywhereTerminal.panel",
+          "group": "navigation"
         }
       ],
       "webview/context": [
@@ -504,6 +530,14 @@
         },
         {
           "command": "anywhereTerminal.exportPick.panel",
+          "when": "false"
+        },
+        {
+          "command": "anywhereTerminal.openVault.sidebar",
+          "when": "false"
+        },
+        {
+          "command": "anywhereTerminal.openVault.panel",
           "when": "false"
         }
       ]

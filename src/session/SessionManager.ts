@@ -351,6 +351,12 @@ export class SessionManager {
       shell?: string;
       shellArgs?: string[];
       cwd?: string;
+      /**
+       * Per-session env overrides merged OVER the base (and shell-integration)
+       * environment just before spawn. Used by the vault to carry a resumed
+       * Claude's `CLAUDE_CONFIG_DIR` when it differs from the host. See D5.
+       */
+      env?: Record<string, string>;
       restoreFrom?: PendingSnapshot;
       /**
        * For split-pane children, the sessionId of the owning root tab. The
@@ -405,6 +411,10 @@ export class SessionManager {
         spawnArgs = injection.args;
         spawnEnv = injection.env;
         pty.setShellIntegrationNonce(injection.nonce);
+      }
+      // Per-session overrides win over base + shell-integration env (D5).
+      if (options?.env) {
+        spawnEnv = { ...spawnEnv, ...options.env };
       }
       pty.spawn(nodePty, resolvedShell, [...spawnArgs], { cwd, env: spawnEnv });
       // Wire the unified shell-integration sink — receives every parsed event

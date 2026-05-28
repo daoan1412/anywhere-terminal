@@ -1,0 +1,4 @@
+{"type":"summary","summary":"Implement the vault feature"}
+{"type":"user","cwd":"/Users/me/proj","gitBranch":"main","permissionMode":"acceptEdits","sessionId":"sess-valid","timestamp":"2026-05-01T00:00:00Z","message":{"role":"user","content":"Please help me build a really long prompt that exceeds one hundred and twenty characters so that we can verify the title preview is truncated correctly and newlines\nare stripped out of the stored value."}}
+{"type":"assistant","cwd":"/Users/me/proj","gitBranch":"main","message":{"role":"assistant","model":"claude-opus-4-7","content":[{"type":"text","text":"Sure, happy to help."}]}}
+{"type":"user","message":{"role":"user","content":[{"type":"tool_result","content":"ignored"}]}}

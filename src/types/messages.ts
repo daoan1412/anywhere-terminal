@@ -2,6 +2,8 @@
 // Used by both Extension Host and WebView code.
 // See: docs/design/message-protocol.md
 
+import type { VaultListResult } from "../vault/types";
+
 // ─── Shared Types ───────────────────────────────────────────────────
 
 /** Terminal configuration (maps to anywhereTerminal.* settings). */
@@ -324,6 +326,28 @@ export interface RequestFilePreviewMessage {
   override?: boolean;
 }
 
+// ─── Vault RPC Types ─────────────────────────────────────────────────
+// See: asimov/changes/add-ai-coding-vault/design.md § Interfaces, D5.
+
+/** Webview → Extension: request the aggregated AI-agent session list. */
+export interface RequestVaultSessionsMessage {
+  type: "requestVaultSessions";
+}
+
+/** Webview → Extension: resume the given vault session in a new terminal. */
+export interface VaultResumeMessage {
+  type: "vaultResume";
+  /** `<agent>:<sessionId>` id from a `VaultSessionEntry`. */
+  entryId: string;
+}
+
+/** Webview → Extension: fork the given vault session in a new terminal. */
+export interface VaultForkMessage {
+  type: "vaultFork";
+  /** `<agent>:<sessionId>` id from a `VaultSessionEntry`. */
+  entryId: string;
+}
+
 /**
  * All messages that can be sent from the WebView to the Extension Host.
  * Use msg.type as the discriminant in switch/case for exhaustive handling.
@@ -352,7 +376,10 @@ export type WebViewToExtensionMessage =
   | RequestUnsubscribeFsChangesMessage
   | UpdateHoverPreviewSettingMessage
   | PersistPanelIdMessage
-  | ScrollbackDumpMessage;
+  | ScrollbackDumpMessage
+  | RequestVaultSessionsMessage
+  | VaultResumeMessage
+  | VaultForkMessage;
 
 /**
  * Webview → Extension. Sent by the editor webview after it has merged the
@@ -789,6 +816,21 @@ export interface RevealInFileTreeMessage {
   source?: "osc7" | "autoReveal" | "openFolder";
 }
 
+/** Extension → Webview: the aggregated, recency-sorted vault session list. */
+export interface VaultSessionsResponseMessage {
+  type: "vaultSessionsResponse";
+  result: VaultListResult;
+}
+
+/**
+ * Extension → Webview: open/focus the vault panel. The `openVault` command
+ * posts this; the webview expands the vault section (stacked above the file
+ * tree) and re-requests the session list.
+ */
+export interface OpenVaultMessage {
+  type: "openVault";
+}
+
 /**
  * All messages that can be sent from the Extension Host to the WebView.
  * Use msg.type as the discriminant in switch/case for exhaustive handling.
@@ -825,7 +867,9 @@ export type ExtensionToWebViewMessage =
   | SetPanelIdMessage
   | RestoreFromSnapshotMessage
   | RequestScrollbackDumpMessage
-  | FlashPaneMessage;
+  | FlashPaneMessage
+  | VaultSessionsResponseMessage
+  | OpenVaultMessage;
 
 /**
  * Extension → Webview. Visual feedback for title-bar "export" click — briefly

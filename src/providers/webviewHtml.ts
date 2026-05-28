@@ -14,9 +14,12 @@ import vendoredScrollbarsCss from "vs/base/browser/ui/scrollbar/media/scrollbars
 import * as vscode from "vscode";
 // Project-specific file-tree panel styles (rows + 4-side layout + theme variables).
 import fileTreePanelCss from "../webview/fileTree/fileTreePanel.css";
+// AI-vault panel styles (flat list + badges + hidden state). See add-ai-coding-vault D10/D11.
+import vaultPanelCss from "../webview/vault/vaultPanel.css";
 
 const VENDORED_LIST_CSS = [vendoredAriaCss, vendoredDndCss, vendoredListCss, vendoredScrollbarsCss].join("\n\n");
 const FILE_TREE_CSS = fileTreePanelCss;
+const VAULT_CSS = vaultPanelCss;
 
 /**
  * Generate secure HTML for a terminal webview with CSP and nonce.
@@ -60,6 +63,10 @@ export function getTerminalHtml(
     /* === File-tree panel styles === */
     ${FILE_TREE_CSS}
     /* === End file-tree panel styles === */
+
+    /* === AI-vault panel styles === */
+    ${VAULT_CSS}
+    /* === End AI-vault panel styles === */
 
     html, body {
       height: 100%;
@@ -553,16 +560,22 @@ export function getTerminalHtml(
 </head>
 <body data-terminal-location="${location}">
   <div id="tab-bar"></div>
-  <!-- Webview layout wrapper. File-tree panel + terminal area are siblings;
-       CSS in fileTreePanel.css drives flex direction and child order via the
-       file-tree--{top|bottom|left|right} classes set at runtime by
-       FileTreePanel.setPosition(). The panel is always shown; users minimize
-       by collapsing the root row (.file-tree--root-collapsed). -->
+  <!-- Webview layout wrapper. The terminal area and the #aux-region are
+       siblings; CSS in fileTreePanel.css drives flex direction and child order
+       via the file-tree--{top|bottom|left|right} classes set at runtime by
+       FileTreePanel.setPosition(). The region is always shown; users minimize
+       each section by collapsing it (.file-tree--root-collapsed / .vault-collapsed). -->
   <div id="webview-layout" class="webview-layout file-tree--bottom">
     <div class="terminal-area">
       <div id="terminal-container"></div>
     </div>
-    <div id="file-tree" class="file-tree-panel"></div>
+    <!-- Sidebar region — the sized edge slot. Holds the vault section stacked
+         directly above the file tree; both collapse independently to a header
+         strip. The resize sash mounts here (resizes the whole region). -->
+    <div id="aux-region" class="aux-region">
+      <div id="vault-panel" class="vault-panel vault-collapsed"></div>
+      <div id="file-tree" class="file-tree-panel"></div>
+    </div>
   </div>
   <div id="drag-drop-tip"></div>
   <script nonce="${nonce}" src="${scriptUri}"></script>

@@ -52,6 +52,10 @@ export interface FileTreeControllerDeps {
   onLayoutChange: () => void;
   /** Look up a terminal instance's webview-side cwd (OSC 7 capture). Optional. */
   getInstanceCwd: (sessionId: string) => string | null | undefined;
+  /** The `#aux-region` wrapper — the file tree's resize sash mounts here. Optional. */
+  regionEl?: HTMLElement;
+  /** Toggle the vault section's collapsed state (file-tree header button). Optional. */
+  onToggleVault?: () => void;
 }
 
 type TerminalLocationKey = "sidebar" | "panel" | "editor";
@@ -113,6 +117,8 @@ export class FileTreeController {
       getActiveSessionId: deps.getActiveSessionId,
       postMessage: (m) => deps.postMessage(m),
       layoutWrapper: deps.layoutWrapper,
+      regionEl: deps.regionEl,
+      onToggleVault: deps.onToggleVault,
       onLayoutChange: deps.onLayoutChange,
       getPersistedState: () => getLocationState(),
       persistState: (state) => {

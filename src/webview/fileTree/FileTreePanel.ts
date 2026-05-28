@@ -104,6 +104,14 @@ export interface FileTreePanelDeps {
    * (`setPosition`, expand, collapse). Optional in tests.
    */
   persistState?: (state: FileTreeState) => void;
+  /**
+   * The `#aux-region` wrapper that stacks the vault section above the file
+   * tree. The resize sash mounts here so it resizes the whole region (vault +
+   * tree) against the terminal. Optional — falls back to `host` in tests.
+   */
+  regionEl?: HTMLElement;
+  /** Toggle the vault section's collapsed state (file-tree header button). */
+  onToggleVault?: () => void;
 }
 
 const EMPTY_STATE_CLASS = "file-tree-empty";
@@ -819,6 +827,15 @@ export class FileTreePanel {
     const actions = doc.createElement("div");
     actions.className = "file-tree-header__actions";
 
+    // Vault toggle — collapses/expands the AI Vault section stacked above the
+    // file tree (recent agent sessions). History/clock glyph.
+    const vaultBtn = makeHeaderButton(doc, {
+      label: "AI Vault",
+      title: "Toggle AI Vault (recent agent sessions)",
+      svg: `<svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M8 4.5v3.7l2.4 1.4"/><path d="M2.6 8a5.4 5.4 0 1 1 1.6 3.8"/><path d="M2.4 12v-2.3h2.3"/></svg>`,
+      onClick: () => this.deps.onToggleVault?.(),
+    });
+
     // Inline SVGs: the search and move (layout) glyphs are codicon-derived
     // outlines; the open-folder glyph is a custom simple outline. Inlined
     // (not <link>'d) so they ship under CSP without an extra font request.
@@ -850,6 +867,7 @@ export class FileTreePanel {
     // dynamic getter so the tooltip re-reads on every show instead of being
     // frozen at attach-time.
     this.tooltipDisposers.push(
+      attachTooltip(vaultBtn),
       attachTooltip(searchBtn, {
         getText: () => (this.searchActive ? "Close search" : "Search files in tree"),
       }),
@@ -857,8 +875,9 @@ export class FileTreePanel {
       attachTooltip(moveBtn),
     );
 
-    // Order: search → open-folder → move. Move sits at the far right so the
-    // panel-positioning affordance is the outermost action.
+    // Order: vault → search → open-folder → move. Vault sits first (it controls
+    // the section above); move sits at the far right as the outermost action.
+    actions.appendChild(vaultBtn);
     actions.appendChild(searchBtn);
     actions.appendChild(openFolderBtn);
     actions.appendChild(moveBtn);
@@ -1557,7 +1576,9 @@ export class FileTreePanel {
     }
     if (!this.sash) {
       this.sash = new FileTreeSash({
-        host: this.deps.host,
+        // Mount on the region wrapper (vault + tree) so the sash resizes the
+        // whole sidebar; falls back to the panel host in tests.
+        host: this.deps.regionEl ?? this.deps.host,
         getPosition: () => this.currentPosition,
         getStartSize: () => this.currentSize,
         applySize: (next) => this.applySize(next),

@@ -780,4 +780,49 @@ describe("FileTreePanel — root-collapsed (header-only) mode", () => {
     panel.dispose();
     expect(document.querySelector(".file-tree-position-menu")).toBeNull();
   });
+
+  it("header vault button fires onToggleVault", () => {
+    const host = createHost();
+    let toggles = 0;
+    const panel = new FileTreePanel({
+      host,
+      workspaceRoot: null,
+      rootGeneration: 0,
+      getActiveSessionId: () => null,
+      postMessage: () => {},
+      onToggleVault: () => {
+        toggles++;
+      },
+    });
+
+    const vaultBtn = host.querySelector<HTMLButtonElement>('.file-tree-header__btn[aria-label="AI Vault"]');
+    expect(vaultBtn).not.toBeNull();
+    vaultBtn?.click();
+    vaultBtn?.click();
+    expect(toggles).toBe(2);
+
+    panel.dispose();
+  });
+
+  it("mounts the resize sash on regionEl when provided", () => {
+    const host = createHost();
+    const regionEl = document.createElement("div");
+    document.body.appendChild(regionEl);
+    regionEl.appendChild(host);
+
+    const panel = new FileTreePanel({
+      host,
+      workspaceRoot: "/workspace",
+      rootGeneration: 1,
+      getActiveSessionId: () => null,
+      postMessage: () => {},
+      regionEl,
+    });
+
+    // The sash is a direct child of the region wrapper, not the panel host.
+    expect(regionEl.querySelector(":scope > .sash")).not.toBeNull();
+    expect(host.querySelector(".sash")).toBeNull();
+
+    panel.dispose();
+  });
 });

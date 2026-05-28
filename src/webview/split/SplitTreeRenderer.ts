@@ -23,6 +23,8 @@ export interface SplitTreeRendererDeps {
   flowControl: FlowControl;
   postMessage: (msg: unknown) => void;
   onTabBarUpdate: () => void;
+  /** Fired when the user selects a different pane (click-to-focus). Optional. */
+  onActivePaneChange?: () => void;
 }
 
 /**
@@ -41,6 +43,7 @@ export class SplitTreeRenderer {
   private readonly flowControl: FlowControl;
   private readonly postMessage: (msg: unknown) => void;
   private readonly onTabBarUpdate: () => void;
+  private readonly onActivePaneChange?: () => void;
 
   constructor(deps: SplitTreeRendererDeps) {
     this.store = deps.store;
@@ -48,6 +51,7 @@ export class SplitTreeRenderer {
     this.flowControl = deps.flowControl;
     this.postMessage = deps.postMessage;
     this.onTabBarUpdate = deps.onTabBarUpdate;
+    this.onActivePaneChange = deps.onActivePaneChange;
   }
 
   /**
@@ -120,6 +124,10 @@ export class SplitTreeRenderer {
 
           // Update tab bar to reflect active pane name
           this.onTabBarUpdate();
+          // Notify listeners (e.g. the vault refreshes when a different pane
+          // is selected) — only fires on a real active-pane change (the
+          // early-return above guards against re-selecting the same pane).
+          this.onActivePaneChange?.();
         });
       },
     });

@@ -296,6 +296,40 @@ describe("SessionManager: createSession", () => {
 
     sm.dispose();
   });
+
+  it("merges options.env OVER the base environment before spawn", () => {
+    const sm = new SessionManager();
+    const webview = createMockWebview();
+
+    // buildEnvironment() mock returns { PATH: "/usr/bin" }.
+    sm.createSession("anywhereTerminal.sidebar", webview, {
+      env: { CLAUDE_CONFIG_DIR: "/x/config", PATH: "/override/bin" },
+    });
+
+    expect(mockPtySessions[0].spawn).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.anything(),
+      expect.anything(),
+      expect.objectContaining({
+        env: expect.objectContaining({ CLAUDE_CONFIG_DIR: "/x/config", PATH: "/override/bin" }),
+      }),
+    );
+
+    sm.dispose();
+  });
+
+  it("leaves the base environment untouched when no env override is passed", () => {
+    const sm = new SessionManager();
+    const webview = createMockWebview();
+
+    sm.createSession("anywhereTerminal.sidebar", webview);
+
+    const spawnEnv = mockPtySessions[0].spawn.mock.calls[0][3].env as Record<string, string>;
+    expect(spawnEnv).toEqual({ PATH: "/usr/bin" });
+    expect(spawnEnv).not.toHaveProperty("CLAUDE_CONFIG_DIR");
+
+    sm.dispose();
+  });
 });
 
 // ─── getInitialCwd ──────────────────────────────────────────────────

@@ -72,4 +72,18 @@ export interface WebviewState {
    * See: asimov/changes/restore-terminal-sessions/design.md D2.
    */
   panelId?: string;
+  /**
+   * Whether the AI Vault section (stacked directly above the file tree inside
+   * `#aux-region`) is collapsed to its header strip. Persisted so a reload
+   * restores the user's choice. Absent → collapsed (default).
+   *
+   * See: asimov/changes/add-ai-coding-vault/design.md D11.
+   */
+  vaultCollapsed?: boolean;
+  /**
+   * Vault "This folder only" filter — when true, the vault shows only sessions
+   * whose cwd is within the active terminal pane's working directory. Persisted
+   * so the scope choice survives reloads. Absent → off (show all).
+   */
+  vaultFolderOnly?: boolean;
 }

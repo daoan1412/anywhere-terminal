@@ -36,6 +36,7 @@ import { formatRestoreDivider } from "./terminal/restoreDivider";
 import { TerminalFactory } from "./terminal/TerminalFactory";
 import { ThemeManager } from "./theme/ThemeManager";
 import { showBanner } from "./ui/BannerService";
+import { VaultPanel } from "./vault/VaultPanel";
 
 // Inject the vendored Seti icon-font @font-face rule (with the woff embedded
 // as a data URL) into the document. Lives in the webview bundle because
@@ -123,13 +124,44 @@ const splitRenderer = new SplitTreeRenderer({
   flowControl,
   postMessage: (msg) => vscode.postMessage(msg),
   onTabBarUpdate: () => updateTabBar(),
+  // Selecting a different terminal pane points the vault's "This folder only"
+  // filter at the newly-focused terminal and re-reads the list.
+  onActivePaneChange: () => syncVaultToActivePane(),
 });
+
+/** Resolve the active terminal pane's tracked cwd (OSC 7), or null. */
+function getActivePaneCwd(): string | null {
+  const tabId = store.activeTabId;
+  if (!tabId) {
+    return null;
+  }
+  const paneId = store.tabActivePaneIds.get(tabId) ?? tabId;
+  return store.terminals.get(paneId)?.cwd ?? null;
+}
+
+/** Re-read the vault session list, but only while the section is expanded. */
+function refreshVaultIfOpen(): void {
+  if (vaultPanel && !vaultPanel.isCollapsed()) {
+    vaultPanel.requestRefresh();
+  }
+}
+
+/** Point the vault's folder filter at the active pane, then refresh if open. */
+function syncVaultToActivePane(): void {
+  vaultPanel?.setContextCwd(getActivePaneCwd());
+  refreshVaultIfOpen();
+}
 
 // File-tree controller — instantiated lazily on init once we know workspaceRoot +
 // rootGeneration from the host. Owns the FileTreePanel + all router handlers
 // for the file-tree subsystem. See: webview/fileTree/FileTreeController.ts
 // and port-vscode-async-data-tree spec.
 let fileTreeController: FileTreeController | null = null;
+
+// AI-vault panel — mounted on init into `#vault-panel`, a collapsible section
+// stacked directly above the file tree inside `#aux-region`. Fed by
+// `vaultSessionsResponse`. See: webview/vault/VaultPanel.ts.
+let vaultPanel: VaultPanel | null = null;
 
 // ─── Orchestration ──────────────────────────────────────────────────
 
@@ -214,6 +246,7 @@ function switchTab(newTabId: string): void {
 
   splitRenderer.updateActivePaneVisual(newTabId);
   updateTabBar();
+  syncVaultToActivePane();
   vscode.postMessage({ type: "switchTab", tabId: newTabId });
 }
 
@@ -318,6 +351,11 @@ const routeMessage = createMessageRouter({
   },
   onViewShow() {
     resizeCoordinator.onViewShow();
+    // The view becoming visible is a "becomes visible" event (design D11): an
+    // already-expanded vault re-reads the agents' stores so it isn't stale.
+    // Guarded — no fetch when collapsed. The active pane is unchanged on
+    // reshow, so a plain re-read (not a re-scope) suffices.
+    refreshVaultIfOpen();
   },
   onSplitPane(msg) {
     if (!store.activeTabId) {
@@ -442,6 +480,20 @@ const routeMessage = createMessageRouter({
   },
   onRequestScrollbackDump(msg) {
     handleScrollbackDump(msg);
+  },
+  onVaultSessionsResponse(msg) {
+    vaultPanel?.render(msg.result);
+  },
+  onOpenVault() {
+    // Open the vault section (it sits above the file tree, both visible) and
+    // re-read the agents' session stores — source files are the source of
+    // truth (D2). `expand()` triggers the refresh on the collapsed→expanded
+    // transition; when already open it's a no-op, so refresh explicitly.
+    if (vaultPanel && !vaultPanel.isCollapsed()) {
+      vaultPanel.requestRefresh();
+    } else {
+      vaultPanel?.expand();
+    }
   },
   onFlashPane(msg) {
     // Visual confirmation for title-bar export click. Adds `.export-flash`
@@ -603,10 +655,15 @@ function handleInit(msg: InitMessage): void {
   // controller. See: webview/fileTree/FileTreeController.ts.
   const fileTreeHost = document.getElementById("file-tree");
   const layoutWrapper = document.getElementById("webview-layout");
+  const auxRegion = document.getElementById("aux-region");
   if (fileTreeHost && layoutWrapper) {
     fileTreeController = FileTreeController.mount({
       fileTreeHost,
       layoutWrapper,
+      // Vault + file tree share `#aux-region`; the resize sash mounts on it and
+      // the header's vault button toggles the section stacked above.
+      regionEl: auxRegion ?? undefined,
+      onToggleVault: () => vaultPanel?.toggleCollapsed(),
       init: { workspaceRoot: msg.workspaceRoot, rootGeneration: msg.rootGeneration },
       store,
       postMessage: (m) => vscode.postMessage(m),
@@ -620,6 +677,34 @@ function handleInit(msg: InitMessage): void {
       onLayoutChange: () => resizeCoordinator.debouncedFit(),
       getInstanceCwd: (sessionId) => store.terminals.get(sessionId)?.cwd ?? null,
     });
+  }
+
+  // AI-vault panel — a collapsible section stacked directly above the file tree
+  // (no exclusivity; both visible). Default collapsed; the collapsed state
+  // persists across reloads. See: add-ai-coding-vault/design.md D11.
+  const vaultHost = document.getElementById("vault-panel");
+  if (vaultHost) {
+    vaultPanel = new VaultPanel({
+      host: vaultHost,
+      postMessage: (m) => vscode.postMessage(m),
+      getActiveSessionId: () => {
+        const tabId = store.activeTabId;
+        if (!tabId) {
+          return null;
+        }
+        return store.tabActivePaneIds.get(tabId) ?? tabId;
+      },
+      // Absent persisted value → collapsed (default).
+      getInitialCollapsed: () => store.getState().vaultCollapsed !== false,
+      persistCollapsed: (collapsed) => store.updateState({ vaultCollapsed: collapsed }),
+      // "This folder only" scope — default off (show all).
+      getInitialFolderOnly: () => store.getState().vaultFolderOnly === true,
+      persistFolderOnly: (folderOnly) => store.updateState({ vaultFolderOnly: folderOnly }),
+    });
+    // Seed the folder-filter context to the current active pane; it updates on
+    // every pane select / tab switch. A vault that restored expanded refreshes
+    // itself via the constructor seed (setCollapsed's collapsed→expanded path).
+    vaultPanel.setContextCwd(getActivePaneCwd());
   }
 
   store.persist();
@@ -800,6 +885,14 @@ function bootstrap(): void {
       store.tabActivePaneIds.set(tabId, leafSessionId);
       splitRenderer.updateActivePaneVisual(tabId);
       store.persist();
+      // This focusin can win the race against the leaf `mousedown` handler
+      // (xterm focuses its textarea inside its own mousedown, firing focusin
+      // before the leaf listener bubbles). When it does, it advances the active
+      // pane here, so the leaf handler's same-pane early-return then suppresses
+      // its `onActivePaneChange` → the vault would never re-scope/refresh on a
+      // plain pane click. Sync here too; whichever handler wins runs exactly one
+      // sync (the loser's guard makes it a no-op). See .reviews/round-2.md [B1].
+      syncVaultToActivePane();
     }
     const activeSessionId = leafSessionId ?? store.tabActivePaneIds.get(tabId) ?? tabId;
     vscode.postMessage({ type: "focus", activeSessionId });

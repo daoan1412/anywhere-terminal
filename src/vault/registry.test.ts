@@ -1,0 +1,71 @@
+// src/vault/registry.test.ts — Unit tests for the agent registry.
+
+import { describe, expect, it } from "vitest";
+import { AGENT_DEFINITIONS, AGENT_REGISTRY, CLAUDE_AUTH_ENV_ALLOWLIST, getAgentDefinition } from "./registry";
+import type { CommandTemplate } from "./types";
+
+function staticTokens(t: CommandTemplate): string[] {
+  return t.args.filter((a): a is string => typeof a === "string");
+}
+
+describe("AGENT_REGISTRY", () => {
+  it("ships records for claude, codex, opencode", () => {
+    expect(Object.keys(AGENT_REGISTRY).sort()).toEqual(["claude", "codex", "opencode"]);
+    expect(AGENT_DEFINITIONS.map((d) => d.id)).toEqual(["claude", "codex", "opencode"]);
+  });
+
+  it("every record's resume template carries the {{sessionId}} token", () => {
+    for (const def of AGENT_DEFINITIONS) {
+      expect(staticTokens(def.resumeCommand)).toContain("{{sessionId}}");
+    }
+  });
+
+  it("claude carries the exact 8-var auth allowlist", () => {
+    const claude = getAgentDefinition("claude");
+    expect(claude?.authEnvAllowlist).toEqual([
+      "ANTHROPIC_API_KEY",
+      "ANTHROPIC_AUTH_TOKEN",
+      "ANTHROPIC_BASE_URL",
+      "ANTHROPIC_MODEL",
+      "ANTHROPIC_SMALL_FAST_MODEL",
+      "CLAUDE_CODE_USE_BEDROCK",
+      "CLAUDE_CODE_USE_VERTEX",
+      "CLAUDE_CONFIG_DIR",
+    ]);
+    expect(CLAUDE_AUTH_ENV_ALLOWLIST).toHaveLength(8);
+  });
+
+  it("claude resume injects model + permission-mode flags; fork uses --fork-session", () => {
+    const claude = getAgentDefinition("claude");
+    expect(claude?.resumeCommand.args).toContainEqual({ flag: "--model", from: "model" });
+    expect(claude?.resumeCommand.args).toContainEqual({ flag: "--permission-mode", from: "permissionMode" });
+    expect(staticTokens(claude?.forkCommand as CommandTemplate)).toContain("--fork-session");
+  });
+
+  it("codex resume preserves flag order m,a,s and templates reasoning effort", () => {
+    const codex = getAgentDefinition("codex");
+    const flags = codex?.resumeCommand.args.filter((a) => typeof a !== "string");
+    expect(flags).toEqual([
+      { flag: "-m", from: "model" },
+      { flag: "-a", from: "approval" },
+      { flag: "-s", from: "sandbox" },
+      { flag: "-c", from: "reasoningEffort", valueTemplate: "model_reasoning_effort={{value}}" },
+    ]);
+    expect(staticTokens(codex?.resumeCommand as CommandTemplate)).toEqual(["resume", "{{sessionId}}"]);
+  });
+
+  it("opencode carries forkMinVersion 1.14.50 and a --fork command", () => {
+    const opencode = getAgentDefinition("opencode");
+    expect(opencode?.forkMinVersion).toBe("1.14.50");
+    expect(staticTokens(opencode?.forkCommand as CommandTemplate)).toContain("--fork");
+    expect(opencode?.resumeCommand.args).toContainEqual({ flag: "--agent", from: "agent" });
+  });
+
+  it("codex has no forkMinVersion (fork supported whenever a command exists)", () => {
+    expect(getAgentDefinition("codex")?.forkMinVersion).toBeUndefined();
+  });
+
+  it("getAgentDefinition returns undefined for unknown agents", () => {
+    expect(getAgentDefinition("nope")).toBeUndefined();
+  });
+});

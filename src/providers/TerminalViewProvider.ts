@@ -2,6 +2,9 @@ import * as vscode from "vscode";
 import type { SessionManager } from "../session/SessionManager";
 import { readTerminalConfig, readTerminalSettings } from "../settings/SettingsReader";
 import type { ThemeChangedMessage, WebViewToExtensionMessage } from "../types/messages";
+import type { LaunchMode } from "../vault/LaunchBuilder";
+import type { VaultLauncher } from "../vault/VaultLauncher";
+import type { VaultService } from "../vault/VaultService";
 import { FileTreeHost } from "./fileTreeHost";
 import type { WatcherPool } from "./fsWatcherPool";
 import type { GitDecorationProvider } from "./gitDecorationProvider";
@@ -106,6 +109,9 @@ export class TerminalViewProvider implements vscode.WebviewViewProvider {
     private readonly location: "sidebar" | "panel" = "sidebar",
     gitDecorationProvider: GitDecorationProvider | null = null,
     watcherPool: WatcherPool | null = null,
+    /** AI coding vault — null in contexts where the vault is not wired (tests). */
+    private readonly vaultService: VaultService | null = null,
+    private readonly vaultLauncher: VaultLauncher | null = null,
   ) {
     this.fileTreeHost = new FileTreeHost(gitDecorationProvider, watcherPool);
   }
@@ -308,6 +314,66 @@ export class TerminalViewProvider implements vscode.WebviewViewProvider {
   }
 
   /**
+   * Re-read the AI agents' on-disk session stores and post the aggregated list.
+   * Source files are the source of truth, so the host caches nothing (D2).
+   */
+  private async handleRequestVaultSessions(webview: vscode.Webview): Promise<void> {
+    if (!this.vaultService) {
+      return;
+    }
+    try {
+      const result = await this.vaultService.list();
+      void this.safeSendWithRetry(webview, { type: "vaultSessionsResponse", result });
+    } catch (err) {
+      console.error("[AnyWhere Terminal] Failed to list vault sessions:", err);
+      void this.safeSendWithRetry(webview, {
+        type: "error",
+        message: err instanceof Error ? err.message : "Failed to list AI vault sessions",
+        severity: "error",
+      });
+    }
+  }
+
+  /**
+   * Resolve a vault entry into createSession options and launch it as a new
+   * VISIBLE terminal — mirrors the `createTab` flow (createSession + post
+   * `tabCreated`) so the resumed/forked agent appears as a selectable tab. A
+   * resolve/launch failure surfaces an error notice rather than a broken
+   * terminal (D5/D6).
+   */
+  private async handleVaultLaunch(entryId: string, mode: LaunchMode, webview: vscode.Webview): Promise<void> {
+    if (!this.vaultLauncher) {
+      return;
+    }
+    const viewId = this.getViewId();
+    try {
+      const opts = await this.vaultLauncher.resolve(entryId, mode);
+      const newSessionId = this.sessionManager.createSession(viewId, webview, {
+        shell: opts.shell,
+        shellArgs: opts.shellArgs,
+        cwd: opts.cwd,
+        env: opts.env,
+      });
+      const newSession = this.sessionManager.getSession(newSessionId);
+      if (newSession) {
+        void this.safeSendWithRetry(webview, {
+          type: "tabCreated",
+          tabId: newSessionId,
+          name: newSession.name,
+          customName: newSession.customName,
+        });
+      }
+    } catch (err) {
+      console.error("[AnyWhere Terminal] Failed to launch vault session:", err);
+      void this.safeSendWithRetry(webview, {
+        type: "error",
+        message: err instanceof Error ? err.message : "Failed to launch AI session",
+        severity: "error",
+      });
+    }
+  }
+
+  /**
    * Route incoming webview messages to appropriate handlers.
    *
    * See: docs/design/webview-provider.md#§8, docs/design/message-protocol.md#§10
@@ -399,6 +465,22 @@ export class TerminalViewProvider implements vscode.WebviewViewProvider {
           }
           break;
         }
+
+        case "requestVaultSessions":
+          void this.handleRequestVaultSessions(webviewView.webview);
+          break;
+
+        case "vaultResume":
+          if (typeof message.entryId === "string") {
+            void this.handleVaultLaunch(message.entryId, "resume", webviewView.webview);
+          }
+          break;
+
+        case "vaultFork":
+          if (typeof message.entryId === "string") {
+            void this.handleVaultLaunch(message.entryId, "fork", webviewView.webview);
+          }
+          break;
 
         case "switchTab":
           if (typeof message.tabId === "string") {

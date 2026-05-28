@@ -1,0 +1,259 @@
+/* src/webview/vault/vaultPanel.css — Styles for the AI-vault panel.
+ *
+ * Inlined into the webview <style> block at HTML-generation time by
+ * src/providers/webviewHtml.ts (alongside fileTreePanel.css). Uses the VS Code
+ * theme variables so the panel adapts to dark / light / high-contrast.
+ * See: asimov/changes/add-ai-coding-vault/design.md D10, D11.
+ */
+
+/* The vault is a section inside #aux-region, stacked directly above the file
+   tree. Expanded it shares the region (`flex: 1 1 0`); collapsed it shrinks to
+   its header strip. A bottom divider separates it from the file tree below.
+   See: add-ai-coding-vault/design.md D11. */
+.vault-panel {
+  display: flex;
+  flex-direction: column;
+  flex: 1 1 0;
+  min-height: 0;
+  min-width: 0;
+  overflow: hidden;
+  background: var(--vscode-sideBar-background, var(--vscode-editor-background));
+  color: var(--vscode-foreground);
+  font-size: var(--vscode-font-size, 13px);
+  box-sizing: border-box;
+  border-bottom: 1px solid var(--vscode-widget-border, var(--vscode-panel-border, rgba(128, 128, 128, 0.35)));
+}
+
+/* Collapsed — only the header strip shows; the body (search / status / list)
+   is hidden and the section shrinks to the 24px header (mirrors the file
+   tree's root-collapsed behaviour). */
+.vault-panel.vault-collapsed {
+  flex: 0 0 24px;
+}
+
+/* Header — a clickable row that toggles collapse (chevron + title + count).
+   Mirrors the file-tree header root row. */
+.vault-header {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  height: 24px;
+  flex: 0 0 24px;
+  padding: 0 6px;
+  cursor: pointer;
+  user-select: none;
+}
+.vault-header:hover {
+  background: var(--vscode-list-hoverBackground);
+}
+.vault-header:focus-visible {
+  outline: 1px solid var(--vscode-focusBorder);
+  outline-offset: -1px;
+}
+
+/* Chevron — rotates 90° when expanded (mirrors the file-tree header chevron). */
+.vault-header__chevron {
+  width: 16px;
+  height: 16px;
+  flex-shrink: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--vscode-icon-foreground, var(--vscode-foreground));
+  opacity: 0.8;
+  font-size: 16px;
+  line-height: 1;
+  font-weight: 600;
+  transition: transform 120ms ease-out;
+}
+.vault-header[aria-expanded="true"] .vault-header__chevron {
+  transform: rotate(90deg);
+}
+
+.vault-title {
+  font-weight: 600;
+  text-transform: uppercase;
+  font-size: 11px;
+  letter-spacing: 0.04em;
+  opacity: 0.8;
+  flex: 1 1 auto;
+}
+
+/* Session-count badge next to the title — handy when collapsed. */
+.vault-header__count {
+  flex: 0 0 auto;
+  font-size: 11px;
+  opacity: 0.6;
+  margin-left: 4px;
+}
+
+.vault-search {
+  flex: 0 0 auto;
+  padding: 2px 8px 6px;
+}
+
+.vault-search-input {
+  width: 100%;
+  box-sizing: border-box;
+  padding: 3px 6px;
+  border: 1px solid var(--vscode-input-border, transparent);
+  background: var(--vscode-input-background);
+  color: var(--vscode-input-foreground);
+  border-radius: 2px;
+  font-size: inherit;
+  outline: none;
+}
+
+.vault-search-input:focus {
+  border-color: var(--vscode-focusBorder);
+}
+
+/* "This folder only" scope toggle — sits under the search input. */
+.vault-folder-toggle {
+  margin-top: 6px;
+  width: 100%;
+  box-sizing: border-box;
+  padding: 3px 6px;
+  font-size: 11px;
+  text-align: center;
+  border: 1px solid var(--vscode-input-border, var(--vscode-contrastBorder, transparent));
+  border-radius: 2px;
+  background: transparent;
+  color: var(--vscode-foreground);
+  cursor: pointer;
+}
+.vault-folder-toggle:hover {
+  background: var(--vscode-toolbar-hoverBackground, rgba(128, 128, 128, 0.15));
+}
+.vault-folder-toggle.is-active {
+  background: var(--vscode-button-secondaryBackground, var(--vscode-list-activeSelectionBackground));
+  color: var(--vscode-button-secondaryForeground, var(--vscode-list-activeSelectionForeground));
+  border-color: transparent;
+}
+.vault-folder-toggle:focus-visible {
+  outline: 1px solid var(--vscode-focusBorder);
+  outline-offset: -1px;
+}
+
+.vault-status {
+  flex: 0 0 auto;
+  padding: 0 8px;
+}
+
+.vault-notice {
+  font-size: 11px;
+  padding: 4px 6px;
+  margin-bottom: 4px;
+  border-radius: 2px;
+  color: var(--vscode-inputValidation-warningForeground, var(--vscode-foreground));
+  background: var(--vscode-inputValidation-warningBackground, transparent);
+  border: 1px solid var(--vscode-inputValidation-warningBorder, transparent);
+}
+
+.vault-empty {
+  font-size: 12px;
+  opacity: 0.7;
+  padding: 8px 6px;
+}
+
+.vault-list {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+}
+
+.vault-row {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  padding: 6px 8px;
+  border-bottom: 1px solid var(--vscode-sideBarSectionHeader-border, transparent);
+}
+
+.vault-row:hover {
+  background: var(--vscode-list-hoverBackground);
+}
+
+.vault-badge {
+  flex: 0 0 auto;
+  font-size: 10px;
+  font-weight: 600;
+  padding: 1px 6px;
+  border-radius: 8px;
+  white-space: nowrap;
+  margin-top: 1px;
+  color: var(--vscode-badge-foreground);
+  background: var(--vscode-badge-background);
+}
+
+.vault-row-main {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.vault-row-title {
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.vault-row-meta {
+  display: flex;
+  gap: 8px;
+  font-size: 11px;
+  opacity: 0.65;
+  margin-top: 2px;
+}
+
+.vault-row-cwd {
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  direction: rtl;
+  text-align: left;
+}
+
+.vault-row-time {
+  flex: 0 0 auto;
+  white-space: nowrap;
+}
+
+.vault-row-actions {
+  flex: 0 0 auto;
+  display: flex;
+  gap: 4px;
+  opacity: 0;
+}
+
+.vault-row:hover .vault-row-actions,
+.vault-row:focus-within .vault-row-actions {
+  opacity: 1;
+}
+
+.vault-action {
+  font-size: 11px;
+  padding: 2px 8px;
+  border: 1px solid var(--vscode-button-border, transparent);
+  border-radius: 2px;
+  cursor: pointer;
+  background: var(--vscode-button-secondaryBackground, var(--vscode-button-background));
+  color: var(--vscode-button-secondaryForeground, var(--vscode-button-foreground));
+}
+
+.vault-action--resume {
+  background: var(--vscode-button-background);
+  color: var(--vscode-button-foreground);
+}
+
+.vault-action:hover {
+  background: var(--vscode-button-hoverBackground);
+}
+
+/* Collapsed — hide the body (search / status / list); only the header strip
+   shows (the section is shrunk to 24px by `.vault-panel.vault-collapsed`).
+   Placed after the base body rules so specificity is ascending. */
+.vault-panel.vault-collapsed .vault-search,
+.vault-panel.vault-collapsed .vault-status,
+.vault-panel.vault-collapsed .vault-list {
+  display: none;
+}
