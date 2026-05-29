@@ -1,6 +1,7 @@
 // src/vault/readers/opencodeReader.test.ts — Unit tests for the OpenCode reader.
 
-import { describe, expect, it, vi } from "vitest";
+import * as path from "node:path";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import type { SqliteResult } from "../sqlite";
 import { readOpenCodeSessions } from "./opencodeReader";
 
@@ -77,5 +78,30 @@ describe("readOpenCodeSessions", () => {
     const { entries, unreadable } = await readOpenCodeSessions({ dataDir: "/x/oc", readSqliteFn: fn });
     expect(entries).toEqual([]);
     expect(unreadable).toBe(1);
+  });
+});
+
+describe("readOpenCodeSessions: data-dir resolution", () => {
+  const original = process.env.XDG_DATA_HOME;
+  afterEach(() => {
+    if (original === undefined) {
+      delete process.env.XDG_DATA_HOME;
+    } else {
+      process.env.XDG_DATA_HOME = original;
+    }
+  });
+
+  it("defaults to <home>/.local/share/opencode/opencode.db (all OSes, via xdg-basedir)", async () => {
+    delete process.env.XDG_DATA_HOME;
+    const fn = stubSqlite({ status: "ok", rows: [] });
+    await readOpenCodeSessions({ home: "/home/u", readSqliteFn: fn });
+    expect(fn.mock.calls[0][0]).toBe(path.join("/home/u", ".local", "share", "opencode", "opencode.db"));
+  });
+
+  it("honors $XDG_DATA_HOME", async () => {
+    process.env.XDG_DATA_HOME = "/custom/xdg";
+    const fn = stubSqlite({ status: "ok", rows: [] });
+    await readOpenCodeSessions({ home: "/home/u", readSqliteFn: fn });
+    expect(fn.mock.calls[0][0]).toBe(path.join("/custom/xdg", "opencode", "opencode.db"));
   });
 });

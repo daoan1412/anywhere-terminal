@@ -83,7 +83,12 @@ function mapSessionRow(row: Record<string, unknown>): VaultSessionEntry | null {
 
 export async function readOpenCodeSessions(options: OpenCodeReaderOptions = {}): Promise<ReaderResult> {
   const home = options.home ?? os.homedir();
-  const dataDir = options.dataDir ?? path.join(home, ".local", "share", "opencode");
+  // OpenCode resolves its data dir via the `xdg-basedir` package, which is the
+  // SAME on every OS (it is NOT OS-aware): `$XDG_DATA_HOME/opencode` else
+  // `~/.local/share/opencode` — including Windows (`%USERPROFILE%\.local\share`,
+  // NOT %APPDATA%). Mirror that here. See docs/research/20260529-cross-platform-store-paths-sqlite.md.
+  const xdgData = process.env.XDG_DATA_HOME?.trim() || path.join(home, ".local", "share");
+  const dataDir = options.dataDir ?? path.join(xdgData, "opencode");
   const dbPath = path.join(dataDir, "opencode.db");
   const readSqliteFn = options.readSqliteFn ?? readSqlite;
 

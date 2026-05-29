@@ -32,8 +32,15 @@ Agents are TS records (`AgentVaultDefinition`) in `src/vault/registry.ts`. Two d
 ### D2: Agents' own files are the source of truth — vault persists nothing
 We read the live files on each `list()` and never build/sync our own index DB. *Rejected:* a cached index in `workspaceState`/`storageUri` — it adds staleness, invalidation, and a second copy of transcript-derived data (privacy). Re-reading is cheap (metadata only, bounded `LIMIT`).
 
-### D3: SQLite via the host `sqlite3` CLI in read-only JSON mode — no new dependency
-Two of three agents (Codex, OpenCode) store SQLite. AT ships only `strip-ansi` as a runtime dep. We read by copying the DB+`-wal`+`-shm` to a temp dir (WAL-safe, `SessionIndexStore+CodexSQL.swift:25-55`) and running `sqlite3 -readonly -json <copy> "<static SELECT>"`, parsing the JSON array. *Rejected:* `better-sqlite3` — a native module needing Electron-ABI rebuilds alongside node-pty for marginal benefit here. **Constraint:** macOS ships `sqlite3` (≥3.37, supports `-json`); AT is macOS-only. The SELECTs are **static** (search/filter happens client-side in the panel), so no untrusted value enters the SQL string.
+### D3: SQLite via the host `sqlite3` CLI, with a `node:sqlite` fallback — no new dependency
+Two of three agents (Codex, OpenCode) store SQLite. AT ships only `strip-ansi` as a runtime dep. We read by copying the DB+`-wal`+`-shm` to a temp dir (WAL-safe, `SessionIndexStore+CodexSQL.swift:25-55`) then querying the *copy*. Engine selection (D3a):
+- **Primary:** the host `sqlite3 -readonly -json <copy> "<static SELECT>"` CLI (proven; replays WAL natively). Present on macOS (≥3.37) and most Linux.
+- **Fallback:** when the CLI is absent (typically **Windows**), the built-in **`node:sqlite`** module (`DatabaseSync`) — available because we target `vscode ^1.105` (Electron ships Node ≥22.15). Lazy dynamic `import("node:sqlite")` inside a `try/catch`; opens the disposable temp copy read-WRITE so it can replay the copied `-wal` (read-only opens can fail to create `-shm`). Never touches the user's live store.
+- Neither available → `no-sqlite3` (graceful empty, no crash).
+
+*Rejected:* `better-sqlite3` (native, Electron-ABI rebuilds) and `sql.js` (wasm bundle weight) — `node:sqlite` is zero-dependency given our engine target. The SELECTs are **static** (search/filter is client-side), so no untrusted value enters the SQL string.
+
+**Cross-platform path resolution (D3b):** all base dirs use `os.homedir()` + `path.join` (correct on Windows). Per agent: Claude `$CLAUDE_CONFIG_DIR` else `~/.claude`; Codex `$CODEX_HOME` else `~/.codex` (+ `$CODEX_SQLITE_HOME` for the DB only); OpenCode `$XDG_DATA_HOME/opencode` else `~/.local/share/opencode` — the OpenCode dir is the **same on every OS** because OpenCode itself uses the non-OS-aware `xdg-basedir` pkg (NOT `%APPDATA%`). See `docs/research/20260529-cross-platform-store-paths-sqlite.md`.
 
 **Return contract (per oracle):** `readSqlite()` returns `{ rows, status, error? }` where `status ∈ { ok, no-db, no-sqlite3, query-error }` — NOT a bare `[]`. This disambiguates "db absent" (Codex → try JSONL fallback; OpenCode → 0 entries) from "genuinely empty" from "tooling broken" (→ count as unreadable + surface). Capability is probed once via `sqlite3 -readonly -json :memory: "select 1"` (covers both binary-present AND `-json` supported); a query/snapshot failure retries once before degrading.
 
@@ -128,7 +135,7 @@ interface VaultSessionsResponseMessage { type: "vaultSessionsResponse"; result: 
 ```
 
 ## Design Constraints
-- **macOS-only / external CLIs:** paths (`~/.claude`, `~/.codex`, `~/.local/share/opencode`) and `sqlite3` assume macOS; everything is gated behind file-existence + binary-presence checks, degrading to empty (D3, D8).
+- **Cross-platform / external CLIs:** store paths resolve per-OS via `os.homedir()` + env overrides (D3b); SQLite reads via the `sqlite3` CLI with a built-in `node:sqlite` fallback (D3a). Everything is gated behind file-existence + engine-presence checks, degrading to empty — never crashing (D3, D8).
 - **Format drift:** all field names/SQL/flag orders are pinned to the 2026-05 shapes documented in `docs/research/20260528-cmux-vault-mechanism.md`; isolated per reader so a drift fix touches one file.
 - **No `vscode.lm` / no network:** the entire feature is local file + process I/O.
 
@@ -137,7 +144,8 @@ interface VaultSessionsResponseMessage { type: "vaultSessionsResponse"; result: 
 | Component | Risk | Mitigation |
 |---|---|---|
 | Per-agent readers | 3rd-party formats undocumented & version-fragile (`unresolved-unknown`) | D8 defensive parsing + `unreadable` count; one reader file per agent; fields pinned to research doc; unit tests over captured fixtures (tasks 2_2–2_4). |
-| SQLite access | New dep vs. missing system `sqlite3`; WAL lock contention | D3: shell to `sqlite3 -readonly -json` over a temp WAL-safe copy; graceful degrade if absent (task 2_1). |
+| SQLite access | Missing system `sqlite3` (esp. Windows); WAL lock contention | D3: `sqlite3 -readonly -json` over a temp WAL-safe copy, with a built-in `node:sqlite` fallback when the CLI is absent; graceful `no-sqlite3` degrade if neither (task 2_1). |
+| Cross-platform paths | Unix-only store paths miss sessions on Windows | D3b: `os.homedir()` + per-agent env overrides (`CLAUDE_CONFIG_DIR`/`CODEX_HOME`/`CODEX_SQLITE_HOME`/`XDG_DATA_HOME`); OpenCode dir is OS-agnostic (`xdg-basedir`). |
 | Privacy | Reading files with code/secrets (`security-privacy`) | D4 metadata-only, no transcript bodies persisted/sent, no egress; enforced by spec scenario + reader unit tests (tasks 2_2–2_5). |
 | Launch | Crafted session value → command injection (`security-privacy`) | D9 argv-array spawn (no shell string); validate id/flags; spec scenario + unit test (task 3_1). |
 | Resume correctness | Resumed Claude hits wrong account | D6 auth-env allowlist + captured `CLAUDE_CONFIG_DIR` (task 3_1). |

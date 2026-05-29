@@ -1,5 +1,9 @@
 // src/vault/sqlite.test.ts — Unit tests for the WAL-safe sqlite3 helper.
 
+import * as fsp from "node:fs/promises";
+import * as os from "node:os";
+import * as path from "node:path";
+import { DatabaseSync } from "node:sqlite";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { __resetSqliteProbeCache, readSqlite, type SqliteDeps } from "./sqlite";
 
@@ -10,6 +14,9 @@ function makeDeps(overrides: Partial<SqliteDeps> = {}): SqliteDeps {
     copy: vi.fn(async () => {}),
     mkdtemp: vi.fn(async () => "/tmp/at-vault-xyz"),
     rmrf: vi.fn(async () => {}),
+    // Default the harness to CLI-only so the existing tests exercise the CLI
+    // path in isolation. The node:sqlite-fallback tests opt back in.
+    hasNodeSqlite: vi.fn(async () => false),
     ...overrides,
   };
 }
@@ -146,5 +153,96 @@ describe("readSqlite: query execution", () => {
     });
     await readSqlite("/x/state.sqlite", "SELECT 1", deps);
     expect(deps.rmrf).toHaveBeenCalledWith("/tmp/at-vault-xyz");
+  });
+});
+
+describe("readSqlite: node:sqlite fallback (CLI absent)", () => {
+  const cliAbsent = () =>
+    vi.fn(async () => {
+      throw new Error("command not found: sqlite3");
+    });
+
+  it("falls back to node:sqlite when the CLI is unavailable", async () => {
+    const runNodeQuery = vi.fn(async () => ({ rows: [{ id: "n1" }], status: "ok" as const }));
+    const deps = makeDeps({
+      exec: cliAbsent(),
+      hasNodeSqlite: vi.fn(async () => true),
+      runNodeQuery,
+    });
+    const result = await readSqlite("/x/state.sqlite", "SELECT id FROM t", deps);
+    expect(result.status).toBe("ok");
+    expect(result.rows).toEqual([{ id: "n1" }]);
+    // The DB was still copied to temp first; node reads the copy, not the live db.
+    expect(runNodeQuery).toHaveBeenCalledWith("/tmp/at-vault-xyz/db.sqlite", "SELECT id FROM t");
+    expect(deps.copy).toHaveBeenCalledWith("/x/state.sqlite", "/tmp/at-vault-xyz/db.sqlite");
+  });
+
+  it("returns no-sqlite3 when BOTH the CLI and node:sqlite are absent", async () => {
+    const deps = makeDeps({ exec: cliAbsent(), hasNodeSqlite: vi.fn(async () => false) });
+    const result = await readSqlite("/x/state.sqlite", "SELECT 1", deps);
+    expect(result.status).toBe("no-sqlite3");
+    expect(deps.copy).not.toHaveBeenCalled();
+  });
+
+  it("prefers the CLI over node:sqlite when both are available", async () => {
+    const runNodeQuery = vi.fn(async () => ({ rows: [], status: "ok" as const }));
+    const deps = makeDeps({
+      exec: execWith(async () => ({ stdout: '[{"id":"cli"}]', stderr: "" })),
+      hasNodeSqlite: vi.fn(async () => true),
+      runNodeQuery,
+    });
+    const result = await readSqlite("/x/state.sqlite", "SELECT 1", deps);
+    expect(result.rows).toEqual([{ id: "cli" }]);
+    expect(runNodeQuery).not.toHaveBeenCalled();
+  });
+
+  it("propagates a node:sqlite query-error", async () => {
+    const deps = makeDeps({
+      exec: cliAbsent(),
+      hasNodeSqlite: vi.fn(async () => true),
+      runNodeQuery: vi.fn(async () => ({ rows: [], status: "query-error" as const, error: "boom" })),
+    });
+    const result = await readSqlite("/x/state.sqlite", "SELECT 1", deps);
+    expect(result.status).toBe("query-error");
+    expect(result.error).toBe("boom");
+  });
+
+  // End-to-end proof the REAL node:sqlite engine reads an on-disk DB when the
+  // CLI is missing (the Windows scenario). Uses real fs deps + a real fixture.
+  it("reads a real sqlite file via the built-in engine (no CLI, no stub)", async () => {
+    const dir = await fsp.mkdtemp(path.join(os.tmpdir(), "at-vault-fixture-"));
+    const dbFile = path.join(dir, "real.sqlite");
+    const db = new DatabaseSync(dbFile);
+    db.exec("CREATE TABLE t(id TEXT, n INTEGER)");
+    db.exec("INSERT INTO t VALUES ('a', 1), ('b', 2)");
+    db.close();
+
+    const realDeps: SqliteDeps = {
+      exec: cliAbsent(), // force the node:sqlite path
+      exists: async (p) => {
+        try {
+          await fsp.access(p);
+          return true;
+        } catch {
+          return false;
+        }
+      },
+      copy: (src, dest) => fsp.copyFile(src, dest),
+      mkdtemp: () => fsp.mkdtemp(path.join(os.tmpdir(), "at-vault-")),
+      rmrf: (d) => fsp.rm(d, { recursive: true, force: true }),
+      hasNodeSqlite: async () => true,
+      // no runNodeQuery override → exercises the real defaultRunNodeQuery
+    };
+
+    try {
+      const result = await readSqlite(dbFile, "SELECT id, n FROM t ORDER BY id", realDeps);
+      expect(result.status).toBe("ok");
+      expect(result.rows).toEqual([
+        { id: "a", n: 1 },
+        { id: "b", n: 2 },
+      ]);
+    } finally {
+      await fsp.rm(dir, { recursive: true, force: true });
+    }
   });
 });

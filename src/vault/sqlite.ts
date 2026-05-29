@@ -40,6 +40,17 @@ export interface SqliteDeps {
   copy(src: string, dest: string): Promise<void>;
   mkdtemp(): Promise<string>;
   rmrf(dir: string): Promise<void>;
+  /**
+   * Whether the in-process `node:sqlite` engine is usable. Defaults to a
+   * memoized real probe. Used only as a fallback when the `sqlite3` CLI is
+   * absent (typically Windows). Tests stub it to isolate the CLI path.
+   */
+  hasNodeSqlite?(): Promise<boolean>;
+  /**
+   * Query the copied DB with `node:sqlite` instead of the CLI. Defaults to the
+   * real engine. Tests stub it to avoid touching a real sqlite file.
+   */
+  runNodeQuery?(dbCopy: string, sql: string): Promise<SqliteResult>;
 }
 
 const defaultDeps: SqliteDeps = {
@@ -62,10 +73,12 @@ const defaultDeps: SqliteDeps = {
 };
 
 let probePromise: Promise<boolean> | undefined;
+let nodeProbePromise: Promise<boolean> | undefined;
 
-/** Reset the memoized capability probe — tests only. */
+/** Reset the memoized capability probes — tests only. */
 export function __resetSqliteProbeCache(): void {
   probePromise = undefined;
+  nodeProbePromise = undefined;
 }
 
 /**
@@ -85,6 +98,65 @@ function probeSqlite(deps: SqliteDeps): Promise<boolean> {
     })();
   }
   return probePromise;
+}
+
+/**
+ * Probe once whether the built-in `node:sqlite` module is importable (Node
+ * 22.5+). VS Code's Electron host ships a recent enough Node, but the dynamic
+ * import is guarded so an older/locked-down runtime degrades to `no-sqlite3`
+ * rather than throwing. Memoized.
+ */
+function probeNodeSqlite(deps: SqliteDeps): Promise<boolean> {
+  if (deps.hasNodeSqlite) {
+    return deps.hasNodeSqlite();
+  }
+  if (!nodeProbePromise) {
+    nodeProbePromise = (async () => {
+      try {
+        const mod = await import("node:sqlite");
+        return typeof mod.DatabaseSync === "function";
+      } catch {
+        return false;
+      }
+    })();
+  }
+  return nodeProbePromise;
+}
+
+/**
+ * Run `sql` against the copied DB using `node:sqlite`. The copy is a disposable
+ * temp file, so we open it read-WRITE: that lets SQLite replay the copied
+ * `-wal` sidecar (read-only opens can fail when the `-shm` can't be created)
+ * without ever touching the user's live store. Never throws.
+ */
+async function defaultRunNodeQuery(dbCopy: string, sql: string): Promise<SqliteResult> {
+  try {
+    const { DatabaseSync } = await import("node:sqlite");
+    const db = new DatabaseSync(dbCopy);
+    try {
+      const rows = db.prepare(sql).all() as Record<string, unknown>[];
+      return { rows: rows.map(normalizeRow), status: "ok" };
+    } finally {
+      db.close();
+    }
+  } catch (err) {
+    return { rows: [], status: "query-error", error: errorMessage(err) };
+  }
+}
+
+/**
+ * Coerce a `node:sqlite` row into the JSON-ish shapes the readers expect
+ * (matching the CLI's `-json` output): BIGINT columns can come back as
+ * `bigint`, blobs as `Uint8Array`. The readers only consume text + ms
+ * timestamps (well within Number range), so a `bigint → number` coercion is
+ * safe; blobs are left as-is (readers ignore them).
+ */
+function normalizeRow(row: Record<string, unknown>): Record<string, unknown> {
+  const out: Record<string, unknown> = {};
+  for (const [key, value] of Object.entries(row)) {
+    out[key] = typeof value === "bigint" ? Number(value) : value;
+  }
+  return out;
 }
 
 function errorMessage(err: unknown): string {
@@ -125,7 +197,12 @@ async function runQuery(deps: SqliteDeps, dbCopy: string, sql: string): Promise<
  * - `ok`         — `rows` holds the parsed result (possibly empty)
  */
 export async function readSqlite(dbPath: string, sql: string, deps: SqliteDeps = defaultDeps): Promise<SqliteResult> {
-  if (!(await probeSqlite(deps))) {
+  // Pick an engine: the host `sqlite3` CLI (preferred — proven here, replays
+  // WAL natively) or, when that's absent (typically Windows), the in-process
+  // `node:sqlite` built-in. Neither → `no-sqlite3` (graceful empty, no crash).
+  const useCli = await probeSqlite(deps);
+  const useNode = useCli ? false : await probeNodeSqlite(deps);
+  if (!useCli && !useNode) {
     return { rows: [], status: "no-sqlite3" };
   }
 
@@ -155,7 +232,7 @@ export async function readSqlite(dbPath: string, sql: string, deps: SqliteDeps =
         // A missing/locked sidecar isn't fatal — query the base copy.
       }
     }
-    return await runQuery(deps, dbCopy, sql);
+    return useCli ? await runQuery(deps, dbCopy, sql) : await (deps.runNodeQuery ?? defaultRunNodeQuery)(dbCopy, sql);
   } catch (err) {
     return { rows: [], status: "query-error", error: errorMessage(err) };
   } finally {

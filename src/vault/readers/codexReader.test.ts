@@ -1,8 +1,9 @@
 // src/vault/readers/codexReader.test.ts — Unit tests for the Codex reader.
 
+import * as os from "node:os";
 import * as path from "node:path";
 import { fileURLToPath } from "node:url";
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import type { SqliteResult } from "../sqlite";
 import { readCodexSessions } from "./codexReader";
 
@@ -104,5 +105,45 @@ describe("readCodexSessions: fallback + errors", () => {
     const { entries, unreadable } = await readCodexSessions({ codexDir: "/nonexistent/.codex", readSqliteFn: fn });
     expect(entries).toEqual([]);
     expect(unreadable).toBe(0);
+  });
+});
+
+describe("readCodexSessions: home resolution", () => {
+  const orig = { home: process.env.CODEX_HOME, sqlite: process.env.CODEX_SQLITE_HOME };
+  afterEach(() => {
+    for (const [key, value] of [
+      ["CODEX_HOME", orig.home],
+      ["CODEX_SQLITE_HOME", orig.sqlite],
+    ] as const) {
+      if (value === undefined) {
+        delete process.env[key];
+      } else {
+        process.env[key] = value;
+      }
+    }
+  });
+
+  it("defaults to <home>/.codex/state_5.sqlite (correct on Windows via os.homedir)", async () => {
+    delete process.env.CODEX_HOME;
+    delete process.env.CODEX_SQLITE_HOME;
+    const fn = stubSqlite({ status: "ok", rows: [] });
+    await readCodexSessions({ home: "/home/u", readSqliteFn: fn });
+    expect(fn.mock.calls[0][0]).toBe(path.join("/home/u", ".codex", "state_5.sqlite"));
+  });
+
+  it("honors $CODEX_HOME for both the DB and the sessions dir", async () => {
+    process.env.CODEX_HOME = path.join(os.tmpdir(), "codex-home-does-not-exist");
+    delete process.env.CODEX_SQLITE_HOME;
+    const fn = stubSqlite({ status: "ok", rows: [] });
+    await readCodexSessions({ readSqliteFn: fn });
+    expect(fn.mock.calls[0][0]).toBe(path.join(process.env.CODEX_HOME as string, "state_5.sqlite"));
+  });
+
+  it("relocates only the DB via $CODEX_SQLITE_HOME", async () => {
+    process.env.CODEX_HOME = "/codex/home";
+    process.env.CODEX_SQLITE_HOME = "/codex/db";
+    const fn = stubSqlite({ status: "ok", rows: [] });
+    await readCodexSessions({ readSqliteFn: fn });
+    expect(fn.mock.calls[0][0]).toBe(path.join("/codex/db", "state_5.sqlite"));
   });
 });

@@ -160,10 +160,21 @@ async function readCodexJsonlFallback(sessionsDir: string): Promise<ReaderResult
   return { entries, unreadable };
 }
 
+/** Trim an env-var path; treat empty/whitespace as unset. */
+function envDir(value: string | undefined): string | undefined {
+  const trimmed = value?.trim();
+  return trimmed ? trimmed : undefined;
+}
+
 export async function readCodexSessions(options: CodexReaderOptions = {}): Promise<ReaderResult> {
   const home = options.home ?? os.homedir();
-  const codexDir = options.codexDir ?? path.join(home, ".codex");
-  const dbPath = path.join(codexDir, "state_5.sqlite");
+  // Codex resolves its home as `$CODEX_HOME` (when set) else `~/.codex`; the
+  // default is correct on Windows too (`os.homedir()` = `%USERPROFILE%`). The
+  // SQLite DB can be relocated independently via `$CODEX_SQLITE_HOME`. See
+  // docs/research/20260529-cross-platform-store-paths-sqlite.md.
+  const codexDir = options.codexDir ?? envDir(process.env.CODEX_HOME) ?? path.join(home, ".codex");
+  const sqliteDir = envDir(process.env.CODEX_SQLITE_HOME) ?? codexDir;
+  const dbPath = path.join(sqliteDir, "state_5.sqlite");
   const sessionsDir = path.join(codexDir, "sessions");
   const readSqliteFn = options.readSqliteFn ?? readSqlite;
 
