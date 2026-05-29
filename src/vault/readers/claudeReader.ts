@@ -15,8 +15,14 @@ import * as os from "node:os";
 import * as path from "node:path";
 import * as readline from "node:readline";
 import { boundedPreview } from "../preview";
-import type { VaultSessionDetail, VaultSessionEntry } from "../types";
-import { type ClaudeChildStub, classifyClaudeStyleEvents, cleanPromptText } from "./detail";
+import { formatEntryId, type VaultSessionDetail, type VaultSessionEntry } from "../types";
+import {
+  type ClaudeChildStub,
+  classifyClaudeStyleEvents,
+  cleanPromptText,
+  createBoundedRecordBuffer,
+  finalizeDetail,
+} from "./detail";
 
 /** Separates a parent session id from a subagent file stem in an entry id:
  *  `claude:<parentSessionId>:subagent:<agent-stem>`. */
@@ -262,9 +268,15 @@ export async function resolveClaudeSessionPath(
   return null;
 }
 
-/** Read every parseable record from a session jsonl (skip-malformed, D8). */
-async function streamClaudeRecords(filePath: string): Promise<Record<string, unknown>[] | null> {
-  const records: Record<string, unknown>[] = [];
+/**
+ * Read parseable records from a session jsonl (skip-malformed, D8), bounded to a
+ * head + tail window so a tens-of-MB transcript never fully materializes (W1).
+ * Returns `truncated` when the middle was dropped.
+ */
+async function streamClaudeRecords(
+  filePath: string,
+): Promise<{ records: Record<string, unknown>[]; truncated: boolean } | null> {
+  const buffer = createBoundedRecordBuffer();
   let stream: ReturnType<typeof createReadStream> | undefined;
   let rl: readline.Interface | undefined;
   try {
@@ -278,7 +290,7 @@ async function streamClaudeRecords(filePath: string): Promise<Record<string, unk
       try {
         const parsed = JSON.parse(trimmed);
         if (parsed && typeof parsed === "object") {
-          records.push(parsed as Record<string, unknown>);
+          buffer.push(parsed as Record<string, unknown>);
         }
       } catch {
         // skip a single corrupt line, keep reading (D8)
@@ -290,7 +302,7 @@ async function streamClaudeRecords(filePath: string): Promise<Record<string, unk
     rl?.close();
     stream?.destroy();
   }
-  return records;
+  return buffer.result();
 }
 
 /**
@@ -314,26 +326,25 @@ export async function readClaudeDetail(
     if (!filePath) {
       return null;
     }
-    const records = await streamClaudeRecords(filePath);
-    if (records === null) {
+    const read = await streamClaudeRecords(filePath);
+    if (read === null) {
       return null;
     }
-    return {
-      entryId: `claude:${sessionId}`,
-      ...classifyClaudeStyleEvents(records, { limit, includeSidechain: true }),
-    };
+    const detail = classifyClaudeStyleEvents(read.records, { limit, includeSidechain: true });
+    return finalizeDetail(formatEntryId("claude", sessionId), detail, read.truncated);
   }
 
   const filePath = await resolveClaudeSessionPath(sessionId, options);
   if (!filePath) {
     return null;
   }
-  const records = await streamClaudeRecords(filePath);
-  if (records === null) {
+  const read = await streamClaudeRecords(filePath);
+  if (read === null) {
     return null;
   }
   const childStubs = await listClaudeSubagentStubs(sessionId, options);
-  return { entryId: `claude:${sessionId}`, ...classifyClaudeStyleEvents(records, { limit, childStubs }) };
+  const detail = classifyClaudeStyleEvents(read.records, { limit, childStubs });
+  return finalizeDetail(formatEntryId("claude", sessionId), detail, read.truncated);
 }
 
 /**
@@ -414,7 +425,7 @@ async function listClaudeSubagentStubs(parentId: string, options: ClaudeReaderOp
       const meta = await readSubagentMeta(path.join(subagentsDir, `${stem}.meta.json`));
       const first = await readFirstUserRecord(path.join(subagentsDir, `${stem}.jsonl`));
       stubs.push({
-        entryId: `claude:${parentId}${SUBAGENT_MARKER}${stem}`,
+        entryId: formatEntryId("claude", `${parentId}${SUBAGENT_MARKER}${stem}`),
         agentType: meta?.agentType,
         description: meta?.description,
         firstMessage: first?.text,
@@ -509,7 +520,7 @@ export async function readClaudeSessions(options: ClaudeReaderOptions = {}): Pro
         // Prefer Claude's own regenerated title; fall back to the first prompt.
         const aiTitle = await readLatestAiTitle(filePath);
         entries.push({
-          id: `claude:${sessionId}`,
+          id: formatEntryId("claude", sessionId),
           agent: "claude",
           sessionId,
           title: boundedPreview(aiTitle ?? fields.title ?? ""),

@@ -15,13 +15,18 @@
 //   codex    — opencode/packages/ui/src/assets/icons/provider/openai.svg (already currentColor)
 //   opencode — warp/app/assets/bundled/svg/opencode.svg          (#FF0000 → currentColor)
 
-export type VaultAccent = "claude" | "codex" | "opencode";
+/** The closed accent set — single source. `VaultAccent` is derived from it, and
+ *  the preview's accent-class cleanup iterates it (so a 4th accent updates both). */
+export const VAULT_ACCENTS = ["claude", "codex", "opencode"] as const;
+export type VaultAccent = (typeof VAULT_ACCENTS)[number];
 
 export interface AgentIcon {
   /** Inline SVG markup, `fill="currentColor"`, no width/height. */
   svg: string;
   /** Drives the `.vault-badge--<accent>` accent-color class. */
   accent: VaultAccent;
+  /** Display label (group headers, row tooltip) — single source for the webview. */
+  displayName: string;
 }
 
 const CLAUDE_SVG =
@@ -41,11 +46,25 @@ const OPENCODE_SVG =
 
 /** Closed map: agent id → its real brand icon + accent. The only SVG source. */
 export const AGENT_ICONS: Record<string, AgentIcon> = {
-  claude: { svg: CLAUDE_SVG, accent: "claude" },
-  codex: { svg: CODEX_SVG, accent: "codex" },
-  opencode: { svg: OPENCODE_SVG, accent: "opencode" },
+  claude: { svg: CLAUDE_SVG, accent: "claude", displayName: "Claude Code" },
+  codex: { svg: CODEX_SVG, accent: "codex", displayName: "Codex" },
+  opencode: { svg: OPENCODE_SVG, accent: "opencode", displayName: "OpenCode" },
 };
 
 export function getAgentIcon(agentId: string): AgentIcon | undefined {
   return AGENT_ICONS[agentId];
+}
+
+/** Display label for an agent (group header / row tooltip). */
+export function getAgentDisplayName(agentId: string): string | undefined {
+  return AGENT_ICONS[agentId]?.displayName;
+}
+
+/**
+ * The agent's accent id — and ONLY when it's a known, closed accent. Used to
+ * gate which session-derived `agent` values may become a CSS class, so an
+ * arbitrary/crafted agent string can never inject one (W6).
+ */
+export function getAgentAccent(agentId: string): VaultAccent | undefined {
+  return AGENT_ICONS[agentId]?.accent;
 }

@@ -10,7 +10,13 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { boundedPreview } from "../preview";
 import { readSqlite } from "../sqlite";
-import type { VaultActivityStep, VaultSessionDetail, VaultSessionEntry, VaultTimelineItem } from "../types";
+import {
+  formatEntryId,
+  type VaultActivityStep,
+  type VaultSessionDetail,
+  type VaultSessionEntry,
+  type VaultTimelineItem,
+} from "../types";
 import type { ReaderResult } from "./claudeReader";
 import { boundActivity, boundTimeline, MAX_MESSAGE_TEXT, truncate } from "./detail";
 
@@ -99,7 +105,7 @@ function mapSessionRow(row: Record<string, unknown>): VaultSessionEntry | null {
   const title =
     rawTitle && !isPlaceholderTitle(rawTitle) ? rawTitle : (firstUserPartText(row.first_user_part) ?? rawTitle ?? "");
   return {
-    id: `opencode:${sessionId}`,
+    id: formatEntryId("opencode", sessionId),
     agent: "opencode",
     sessionId,
     title: boundedPreview(title),
@@ -269,9 +275,15 @@ export function mapOpencodeRows(
     if (isSyntheticMessage(m.data)) {
       continue;
     }
-    const role = m.data.role === "assistant" ? "assistant" : "user";
-    messageCount++;
+    // Skip malformed / unknown-role rows so they don't inflate the count (W7).
+    const role = m.data.role;
+    if (role !== "user" && role !== "assistant") {
+      continue;
+    }
     if (role === "assistant") {
+      // A real assistant turn counts even when it's tool-only (no text), mirroring
+      // the Claude classifier; tokens accrue regardless of visible text.
+      messageCount++;
       const tokens = objField(m.data.tokens);
       if (tokens) {
         sawTokens = true;
@@ -282,8 +294,13 @@ export function mapOpencodeRows(
     }
     const text = (textByMessage.get(m.id) ?? []).join(" ").trim();
     if (text) {
-      if (role === "user" && firstPrompt === undefined) {
-        firstPrompt = truncate(text);
+      if (role === "user") {
+        // A user row counts only when it carries real text (a tool-result-only
+        // user row is plumbing, not a turn) (W7).
+        messageCount++;
+        if (firstPrompt === undefined) {
+          firstPrompt = truncate(text);
+        }
       }
       latestMessage = { role, text: truncate(text), timestamp: m.timeCreated };
       tl.push({
@@ -406,7 +423,7 @@ export async function readOpenCodeDetail(
   const messages = parseMessageRows(msgRes.rows);
   const parts = parsePartRows(partRes.rows);
   const childStubs = childRes.status === "ok" ? buildChildStubs(childRes.rows) : [];
-  return { entryId: `opencode:${sessionId}`, ...mapOpencodeRows(messages, parts, limit, childStubs) };
+  return { entryId: formatEntryId("opencode", sessionId), ...mapOpencodeRows(messages, parts, limit, childStubs) };
 }
 
 /** Map direct-child session rows into timestamped `subagentSession` stubs. */
@@ -426,7 +443,7 @@ function buildChildStubs(rows: Record<string, unknown>[]): { timestamp: number; 
       timestamp,
       item: {
         kind: "subagentSession",
-        entryId: `opencode:${childId}`,
+        entryId: formatEntryId("opencode", childId),
         title: boundedPreview(title),
         ...(firstMessage ? { firstMessage: truncate(firstMessage) } : {}),
         ...(asString(row.agent) ? { agent: asString(row.agent) } : {}),

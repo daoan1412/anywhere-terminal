@@ -7,24 +7,34 @@ import { canForkOpenCode } from "./forkSupport";
 import type { ReaderResult } from "./readers/claudeReader";
 import { readClaudeDetail, readClaudeSessions } from "./readers/claudeReader";
 import { readCodexDetail, readCodexSessions } from "./readers/codexReader";
+import { clampDetailLimit } from "./readers/detail";
 import { readOpenCodeDetail, readOpenCodeSessions } from "./readers/opencodeReader";
-import { getAgentDefinition } from "./registry";
-import type { VaultListResult, VaultSessionDetail, VaultSessionEntry } from "./types";
+import { getAgentDefinition, VAULT_AGENT_IDS, type VaultAgentId } from "./registry";
+import { parseEntryId, type VaultListResult, type VaultSessionDetail, type VaultSessionEntry } from "./types";
 
-export interface VaultReaders {
-  claude(): Promise<ReaderResult>;
-  codex(): Promise<ReaderResult>;
-  opencode(): Promise<ReaderResult>;
+// Agent identity is a single source of truth in `registry.ts`: `VaultAgentId`
+// is derived from `VAULT_AGENT_IDS`, and the keyed reader records below are
+// `satisfies Record<VaultAgentId, …>` so a missing agent is a compile error —
+// no positional array or switch to forget (W3).
+
+/** Human label for an agent — derived from the registry, never a parallel array. */
+function agentLabel(id: VaultAgentId): string {
+  return getAgentDefinition(id)?.displayName ?? id;
 }
+
+function isVaultAgentId(value: string): value is VaultAgentId {
+  return (VAULT_AGENT_IDS as readonly string[]).includes(value);
+}
+
+export type VaultReaders = Record<VaultAgentId, () => Promise<ReaderResult>>;
 
 /** Per-agent on-demand detail readers (resolve a single session by id). The
  *  optional `limit` bounds the returned timeline (most-recent kept) so the
  *  webview can load older messages incrementally. */
-export interface VaultDetailReaders {
-  claude(sessionId: string, limit?: number): Promise<VaultSessionDetail | null>;
-  codex(sessionId: string, limit?: number): Promise<VaultSessionDetail | null>;
-  opencode(sessionId: string, limit?: number): Promise<VaultSessionDetail | null>;
-}
+export type VaultDetailReaders = Record<
+  VaultAgentId,
+  (sessionId: string, limit?: number) => Promise<VaultSessionDetail | null>
+>;
 
 export interface VaultServiceDeps {
   readers?: VaultReaders;
@@ -33,20 +43,17 @@ export interface VaultServiceDeps {
   canForkOpenCodeFn?: (minVersion: string) => Promise<boolean>;
 }
 
-const defaultReaders: VaultReaders = {
+const defaultReaders = {
   claude: () => readClaudeSessions(),
   codex: () => readCodexSessions(),
   opencode: () => readOpenCodeSessions(),
-};
+} satisfies VaultReaders;
 
-const defaultDetailReaders: VaultDetailReaders = {
+const defaultDetailReaders = {
   claude: (sessionId, limit) => readClaudeDetail(sessionId, {}, limit),
   codex: (sessionId, limit) => readCodexDetail(sessionId, {}, limit),
   opencode: (sessionId, limit) => readOpenCodeDetail(sessionId, {}, limit),
-};
-
-/** Source labels for the `unreadable.reasons` notice — order matches `list()`. */
-const READER_LABELS = ["Claude Code", "Codex", "OpenCode"] as const;
+} satisfies VaultDetailReaders;
 
 export class VaultService {
   private readonly readers: VaultReaders;
@@ -60,17 +67,13 @@ export class VaultService {
   }
 
   async list(): Promise<VaultListResult> {
-    const results = await Promise.allSettled([
-      invokeReader(() => this.readers.claude()),
-      invokeReader(() => this.readers.codex()),
-      invokeReader(() => this.readers.opencode()),
-    ]);
+    const results = await Promise.allSettled(VAULT_AGENT_IDS.map((id) => invokeReader(() => this.readers[id]())));
 
     const entries: VaultSessionEntry[] = [];
     let unreadable = 0;
     const reasons: string[] = [];
     results.forEach((r, i) => {
-      const label = READER_LABELS[i] ?? "Unknown source";
+      const label = agentLabel(VAULT_AGENT_IDS[i]);
       if (r.status === "fulfilled") {
         entries.push(...r.value.entries);
         if (r.value.unreadable > 0) {
@@ -113,25 +116,13 @@ export class VaultService {
    * unknown agent or an unresolvable session.
    */
   async getDetail(entryId: string, limit?: number): Promise<VaultSessionDetail | null> {
-    const sep = entryId.indexOf(":");
-    if (sep <= 0) {
+    const parsed = parseEntryId(entryId);
+    if (!parsed || !isVaultAgentId(parsed.agent)) {
       return null;
     }
-    const agent = entryId.slice(0, sep);
-    const sessionId = entryId.slice(sep + 1);
-    if (!sessionId) {
-      return null;
-    }
-    switch (agent) {
-      case "claude":
-        return this.detailReaders.claude(sessionId, limit);
-      case "codex":
-        return this.detailReaders.codex(sessionId, limit);
-      case "opencode":
-        return this.detailReaders.opencode(sessionId, limit);
-      default:
-        return null;
-    }
+    // Clamp the webview-supplied limit so a forged/garbage value can't defeat the
+    // reader's timeline bound (W2).
+    return this.detailReaders[parsed.agent](parsed.sessionId, clampDetailLimit(limit));
   }
 }
 

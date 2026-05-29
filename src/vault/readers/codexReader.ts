@@ -14,9 +14,22 @@ import * as path from "node:path";
 import * as readline from "node:readline";
 import { boundedPreview } from "../preview";
 import { readSqlite } from "../sqlite";
-import type { VaultActivityStep, VaultSessionDetail, VaultSessionEntry, VaultTimelineItem } from "../types";
+import {
+  formatEntryId,
+  type VaultActivityStep,
+  type VaultSessionDetail,
+  type VaultSessionEntry,
+  type VaultTimelineItem,
+} from "../types";
 import type { ReaderResult } from "./claudeReader";
-import { boundActivity, boundTimeline, MAX_MESSAGE_TEXT, truncate } from "./detail";
+import {
+  boundActivity,
+  boundTimeline,
+  createBoundedRecordBuffer,
+  finalizeDetail,
+  MAX_MESSAGE_TEXT,
+  truncate,
+} from "./detail";
 
 /** Bound the SQLite read so the vault list stays cheap (D2). */
 const ROW_LIMIT = 500;
@@ -70,7 +83,7 @@ function mapThreadRow(row: Record<string, unknown>): VaultSessionEntry | null {
   }
   const title = asString(row.title) ?? asString(row.first_user_message) ?? "";
   return {
-    id: `codex:${sessionId}`,
+    id: formatEntryId("codex", sessionId),
     agent: "codex",
     sessionId,
     title: boundedPreview(title),
@@ -147,7 +160,7 @@ async function readCodexJsonlFallback(sessionsDir: string): Promise<ReaderResult
       const sessionId = asString(payload.id) ?? path.basename(filePath, ".jsonl");
       const stat = await fs.stat(filePath);
       entries.push({
-        id: `codex:${sessionId}`,
+        id: formatEntryId("codex", sessionId),
         agent: "codex",
         sessionId,
         title: "",
@@ -418,9 +431,15 @@ export function classifyCodexRolloutEvents(
   };
 }
 
-/** Read every parseable record from a rollout jsonl (skip-malformed, D8). */
-async function streamCodexRecords(filePath: string): Promise<Record<string, unknown>[] | null> {
-  const records: Record<string, unknown>[] = [];
+/**
+ * Read parseable records from a rollout jsonl (skip-malformed, D8), bounded to a
+ * head + tail window so a large rollout never fully materializes (W1). Returns
+ * `truncated` when the middle was dropped.
+ */
+async function streamCodexRecords(
+  filePath: string,
+): Promise<{ records: Record<string, unknown>[]; truncated: boolean } | null> {
+  const buffer = createBoundedRecordBuffer();
   let stream: ReturnType<typeof createReadStream> | undefined;
   let rl: readline.Interface | undefined;
   try {
@@ -434,7 +453,7 @@ async function streamCodexRecords(filePath: string): Promise<Record<string, unkn
       try {
         const parsed = JSON.parse(trimmed);
         if (parsed && typeof parsed === "object") {
-          records.push(parsed as Record<string, unknown>);
+          buffer.push(parsed as Record<string, unknown>);
         }
       } catch {
         // skip a corrupt line, keep reading (D8)
@@ -446,7 +465,7 @@ async function streamCodexRecords(filePath: string): Promise<Record<string, unkn
     rl?.close();
     stream?.destroy();
   }
-  return records;
+  return buffer.result();
 }
 
 /** True iff `p` resolves inside `root`. */
@@ -522,21 +541,24 @@ export async function readCodexDetail(
   }
 
   if (rolloutPath) {
-    const records = await streamCodexRecords(rolloutPath);
-    if (records && records.length > 0) {
-      return { entryId: `codex:${sessionId}`, ...classifyCodexRolloutEvents(records, limit) };
+    const read = await streamCodexRecords(rolloutPath);
+    if (read && read.records.length > 0) {
+      const detail = classifyCodexRolloutEvents(read.records, limit);
+      return finalizeDetail(formatEntryId("codex", sessionId), detail, read.truncated);
     }
   }
 
   if (thread?.firstUserMessage) {
     return {
-      entryId: `codex:${sessionId}`,
+      entryId: formatEntryId("codex", sessionId),
       firstPrompt: truncate(thread.firstUserMessage),
       recentActivity: [],
+      latestMessage: { role: "user", text: truncate(thread.firstUserMessage), timestamp: 0 },
       timeline: [
         { kind: "message", role: "user", text: truncate(thread.firstUserMessage, MAX_MESSAGE_TEXT), timestamp: 0 },
       ],
-      stats: { messageCount: 0, toolCount: 0, subagentCount: 0 },
+      // The index-only fallback surfaces exactly the one indexed prompt (s3 — was 0).
+      stats: { messageCount: 1, toolCount: 0, subagentCount: 0 },
       partial: true,
       limitedReason: PARTIAL_LIMITED_REASON,
     };

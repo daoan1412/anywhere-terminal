@@ -100,6 +100,8 @@ describe("readCodexDetail", () => {
       partial: true,
     });
     expect(detail?.limitedReason).toBeTruthy();
+    // The index-only fallback surfaces exactly the one indexed prompt (s3).
+    expect(detail?.stats.messageCount).toBe(1);
   });
 
   it("returns null when neither a rollout nor an index row exists", async () => {

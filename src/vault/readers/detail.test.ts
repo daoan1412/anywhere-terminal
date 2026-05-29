@@ -3,9 +3,14 @@
 import { describe, expect, it } from "vitest";
 import {
   boundActivity,
+  clampDetailLimit,
   classifyClaudeStyleEvents,
   cleanPromptText,
+  createBoundedRecordBuffer,
+  finalizeDetail,
   MAX_ACTIVITY_STEPS,
+  MAX_DETAIL_LIMIT,
+  SOURCE_TRUNCATED_REASON,
   toolLabel,
   truncate,
 } from "./detail";
@@ -279,5 +284,98 @@ describe("classifyClaudeStyleEvents", () => {
     // For a subagent file, the sidechain IS the conversation.
     const out = classifyClaudeStyleEvents(records, { includeSidechain: true });
     expect(out.timeline.map((i) => i.kind)).toEqual(["message", "message"]);
+  });
+
+  it("counts distinct subagents as max(spawn calls, stubs) — no double-count on mismatch (W4)", () => {
+    // One spawn call whose description does NOT match the one stub: the call
+    // surfaces as a plain step AND the stub is appended, but the count is 1.
+    const records: Rec[] = [
+      userText("go"),
+      assistantTool("Agent", { subagent_type: "general", description: "spawn description" }),
+    ];
+    const stub = { entryId: "claude:p:subagent:agent-x", description: "different", agentType: "cf-oracle" };
+    const out = classifyClaudeStyleEvents(records, { childStubs: [stub] });
+    expect(out.stats.subagentCount).toBe(1);
+  });
+
+  it("counts all stubs when there are more transcripts than matched calls (W4)", () => {
+    const records: Rec[] = [userText("go"), assistantTool("Agent", { description: "A" })];
+    const stubs = [
+      { entryId: "claude:p:subagent:a", description: "A" },
+      { entryId: "claude:p:subagent:b", description: "B" },
+    ];
+    const out = classifyClaudeStyleEvents(records, { childStubs: stubs });
+    // 1 matched call + 1 leftover stub = 2 distinct subagents (not 3).
+    expect(out.stats.subagentCount).toBe(2);
+    expect(out.timeline.filter((i) => i.kind === "subagentSession")).toHaveLength(2);
+  });
+});
+
+describe("clampDetailLimit (W2)", () => {
+  it("passes a finite positive int through, capped at the max", () => {
+    expect(clampDetailLimit(400)).toBe(400);
+    expect(clampDetailLimit(800)).toBe(800);
+    expect(clampDetailLimit(MAX_DETAIL_LIMIT + 5000)).toBe(MAX_DETAIL_LIMIT);
+    expect(clampDetailLimit(123.9)).toBe(123);
+  });
+
+  it("rejects undefined / non-finite / non-positive → undefined (reader default)", () => {
+    expect(clampDetailLimit(undefined)).toBeUndefined();
+    expect(clampDetailLimit(Number.POSITIVE_INFINITY)).toBeUndefined();
+    expect(clampDetailLimit(Number.NaN)).toBeUndefined();
+    expect(clampDetailLimit(0)).toBeUndefined();
+    expect(clampDetailLimit(-10)).toBeUndefined();
+  });
+});
+
+describe("finalizeDetail (contracts P2 — source vs pageable truncation)", () => {
+  const base: Omit<import("../types").VaultSessionDetail, "entryId"> = {
+    recentActivity: [],
+    timeline: [{ kind: "message", role: "user", text: "hi" }],
+    stats: { messageCount: 1, toolCount: 0, subagentCount: 0 },
+  };
+
+  it("passes the detail through untouched when the source read was complete", () => {
+    const out = finalizeDetail("claude:a", { ...base, truncated: true }, false);
+    expect(out.partial).toBeUndefined();
+    expect(out.limitedReason).toBeUndefined();
+    // The classifier's own pageable `truncated` is preserved (drives load-more).
+    expect(out.truncated).toBe(true);
+  });
+
+  it("marks a source-truncated read as partial WITHOUT touching pageable truncated", () => {
+    const out = finalizeDetail("claude:a", { ...base, truncated: true }, true);
+    expect(out.partial).toBe(true);
+    expect(out.limitedReason).toBe(SOURCE_TRUNCATED_REASON);
+    // Still pageable within the retained window — load-more semantics intact.
+    expect(out.truncated).toBe(true);
+  });
+
+  it("keeps an existing limitedReason instead of overwriting it", () => {
+    const out = finalizeDetail("codex:a", { ...base, limitedReason: "index only" }, true);
+    expect(out.partial).toBe(true);
+    expect(out.limitedReason).toBe("index only");
+  });
+});
+
+describe("createBoundedRecordBuffer (W1)", () => {
+  it("keeps every record in order when under the cap", () => {
+    const buf = createBoundedRecordBuffer(2, 3);
+    const recs = [{ i: 0 }, { i: 1 }, { i: 2 }];
+    for (const r of recs) {
+      buf.push(r);
+    }
+    expect(buf.result()).toEqual({ records: recs, truncated: false });
+  });
+
+  it("keeps head + tail and drops the middle when over the cap", () => {
+    const buf = createBoundedRecordBuffer(2, 3);
+    for (let i = 0; i < 10; i++) {
+      buf.push({ i });
+    }
+    const { records, truncated } = buf.result();
+    expect(truncated).toBe(true);
+    // head = first 2, tail = last 3.
+    expect(records.map((r) => (r as { i: number }).i)).toEqual([0, 1, 7, 8, 9]);
   });
 });

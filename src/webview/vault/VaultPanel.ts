@@ -25,7 +25,7 @@ import type {
   VaultSessionEntry,
   VaultTimelineItem,
 } from "../../vault/types";
-import { getAgentIcon } from "./agentIcons";
+import { getAgentAccent, getAgentDisplayName, getAgentIcon, VAULT_ACCENTS } from "./agentIcons";
 import { type GroupMode, groupEntries } from "./grouping";
 
 /** Every message the panel can post — all webview→host vault messages carry entryId only. */
@@ -289,14 +289,8 @@ function isWithin(child: string, parent: string): boolean {
   return c === p || c.startsWith(`${p}/`) || c.startsWith(`${p}\\`);
 }
 
-const AGENT_LABELS: Record<string, string> = {
-  claude: "Claude",
-  codex: "Codex",
-  opencode: "OpenCode",
-};
-
 function agentLabel(agent: string): string {
-  return AGENT_LABELS[agent] ?? agent;
+  return getAgentDisplayName(agent) ?? agent;
 }
 
 /** "just now" / "5m" / "3h" / "2d" / "Jan 5" — compact relative age. */
@@ -1035,8 +1029,13 @@ export class VaultPanel {
 
   /** Tint the preview's user messages with the session's agent accent (D: #3). */
   private applyPreviewAgentAccent(agent: string): void {
-    this.previewEl.classList.remove("vault-preview--claude", "vault-preview--codex", "vault-preview--opencode");
-    const accent = getAgentIcon(agent)?.accent ?? (/^[a-z0-9-]+$/i.test(agent) ? agent : undefined);
+    // Clear every known accent class (derived, so a new accent is handled too).
+    for (const a of VAULT_ACCENTS) {
+      this.previewEl.classList.remove(`vault-preview--${a}`);
+    }
+    // Only a known, closed accent may become a class — never a raw session-derived
+    // agent string (W6 / the injection rule).
+    const accent = getAgentAccent(agent);
     if (accent) {
       this.previewEl.classList.add(`vault-preview--${accent}`);
     }
@@ -1275,7 +1274,9 @@ export class VaultPanel {
       this.closePreview();
     };
     this.onPreviewDocKeyDown = (e) => {
-      if (e.key === "Escape") {
+      // When the context menu is also open, let its own Esc handler dismiss only
+      // that layer first — one Esc shouldn't close both (W5).
+      if (e.key === "Escape" && !this.contextMenuEl) {
         this.closePreview();
       }
     };
@@ -1690,8 +1691,8 @@ export class VaultPanel {
     dot.className = "vault-row-dot";
     dot.title = agentLabel(entry.agent);
     dot.setAttribute("aria-label", agentLabel(entry.agent));
-    const icon = getAgentIcon(entry.agent);
-    const accent = icon?.accent ?? (/^[a-z0-9-]+$/i.test(entry.agent) ? entry.agent : undefined);
+    // Known accents only — a session-derived agent string never becomes a class (W6).
+    const accent = getAgentAccent(entry.agent);
     if (accent) {
       dot.classList.add(`vault-row-dot--${accent}`);
     }

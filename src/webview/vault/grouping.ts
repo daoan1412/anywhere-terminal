@@ -3,7 +3,7 @@
 // already-loaded entries so switching modes is instant.
 
 import type { VaultSessionEntry } from "../../vault/types";
-import type { VaultAccent } from "./agentIcons";
+import { getAgentAccent, getAgentDisplayName, type VaultAccent } from "./agentIcons";
 
 export type GroupMode = "recent" | "agent" | "folder";
 
@@ -19,18 +19,6 @@ export interface VaultGroup {
   /** Whether the cwd chip should be suppressed on rows (Folder mode). */
   hideCwd: boolean;
   entries: VaultSessionEntry[];
-}
-
-const AGENT_DISPLAY: Record<string, string> = {
-  claude: "Claude Code",
-  codex: "Codex",
-  opencode: "OpenCode",
-};
-
-const ACCENTS = new Set<VaultAccent>(["claude", "codex", "opencode"]);
-
-function accentFor(agent: string): VaultAccent | undefined {
-  return ACCENTS.has(agent as VaultAccent) ? (agent as VaultAccent) : undefined;
 }
 
 function byModifiedDesc(a: VaultSessionEntry, b: VaultSessionEntry): number {
@@ -75,8 +63,8 @@ export function groupEntries(entries: VaultSessionEntry[], mode: GroupMode): Vau
         ? {
             mode,
             key,
-            label: AGENT_DISPLAY[key] ?? key,
-            accent: accentFor(key),
+            label: getAgentDisplayName(key) ?? key,
+            accent: getAgentAccent(key),
             hideCwd: false,
             entries: groupEntriesList,
           }

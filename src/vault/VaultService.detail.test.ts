@@ -54,6 +54,16 @@ describe("VaultService.getDetail", () => {
     expect(claude).toHaveBeenCalledWith("abc", 800);
   });
 
+  it("clamps a garbage or oversized limit so it can't disable the bound (W2)", async () => {
+    const claude = vi.fn(async (id: string, _limit?: number) => detail(`claude:${id}`));
+    const svc = new VaultService({ detailReaders: makeDetailReaders({ claude }) });
+    await svc.getDetail("claude:a", Number.POSITIVE_INFINITY);
+    await svc.getDetail("claude:a", Number.NaN);
+    await svc.getDetail("claude:a", -10);
+    await svc.getDetail("claude:a", 999999);
+    expect(claude.mock.calls.map((c) => c[1])).toEqual([undefined, undefined, undefined, 5000]);
+  });
+
   it("returns null for an unknown agent or a malformed id", async () => {
     const svc = new VaultService({ detailReaders: makeDetailReaders() });
     expect(await svc.getDetail("mystery:1")).toBeNull();

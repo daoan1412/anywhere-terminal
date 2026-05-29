@@ -79,6 +79,24 @@ describe("mapOpencodeRows", () => {
     expect(out.stats.messageCount).toBe(2); // summary message not counted
   });
 
+  it("does not count textless user rows or unknown-role rows (W7)", () => {
+    const messages: OcMessageRow[] = [
+      msg("m1", "user", 1), // real user turn (has text)
+      msg("m2", "user", 2), // tool-result-only user row (no text) — not a turn
+      msg("m3", "assistant", 3), // tool-only assistant turn (no text) — still a turn
+      { id: "m4", timeCreated: 4, data: { role: "tool" } }, // unknown role — skipped
+    ];
+    const parts: OcPartRow[] = [
+      textPart("m1", 1, "the only real prompt"),
+      toolPart("m3", 3, "read", { filePath: "/a.ts" }),
+    ];
+    const out = mapOpencodeRows(messages, parts);
+    // 1 user (with text) + 1 assistant (tool-only) = 2; the textless user and the
+    // unknown-role row are excluded.
+    expect(out.stats.messageCount).toBe(2);
+    expect(out.firstPrompt).toBe("the only real prompt");
+  });
+
   it("computes a cheap diff stat for an edit tool from its unified-diff metadata", () => {
     const messages: OcMessageRow[] = [msg("m1", "user", 1), msg("m2", "assistant", 2)];
     const parts: OcPartRow[] = [

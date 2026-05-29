@@ -106,14 +106,23 @@ const opencode: AgentVaultDefinition = {
   cwdPolicy: "preserve",
 };
 
-export const AGENT_REGISTRY: Record<string, AgentVaultDefinition> = {
-  claude,
-  codex,
-  opencode,
-};
+/**
+ * The vault's agent ids, in stable list order. SINGLE source of truth — the
+ * union below is derived from this array (not maintained separately), and
+ * `AGENT_RECORD` is typed against the union, so adding an id here forces a
+ * registry entry + a reader and is enforced at compile time (W3).
+ */
+export const VAULT_AGENT_IDS = ["claude", "codex", "opencode"] as const;
+export type VaultAgentId = (typeof VAULT_AGENT_IDS)[number];
 
-/** Registry records in a stable order (claude, codex, opencode). */
-export const AGENT_DEFINITIONS: AgentVaultDefinition[] = [claude, codex, opencode];
+// `satisfies Record<VaultAgentId, …>` makes omitting an agent a compile error
+// while keeping the public map string-indexable (callers pass `entry.agent`).
+const AGENT_RECORD = { claude, codex, opencode } satisfies Record<VaultAgentId, AgentVaultDefinition>;
+
+export const AGENT_REGISTRY: Record<string, AgentVaultDefinition> = AGENT_RECORD;
+
+/** Registry records in `VAULT_AGENT_IDS` order. */
+export const AGENT_DEFINITIONS: AgentVaultDefinition[] = VAULT_AGENT_IDS.map((id) => AGENT_RECORD[id]);
 
 export function getAgentDefinition(id: string): AgentVaultDefinition | undefined {
   return AGENT_REGISTRY[id];

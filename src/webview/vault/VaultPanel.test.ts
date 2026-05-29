@@ -191,6 +191,16 @@ describe("VaultPanel row rendering (redesign 4_1)", () => {
     expect(host.querySelector(".vault-row .vault-badge")).toBeNull();
   });
 
+  it("never turns an unknown/session-derived agent into a CSS class (W6)", () => {
+    const host = createHost();
+    const panel = new VaultPanel({ host, postMessage: () => {}, getInitialCollapsed: () => false });
+    panel.render(result([entry({ id: "ghost:a", agent: "ghost is-maximized" })]));
+    const dot = host.querySelector<HTMLElement>(".vault-row .vault-row-dot");
+    // Only the closed accent set may add a class; an unknown agent adds none.
+    expect(dot?.className).toBe("vault-row-dot");
+    expect(Array.from(dot?.classList ?? []).some((c) => c.startsWith("vault-row-dot--"))).toBe(false);
+  });
+
   it("never renders a fork button and never posts vaultFork", () => {
     const host = createHost();
     const posted: { type: string }[] = [];
@@ -624,6 +634,21 @@ describe("VaultPanel session preview (redesign 5_2)", () => {
     // Restoring returns to the floating size.
     host.querySelector<HTMLButtonElement>(".vault-preview-maximize")?.click();
     expect(host.querySelector(".vault-preview")?.classList.contains("vault-preview--max")).toBe(false);
+  });
+
+  it("Escape with the context menu open dismisses only the menu, leaving the preview open (W5)", () => {
+    const host = createHost();
+    const panel = new VaultPanel({ host, postMessage: () => {}, getInitialCollapsed: () => false });
+    panel.render(result([entry({ id: "claude:a" })]));
+    const row = host.querySelector<HTMLElement>(".vault-row");
+    row?.click(); // open the preview first (registers its Esc listener first)
+    expect(host.querySelector(".vault-preview.is-open")).not.toBeNull();
+    row?.dispatchEvent(new MouseEvent("contextmenu", { bubbles: true, cancelable: true, clientX: 5, clientY: 5 }));
+    expect(host.querySelector(".vault-context-menu")).not.toBeNull();
+
+    document.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
+    expect(host.querySelector(".vault-context-menu")).toBeNull(); // menu dismissed
+    expect(host.querySelector(".vault-preview.is-open")).not.toBeNull(); // preview stays open
   });
 
   it("renders thinking blocks and indents AI output; user messages carry the agent accent", () => {

@@ -1,7 +1,13 @@
 // src/vault/registry.test.ts — Unit tests for the agent registry.
 
 import { describe, expect, it } from "vitest";
-import { AGENT_DEFINITIONS, AGENT_REGISTRY, CLAUDE_AUTH_ENV_ALLOWLIST, getAgentDefinition } from "./registry";
+import {
+  AGENT_DEFINITIONS,
+  AGENT_REGISTRY,
+  CLAUDE_AUTH_ENV_ALLOWLIST,
+  getAgentDefinition,
+  VAULT_AGENT_IDS,
+} from "./registry";
 import type { CommandTemplate } from "./types";
 
 function staticTokens(t: CommandTemplate): string[] {
@@ -12,6 +18,15 @@ describe("AGENT_REGISTRY", () => {
   it("ships records for claude, codex, opencode", () => {
     expect(Object.keys(AGENT_REGISTRY).sort()).toEqual(["claude", "codex", "opencode"]);
     expect(AGENT_DEFINITIONS.map((d) => d.id)).toEqual(["claude", "codex", "opencode"]);
+  });
+
+  it("every VAULT_AGENT_IDS entry has a registry definition (single source, no gap)", () => {
+    expect([...VAULT_AGENT_IDS]).toEqual(["claude", "codex", "opencode"]);
+    for (const id of VAULT_AGENT_IDS) {
+      expect(getAgentDefinition(id)).toBeDefined();
+    }
+    // AGENT_DEFINITIONS is derived from VAULT_AGENT_IDS, so order tracks it.
+    expect(AGENT_DEFINITIONS.map((d) => d.id)).toEqual([...VAULT_AGENT_IDS]);
   });
 
   it("every record's resume template carries the {{sessionId}} token", () => {

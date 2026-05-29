@@ -3,6 +3,29 @@
 
 export type SessionStoreFormat = "jsonl" | "sqlite";
 
+/**
+ * A vault entry's globally-unique handle: `<agent>:<sessionId>`. The agent id
+ * never contains a colon, so the FIRST colon is the separator and the session
+ * id keeps any later colons (Claude's nested subagent token
+ * `<parent>:subagent:<stem>` rides along intact). Centralized here so every
+ * producer/consumer parses the handle identically (S1).
+ */
+export function formatEntryId(agent: string, sessionId: string): string {
+  return `${agent}:${sessionId}`;
+}
+
+export function parseEntryId(entryId: string): { agent: string; sessionId: string } | null {
+  const sep = entryId.indexOf(":");
+  if (sep <= 0) {
+    return null;
+  }
+  const sessionId = entryId.slice(sep + 1);
+  if (!sessionId) {
+    return null;
+  }
+  return { agent: entryId.slice(0, sep), sessionId };
+}
+
 export interface AgentDetectRule {
   /** Executable basename used to detect / launch the agent. */
   executable: string;
@@ -153,7 +176,12 @@ export interface VaultSessionDetail {
   /** True when older timeline items were dropped to stay within the bound. */
   truncated?: boolean;
   stats: { messageCount: number; toolCount: number; subagentCount: number; tokenCount?: number };
-  /** True when built from an index, not a transcript (Codex without a rollout). */
+  /**
+   * True when the detail is a limited view, not the full transcript: either an
+   * index-only fallback (Codex without a rollout) OR a transcript too large to
+   * read whole (bounded head+tail read — the middle is omitted). `limitedReason`
+   * carries the specific cause for the preview's notice.
+   */
   partial?: boolean;
   /** Short reason surfaced in the preview when `partial`. */
   limitedReason?: string;

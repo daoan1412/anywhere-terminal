@@ -8,7 +8,7 @@
 // recent-activity tail, and synthetic / sidechain records are excluded so the
 // preview reflects the main conversation.
 
-import type { VaultActivityStep, VaultTimelineItem } from "../types";
+import type { VaultActivityStep, VaultSessionDetail, VaultTimelineItem } from "../types";
 
 /** ~600-char cap per text field (D5). */
 export const MAX_DETAIL_TEXT = 600;
@@ -18,6 +18,84 @@ export const MAX_ACTIVITY_STEPS = 12;
 export const MAX_MESSAGE_TEXT = 2000;
 /** Most-recent-N timeline items surfaced (the preview is still bounded). */
 export const MAX_TIMELINE_ITEMS = 400;
+/** Hard ceiling on a webview-supplied `limit` — caps how far load-more can grow
+ *  the timeline so a forged/garbage value can't disable the bound (W2). */
+export const MAX_DETAIL_LIMIT = 5000;
+/** Records kept from the head of a transcript (enough for `firstPrompt` + early
+ *  context) when a file is too large to materialize whole (W1). */
+export const DETAIL_HEAD_RECORDS = 100;
+/** Records kept from the tail of a transcript (the most-recent timeline) when a
+ *  file is too large to materialize whole (W1). */
+export const DETAIL_TAIL_RECORDS = 4000;
+
+/**
+ * Clamp a webview-supplied `limit` to a finite, positive integer ≤
+ * {@link MAX_DETAIL_LIMIT}. `undefined` / non-finite / ≤0 → `undefined` so the
+ * reader falls back to its default bound (W2). Without this, `Infinity`/`NaN`
+ * would slip past `typeof === "number"` and defeat `boundTimeline`.
+ */
+export function clampDetailLimit(limit: number | undefined): number | undefined {
+  if (limit === undefined || !Number.isFinite(limit) || limit <= 0) {
+    return undefined;
+  }
+  return Math.min(Math.floor(limit), MAX_DETAIL_LIMIT);
+}
+
+/**
+ * Bounded record collector for streaming a transcript without materializing the
+ * whole file (W1). Push every parsed record; `result()` returns the retained
+ * records IN ORDER plus `truncated` when the middle was dropped. Keeps the first
+ * `headMax` records (so `firstPrompt`/early context survive) and the last
+ * `tailMax` via an O(1) ring buffer (so the most-recent timeline survives).
+ * Below `headMax + tailMax` total, every record is kept (exact, untruncated).
+ */
+export function createBoundedRecordBuffer(headMax = DETAIL_HEAD_RECORDS, tailMax = DETAIL_TAIL_RECORDS) {
+  const cap = headMax + tailMax;
+  let all: Rec[] | null = [];
+  const head: Rec[] = [];
+  const ring: Rec[] = new Array(Math.max(1, tailMax));
+  let ringStart = 0;
+  let ringCount = 0;
+
+  function ringPush(rec: Rec): void {
+    ring[(ringStart + ringCount) % tailMax] = rec;
+    if (ringCount < tailMax) {
+      ringCount++;
+    } else {
+      ringStart = (ringStart + 1) % tailMax;
+    }
+  }
+
+  return {
+    push(rec: Rec): void {
+      if (all) {
+        all.push(rec);
+        if (all.length > cap) {
+          // Switch to bounded mode: freeze the head, stream the rest through the ring.
+          for (let i = 0; i < headMax; i++) {
+            head.push(all[i]);
+          }
+          for (let i = headMax; i < all.length; i++) {
+            ringPush(all[i]);
+          }
+          all = null;
+        }
+        return;
+      }
+      ringPush(rec);
+    },
+    result(): { records: Rec[]; truncated: boolean } {
+      if (all) {
+        return { records: all, truncated: false };
+      }
+      const tail: Rec[] = [];
+      for (let i = 0; i < ringCount; i++) {
+        tail.push(ring[(ringStart + i) % tailMax]);
+      }
+      return { records: [...head, ...tail], truncated: true };
+    },
+  };
+}
 
 /** Keep only the most-recent `limit` items; flag when older were dropped. */
 export function boundTimeline(
@@ -69,6 +147,28 @@ export interface ClassifiedDetail {
   timeline: VaultTimelineItem[];
   truncated?: boolean;
   stats: { messageCount: number; toolCount: number; subagentCount: number; tokenCount?: number };
+}
+
+/** Shown when a transcript was too large to read whole (head+tail kept). */
+export const SOURCE_TRUNCATED_REASON =
+  "Very large session — showing the start and the most recent messages. Resume to see all of it.";
+
+/**
+ * Assemble a `VaultSessionDetail` from a classifier result. A SOURCE read
+ * truncation (the bounded head+tail read dropped the middle — NOT recoverable
+ * by raising `limit`) is surfaced via `partial` + `limitedReason`, kept DISTINCT
+ * from the classifier's own `truncated`, which means the timeline was bounded to
+ * the requested window and IS pageable via load-more (W1 / contracts P2).
+ */
+export function finalizeDetail(
+  entryId: string,
+  detail: Omit<VaultSessionDetail, "entryId">,
+  sourceTruncated: boolean,
+): VaultSessionDetail {
+  if (!sourceTruncated) {
+    return { entryId, ...detail };
+  }
+  return { entryId, ...detail, partial: true, limitedReason: detail.limitedReason ?? SOURCE_TRUNCATED_REASON };
 }
 
 /** Collapse whitespace, trim, cap at `max`, append an ellipsis when cut. */
@@ -210,13 +310,14 @@ export function classifyClaudeStyleEvents(records: Rec[], opts: ClassifyOptions 
   // Mutable pool — each Agent/Task call consumes its matching stub (by
   // description); whatever is left is appended after the walk.
   const stubs = [...(opts.childStubs ?? [])];
+  const totalStubs = opts.childStubs?.length ?? 0;
   let firstPrompt: string | undefined;
   const activity: VaultActivityStep[] = [];
   const timeline: VaultTimelineItem[] = [];
   let latestMessage: ClassifiedDetail["latestMessage"];
   let messageCount = 0;
   let toolCount = 0;
-  let subagentCount = 0;
+  let spawnCalls = 0;
   let outputTokens = 0;
   let lastContextTokens = 0;
   let sawUsage = false;
@@ -287,7 +388,7 @@ export function classifyClaudeStyleEvents(records: Rec[], opts: ClassifyOptions 
           const name = str(block.name) ?? "tool";
           const input = block.input;
           if (name === "Task" || name === "Agent") {
-            subagentCount++;
+            spawnCalls++;
             const inObj = asObj(input) ?? {};
             const sub = str(inObj.subagent_type) ?? str(inObj.agent) ?? "subagent";
             const prompt = str(inObj.prompt) ?? str(inObj.description);
@@ -342,10 +443,13 @@ export function classifyClaudeStyleEvents(records: Rec[], opts: ClassifyOptions 
   // Subagent files with no matched spawn call (e.g. a teammate launched a
   // different way) still surface — appended in their own chronological order.
   for (const stub of stubs.sort((a, b) => (a.timestamp ?? 0) - (b.timestamp ?? 0))) {
-    subagentCount++;
     timeline.push(stubToItem(stub, stub.agentType ?? "subagent", undefined, stub.timestamp));
   }
 
+  // Count distinct subagents as max(spawn calls, transcript stubs): when both
+  // exist but a description mismatch leaves a call unmatched, this avoids
+  // double-counting the same child (the plain step AND the appended stub) (W4).
+  const subagentCount = Math.max(spawnCalls, totalStubs);
   const tokenCount = sawUsage ? outputTokens + lastContextTokens : undefined;
   const bounded = boundTimeline(timeline, limit);
   return {
