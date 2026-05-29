@@ -1,13 +1,28 @@
-// src/vault/sqlite.ts — WAL-safe, read-only SQLite access via the host `sqlite3`
-// CLI (no new native dependency). See: design.md D3,
+// src/vault/sqlite.ts — WAL-safe, read-only SQLite access (no new native
+// dependency). See: design.md D3, D13, D14,
 // specs/agent-session-index/spec.md (WAL-safe read-only SQLite access),
 // docs/research/20260528-cmux-vault-mechanism.md §4,§7.
 //
-// We copy the live DB + its `-wal`/`-shm` sidecars into a temp dir and query the
-// copy in read-only JSON mode, so a running agent's writes are never disturbed
-// and a checkpoint mid-read can't corrupt our snapshot. The query string is
-// always static (search/filter happens client-side), and it is passed as a
-// single argv element to `execFile` — no shell, no interpolation, no injection.
+// ENGINE (D14): PREFER the in-process `node:sqlite` built-in (native row values);
+// fall back to the host `sqlite3` CLI only when it is unavailable. The CLI's
+// `-json` output formatter is pathologically slow (30s+ of CPU) for sessions with
+// large message blobs (e.g. embedded diffs), which blew past the query timeout
+// and surfaced as "Session not found" for big sessions; `node:sqlite` reads the
+// same rows in ~20ms. The static query is passed as a single argv element to
+// `execFile` (CLI path) — no shell, no interpolation, no injection.
+//
+// SNAPSHOT: we copy the live DB + its `-wal`/`-shm` sidecars into a temp dir and
+// query the copy, so a running agent's writes are never disturbed and a
+// checkpoint mid-read can't corrupt our snapshot. (We do NOT read the live store
+// in place: a read-only open of a live WAL DB can silently return an empty result
+// instead of erroring — indistinguishable from a genuinely-empty session — so it
+// would surface "not found" for real sessions. See D13.)
+//
+// PERF (D13): the copy is a copy-on-write CLONE (APFS `clonefile` / Linux reflink,
+// via `cp -c` / `cp --reflink=auto`) when the filesystem supports it — near-instant
+// regardless of size — falling back to a byte copy otherwise, keeping a multi-GB
+// store (OpenCode's exceeds 1 GB) from dominating list/detail/resume latency while
+// preserving exact snapshot semantics.
 
 import { execFile } from "node:child_process";
 import * as fs from "node:fs/promises";
@@ -21,6 +36,9 @@ const execFileAsync = promisify(execFile);
 const PROBE_TIMEOUT_MS = 2000;
 /** Per-query cap so a hung `sqlite3` can't stall the vault list. */
 const QUERY_TIMEOUT_MS = 5000;
+/** Cap for the clone/copy step (a reflink clone is ms; a byte-copy fallback of a
+ *  multi-GB store needs headroom). */
+const COPY_TIMEOUT_MS = 30000;
 /** `sqlite3 -json` output is bounded by the readers' LIMITs; keep headroom. */
 const MAX_BUFFER_BYTES = 64 * 1024 * 1024;
 
@@ -53,6 +71,29 @@ export interface SqliteDeps {
   runNodeQuery?(dbCopy: string, sql: string): Promise<SqliteResult>;
 }
 
+/**
+ * Copy `src`→`dest` as a copy-on-write CLONE when the platform/filesystem
+ * supports it (APFS `clonefile` via `cp -c`, Linux reflink via `cp --reflink=auto`
+ * — near-instant regardless of size), falling back to a byte copy otherwise. A
+ * clone is an independent file view, so it has the same snapshot semantics as a
+ * byte copy while avoiding multi-GB I/O for stores like OpenCode's 1.4 GB db (D13).
+ */
+async function cloneOrCopy(src: string, dest: string): Promise<void> {
+  try {
+    if (process.platform === "darwin") {
+      await execFileAsync("cp", ["-c", src, dest], { timeout: COPY_TIMEOUT_MS });
+      return;
+    }
+    if (process.platform === "linux") {
+      await execFileAsync("cp", ["--reflink=auto", src, dest], { timeout: COPY_TIMEOUT_MS });
+      return;
+    }
+  } catch {
+    // clone tool missing / clone unsupported (e.g. cross-volume) — byte-copy below.
+  }
+  await fs.copyFile(src, dest);
+}
+
 const defaultDeps: SqliteDeps = {
   exec: (file, args, options) =>
     execFileAsync(file, args, { timeout: options.timeout, maxBuffer: MAX_BUFFER_BYTES }).then(({ stdout, stderr }) => ({
@@ -67,7 +108,7 @@ const defaultDeps: SqliteDeps = {
       return false;
     }
   },
-  copy: (src, dest) => fs.copyFile(src, dest),
+  copy: (src, dest) => cloneOrCopy(src, dest),
   mkdtemp: () => fs.mkdtemp(path.join(os.tmpdir(), "at-vault-")),
   rmrf: (dir) => fs.rm(dir, { recursive: true, force: true }),
 };
@@ -163,29 +204,36 @@ function errorMessage(err: unknown): string {
   return err instanceof Error ? err.message : String(err);
 }
 
+/** One `sqlite3 -readonly -json` attempt against `dbFile` (live or copy). */
+async function attemptQuery(deps: SqliteDeps, dbFile: string, sql: string): Promise<SqliteResult> {
+  try {
+    const { stdout } = await deps.exec("sqlite3", ["-readonly", "-json", dbFile, sql], { timeout: QUERY_TIMEOUT_MS });
+    const trimmed = stdout.trim();
+    // `sqlite3 -json` prints nothing for a zero-row result.
+    if (trimmed === "") {
+      return { rows: [], status: "ok" };
+    }
+    const parsed = JSON.parse(trimmed);
+    if (!Array.isArray(parsed)) {
+      return { rows: [], status: "query-error", error: "sqlite3 did not return a JSON array" };
+    }
+    return { rows: parsed as Record<string, unknown>[], status: "ok" };
+  } catch (err) {
+    return { rows: [], status: "query-error", error: errorMessage(err) };
+  }
+}
+
 async function runQuery(deps: SqliteDeps, dbCopy: string, sql: string): Promise<SqliteResult> {
-  let lastError: string | undefined;
   // One retry: a transient exec failure or a torn JSON read shouldn't drop the
   // whole agent.
+  let last: SqliteResult = { rows: [], status: "query-error", error: "no attempt" };
   for (let attempt = 0; attempt < 2; attempt++) {
-    try {
-      const { stdout } = await deps.exec("sqlite3", ["-readonly", "-json", dbCopy, sql], { timeout: QUERY_TIMEOUT_MS });
-      const trimmed = stdout.trim();
-      // `sqlite3 -json` prints nothing for a zero-row result.
-      if (trimmed === "") {
-        return { rows: [], status: "ok" };
-      }
-      const parsed = JSON.parse(trimmed);
-      if (!Array.isArray(parsed)) {
-        lastError = "sqlite3 did not return a JSON array";
-        continue;
-      }
-      return { rows: parsed as Record<string, unknown>[], status: "ok" };
-    } catch (err) {
-      lastError = errorMessage(err);
+    last = await attemptQuery(deps, dbCopy, sql);
+    if (last.status === "ok") {
+      return last;
     }
   }
-  return { rows: [], status: "query-error", error: lastError };
+  return last;
 }
 
 /**
@@ -197,12 +245,15 @@ async function runQuery(deps: SqliteDeps, dbCopy: string, sql: string): Promise<
  * - `ok`         — `rows` holds the parsed result (possibly empty)
  */
 export async function readSqlite(dbPath: string, sql: string, deps: SqliteDeps = defaultDeps): Promise<SqliteResult> {
-  // Pick an engine: the host `sqlite3` CLI (preferred — proven here, replays
-  // WAL natively) or, when that's absent (typically Windows), the in-process
-  // `node:sqlite` built-in. Neither → `no-sqlite3` (graceful empty, no crash).
-  const useCli = await probeSqlite(deps);
-  const useNode = useCli ? false : await probeNodeSqlite(deps);
-  if (!useCli && !useNode) {
+  // Pick an engine: PREFER the in-process `node:sqlite` built-in (returns native
+  // row values) over the `sqlite3` CLI. The CLI's `-json` output formatter is
+  // pathologically slow (30s+ of CPU for a session with large message blobs —
+  // e.g. embedded diffs), which blew past the query timeout and surfaced as
+  // "Session not found" for big sessions (D14). The CLI remains the fallback for
+  // runtimes without `node:sqlite`. Neither → `no-sqlite3` (graceful empty).
+  const useNode = await probeNodeSqlite(deps);
+  const useCli = useNode ? false : await probeSqlite(deps);
+  if (!useNode && !useCli) {
     return { rows: [], status: "no-sqlite3" };
   }
 
@@ -216,6 +267,22 @@ export async function readSqlite(dbPath: string, sql: string, deps: SqliteDeps =
     return { rows: [], status: "no-db" };
   }
 
+  return readSqliteViaCopy(deps, dbPath, sql, useCli);
+}
+
+/**
+ * Snapshot the DB (a copy-on-write clone where supported, else a byte copy; see
+ * `cloneOrCopy`) plus its `-wal`/`-shm` sidecars into a temp dir, query the
+ * snapshot read-only, then delete it. Never reads the live store in place (a
+ * read-only WAL open can silently return empty → false "not found"; D13). Never
+ * throws — failures map to `query-error`.
+ */
+async function readSqliteViaCopy(
+  deps: SqliteDeps,
+  dbPath: string,
+  sql: string,
+  useCli: boolean,
+): Promise<SqliteResult> {
   let tempDir: string | undefined;
   try {
     tempDir = await deps.mkdtemp();

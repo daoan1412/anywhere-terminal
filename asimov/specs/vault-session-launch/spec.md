@@ -5,9 +5,18 @@
 
 The system SHALL resume a selected session by spawning the agent's native resume command — built from the registry template with the session's captured per-session flags (model, permission/approval mode, sandbox, reasoning effort, agent) re-injected — in a NEW AnyWhere Terminal session whose working directory is the session's recorded `cwd`. The new session SHALL be surfaced as a selectable tab in the active view (the host posts the same tab-created notification the normal new-tab flow uses). WHEN the agent executable cannot be launched, the system SHALL surface an error notice rather than leaving a silently-broken terminal.
 
+### Requirement: Launch resolves a single entry by id
+
+WHEN resolving the launch options for a resume or fork, the system SHALL resolve the target entry directly by its id from only the relevant agent's store (a point or locate-by-id lookup), and SHALL NOT aggregate or scan every agent's session store to find it. Resolving a single entry SHALL NOT trigger work scoped to other agents (e.g. the OpenCode version probe SHALL run only when the target entry is an OpenCode session). The agent's store location SHALL be derived from the id host-side; a webview-supplied path SHALL NOT be trusted.
+
+#### Scenario: Resume does not scan unrelated stores
+
+- **WHEN** the user resumes a Claude or Codex session
+- **THEN** the OpenCode store is not read and the `opencode --version` probe is not spawned to satisfy that launch
+
 ### Requirement: Fork a session when supported
 
-The system SHALL offer a fork action that runs the agent's fork command in a new terminal. For OpenCode, fork SHALL be available only when the detected `opencode --version` is ≥ 1.14.50; when fork is unsupported for an agent or version, the fork action SHALL be unavailable for that entry rather than failing at launch.
+The system SHALL offer a fork action that runs the agent's fork command in a new terminal. For OpenCode, fork SHALL be available only when the detected `opencode --version` is ≥ 1.1.54 (the release that introduced `--fork`); when fork is unsupported for an agent or version, the fork action SHALL be unavailable for that entry rather than failing at launch.
 
 ### Requirement: Preserve Claude auth/config on launch (best-effort)
 

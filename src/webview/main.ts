@@ -203,14 +203,19 @@ function runAuxCollapseAnimation(apply: () => void): void {
   }, 170);
 }
 
-/** Resolve the active terminal pane's tracked cwd (OSC 7), or null. */
-function getActivePaneCwd(): string | null {
+/** The active terminal pane's session id, or null. */
+function getActivePaneId(): string | null {
   const tabId = store.activeTabId;
   if (!tabId) {
     return null;
   }
-  const paneId = store.tabActivePaneIds.get(tabId) ?? tabId;
-  return store.terminals.get(paneId)?.cwd ?? null;
+  return store.tabActivePaneIds.get(tabId) ?? tabId;
+}
+
+/** Resolve the active terminal pane's tracked cwd (OSC 7), or null. */
+function getActivePaneCwd(): string | null {
+  const paneId = getActivePaneId();
+  return paneId ? (store.terminals.get(paneId)?.cwd ?? null) : null;
 }
 
 /** Re-read the vault session list, but only while the section is expanded. */
@@ -222,21 +227,71 @@ function refreshVaultIfOpen(): void {
 
 /** Last active-pane cwd the vault was synced/refreshed against (dedupe guard). */
 let lastSyncedVaultCwd: string | null = null;
+/**
+ * The active pane's REAL cwd as resolved by the HOST (lsof/`/proc` live cwd →
+ * shell-integration-tracked → spawn cwd). Authoritative over the webview's
+ * OSC-7-only value, so "This folder only" scopes correctly even without shell
+ * integration. Cleared on pane change; refreshed via `requestVaultContextCwd`
+ * (pane switch / vault open / `cd`). Updated by the `vaultContextCwd` reply.
+ */
+let hostContextCwd: string | null = null;
+/** Workspace root, for the folder-filter fallback when no pane cwd resolves. */
+let vaultWorkspaceRoot: string | null = null;
+/** Debounce for re-probing the active pane's cwd after terminal output (a `cd`). */
+let vaultCwdReprobeTimer: ReturnType<typeof setTimeout> | undefined;
+
+/**
+ * Resolve the folder-filter scope cwd: the host-resolved value first (reliable,
+ * OSC-7-independent), then the webview's OSC 7 value, then the workspace root.
+ */
+function resolveVaultContextCwd(): string | null {
+  return hostContextCwd ?? getActivePaneCwd() ?? vaultWorkspaceRoot ?? null;
+}
+
+/**
+ * Ask the host for the active pane's REAL cwd so the folder filter scopes to the
+ * focused terminal's actual folder without depending on OSC 7 / shell
+ * integration. No-op when no pane is active; the `vaultContextCwd` reply updates
+ * the filter.
+ */
+function requestVaultContextCwd(): void {
+  const sessionId = getActivePaneId();
+  if (sessionId) {
+    vscode.postMessage({ type: "requestVaultContextCwd", sessionId });
+  }
+}
 
 /**
  * Point the vault's folder filter at the active pane, then refresh if open.
- * Only re-reads the agent stores when the active-pane cwd actually CHANGED —
- * switching between two panes in the same folder would otherwise trigger a
- * redundant disk scan with no visible change. `setContextCwd` still runs every
- * call so the folder filter re-scopes correctly.
+ * The active pane changed, so the previous host-resolved cwd is stale: clear it,
+ * apply the optimistic value now, and ask the host for the authoritative cwd.
+ * Only re-reads the agent stores when the scope cwd actually CHANGED.
  */
 function syncVaultToActivePane(): void {
-  const cwd = getActivePaneCwd();
+  hostContextCwd = null;
+  const cwd = resolveVaultContextCwd();
   vaultPanel?.setContextCwd(cwd);
+  requestVaultContextCwd();
   if (cwd !== lastSyncedVaultCwd) {
     lastSyncedVaultCwd = cwd;
     refreshVaultIfOpen();
   }
+}
+
+/**
+ * After the active pane emits output, re-probe its live cwd (debounced) so a bare
+ * `cd` re-scopes "This folder only" without shell integration. Gated to the
+ * active pane + filter-on + vault-open so it costs nothing otherwise.
+ */
+function scheduleVaultCwdReprobe(tabId: string): void {
+  if (!vaultPanel || vaultPanel.isCollapsed() || !vaultPanel.isFolderOnly()) {
+    return;
+  }
+  if (tabId !== getActivePaneId()) {
+    return;
+  }
+  clearTimeout(vaultCwdReprobeTimer);
+  vaultCwdReprobeTimer = setTimeout(() => requestVaultContextCwd(), 400);
 }
 
 // File-tree controller — instantiated lazily on init once we know workspaceRoot +
@@ -396,6 +451,10 @@ const routeMessage = createMessageRouter({
     } else {
       flowControl.ackChars(dataLen, msg.tabId);
     }
+    // A `cd` in the focused pane changes its real cwd with no other signal when
+    // shell integration is off — re-probe the host cwd (debounced) so the open,
+    // folder-scoped vault re-filters. Cheap: gated to the active pane + filter on.
+    scheduleVaultCwdReprobe(msg.tabId);
   },
   onExit(msg) {
     const instance = store.terminals.get(msg.tabId);
@@ -535,6 +594,7 @@ const routeMessage = createMessageRouter({
     fileTreeController?.handleReadDirectoryResponse(msg);
   },
   onWorkspaceRootChanged(msg) {
+    vaultWorkspaceRoot = msg.rootPath; // keep the folder-filter fallback in sync
     fileTreeController?.handleWorkspaceRootChanged(msg);
   },
   onSetFileTreePosition(msg) {
@@ -574,6 +634,15 @@ const routeMessage = createMessageRouter({
   onVaultSessionDetailResponse(msg) {
     vaultPanel?.handleSessionDetailResponse(msg);
   },
+  onVaultContextCwd(msg) {
+    // Drop a reply for a pane that is no longer active (stale-guard): the user
+    // switched panes before this resolved, and a later request owns the scope.
+    if (msg.sessionId !== getActivePaneId()) {
+      return;
+    }
+    hostContextCwd = msg.cwd;
+    vaultPanel?.setContextCwd(resolveVaultContextCwd());
+  },
   onOpenVault() {
     // Open the vault section (it sits above the file tree, both visible) and
     // re-read the agents' session stores — source files are the source of
@@ -584,6 +653,8 @@ const routeMessage = createMessageRouter({
     } else {
       vaultPanel?.expand();
     }
+    // Scope the folder filter to the focused pane's real cwd on open.
+    requestVaultContextCwd();
   },
   onFlashPane(msg) {
     // Visual confirmation for title-bar export click. Adds `.export-flash`
@@ -678,6 +749,7 @@ const routeMessage = createMessageRouter({
 
 function handleInit(msg: InitMessage): void {
   store.currentConfig = { ...msg.config };
+  vaultWorkspaceRoot = msg.workspaceRoot ?? null; // folder-filter fallback scope
   const validTabIds = new Set(msg.tabs.map((t) => t.id));
 
   const restoredLayouts = store.restore();
@@ -796,18 +868,22 @@ function handleInit(msg: InitMessage): void {
       // Grouping mode — default "recent". Persisted across reloads.
       getInitialGroupMode: () => store.getState().vaultGroupMode ?? "recent",
       persistGroupMode: (mode) => store.updateState({ vaultGroupMode: mode }),
-      // Live active-pane cwd, pulled on each render so the folder filter uses
-      // the current OSC 7 value (not a null captured before the shell emitted
-      // it). Toggling "This folder only" then scopes immediately.
-      getContextCwd: () => getActivePaneCwd(),
+      // Folder-filter scope, pulled on each render: the HOST-resolved cwd first
+      // (lsof/`/proc` live → shell-integration tracked → spawn cwd — reliable and
+      // OSC-7-independent), then the webview's OSC 7 value, then the workspace
+      // root. Without the host value, "This folder only" couldn't distinguish
+      // panes / react to `cd` when shell integration is off.
+      getContextCwd: () => resolveVaultContextCwd(),
       // VS-Code-style pixel FLIP of the shared region so expanding/collapsing
       // the vault doesn't bounce the file tree (the grow-sibling).
       animateCollapse: (apply) => runAuxCollapseAnimation(apply),
     });
-    // Seed the folder-filter context to the current active pane; it updates on
-    // every pane select / tab switch. A vault that restored expanded refreshes
-    // itself via the constructor seed (setCollapsed's collapsed→expanded path).
-    vaultPanel.setContextCwd(getActivePaneCwd());
+    // Seed the folder-filter context to the current active pane (optimistic), then
+    // ask the host for its authoritative cwd; it updates on every pane select /
+    // tab switch / `cd`. A vault that restored expanded refreshes itself via the
+    // constructor seed (setCollapsed's collapsed→expanded path).
+    vaultPanel.setContextCwd(resolveVaultContextCwd());
+    requestVaultContextCwd();
   }
 
   store.persist();

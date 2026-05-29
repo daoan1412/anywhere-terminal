@@ -313,7 +313,7 @@ export function classifyClaudeStyleEvents(records: Rec[], opts: ClassifyOptions 
   const totalStubs = opts.childStubs?.length ?? 0;
   let firstPrompt: string | undefined;
   const activity: VaultActivityStep[] = [];
-  const timeline: VaultTimelineItem[] = [];
+  let timeline: VaultTimelineItem[] = [];
   let latestMessage: ClassifiedDetail["latestMessage"];
   let messageCount = 0;
   let toolCount = 0;
@@ -441,10 +441,9 @@ export function classifyClaudeStyleEvents(records: Rec[], opts: ClassifyOptions 
   }
 
   // Subagent files with no matched spawn call (e.g. a teammate launched a
-  // different way) still surface — appended in their own chronological order.
-  for (const stub of stubs.sort((a, b) => (a.timestamp ?? 0) - (b.timestamp ?? 0))) {
-    timeline.push(stubToItem(stub, stub.agentType ?? "subagent", undefined, stub.timestamp));
-  }
+  // different way) still surface — merged into the timeline at their timestamp
+  // (placement fallback) rather than dumped after newer messages (W6).
+  timeline = mergeUnmatchedStubs(timeline, stubs);
 
   // Count distinct subagents as max(spawn calls, transcript stubs): when both
   // exist but a description mismatch leaves a call unmatched, this avoids
@@ -479,6 +478,42 @@ function matchStub(stubs: ClaudeChildStub[], description: string | undefined, ag
     }
   }
   return stubs.findIndex((s) => s.agentType && s.agentType === agentType);
+}
+
+function timelineTimestamp(item: VaultTimelineItem): number | undefined {
+  if ("timestamp" in item && typeof item.timestamp === "number" && Number.isFinite(item.timestamp)) {
+    return item.timestamp;
+  }
+  return undefined;
+}
+
+/**
+ * Stable linear merge of unmatched child stubs into the already-ordered parent
+ * timeline by timestamp. Each timestamped item flushes any pending stub older
+ * than it first; leftover stubs append at the end. Items with no timestamp
+ * (bare tool/subagent steps) don't trigger placement. Keeps the parent
+ * transcript order intact (W6).
+ */
+function mergeUnmatchedStubs(timeline: VaultTimelineItem[], stubs: ClaudeChildStub[]): VaultTimelineItem[] {
+  if (stubs.length === 0) {
+    return timeline;
+  }
+  const unmatched = stubs
+    .map((stub) => stubToItem(stub, stub.agentType ?? "subagent", undefined, stub.timestamp))
+    .sort((a, b) => (timelineTimestamp(a) ?? 0) - (timelineTimestamp(b) ?? 0));
+  const merged: VaultTimelineItem[] = [];
+  let stubIndex = 0;
+  for (const item of timeline) {
+    const ts = timelineTimestamp(item);
+    while (ts !== undefined && stubIndex < unmatched.length && (timelineTimestamp(unmatched[stubIndex]) ?? 0) < ts) {
+      merged.push(unmatched[stubIndex++]);
+    }
+    merged.push(item);
+  }
+  while (stubIndex < unmatched.length) {
+    merged.push(unmatched[stubIndex++]);
+  }
+  return merged;
 }
 
 /** Build a `subagentSession` timeline item from a matched stub + spawn call. */

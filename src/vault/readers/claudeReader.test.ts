@@ -3,7 +3,7 @@
 import * as path from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
-import { readClaudeDetail, readClaudeSessions } from "./claudeReader";
+import { readClaudeDetail, readClaudeEntry, readClaudeSessions } from "./claudeReader";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const FIXTURE_ROOT = path.join(here, "..", "__fixtures__", "claude");
@@ -68,6 +68,26 @@ describe("readClaudeSessions", () => {
     const { entries } = await readClaudeSessions({ configDir: SUBAGENT_FIXTURE_ROOT });
     expect(entries).toHaveLength(1);
     expect(entries[0].id).toBe("claude:sess-parent");
+  });
+});
+
+describe("readClaudeEntry: single-entry resolve", () => {
+  it("resolves one session by id with the same fields as the list scan", async () => {
+    const entry = await readClaudeEntry("sess-valid", { configDir: FIXTURE_ROOT });
+    expect(entry?.id).toBe("claude:sess-valid");
+    expect(entry?.sessionId).toBe("sess-valid");
+    expect(entry?.cwd).toBe("/Users/me/proj");
+    expect(entry?.flags.model).toBe("claude-opus-4-7");
+    expect(entry?.flags.permissionMode).toBe("acceptEdits");
+    expect(entry?.flags.configDir).toBe(FIXTURE_ROOT);
+  });
+
+  it("returns null for an unsafe id (path traversal)", async () => {
+    expect(await readClaudeEntry("../../escape", { configDir: FIXTURE_ROOT })).toBeNull();
+  });
+
+  it("returns null for a session that does not exist", async () => {
+    expect(await readClaudeEntry("nope-not-here", { configDir: FIXTURE_ROOT })).toBeNull();
   });
 });
 

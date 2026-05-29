@@ -1,6 +1,7 @@
 // src/vault/registry.test.ts — Unit tests for the agent registry.
 
 import { describe, expect, it } from "vitest";
+import { AGENT_ICONS } from "../webview/vault/agentIcons";
 import {
   AGENT_DEFINITIONS,
   AGENT_REGISTRY,
@@ -27,6 +28,26 @@ describe("AGENT_REGISTRY", () => {
     }
     // AGENT_DEFINITIONS is derived from VAULT_AGENT_IDS, so order tracks it.
     expect(AGENT_DEFINITIONS.map((d) => d.id)).toEqual([...VAULT_AGENT_IDS]);
+  });
+
+  it("each record's id equals its registry key (W2 — satisfies checks keys, not id===key)", () => {
+    for (const id of VAULT_AGENT_IDS) {
+      expect(getAgentDefinition(id)?.id).toBe(id);
+    }
+  });
+
+  it("no agent id contains the entryId separator ':' (S1 — formatEntryId/parseEntryId invariant)", () => {
+    for (const id of VAULT_AGENT_IDS) {
+      expect(id).not.toContain(":");
+    }
+  });
+
+  it("webview displayName matches the host registry displayName for every agent (W1)", () => {
+    // displayName lives in two places (host registry + webview AGENT_ICONS); this
+    // pins them so they can't silently diverge.
+    for (const id of VAULT_AGENT_IDS) {
+      expect(AGENT_ICONS[id]?.displayName).toBe(getAgentDefinition(id)?.displayName);
+    }
   });
 
   it("every record's resume template carries the {{sessionId}} token", () => {
@@ -69,9 +90,9 @@ describe("AGENT_REGISTRY", () => {
     expect(staticTokens(codex?.resumeCommand as CommandTemplate)).toEqual(["resume", "{{sessionId}}"]);
   });
 
-  it("opencode carries forkMinVersion 1.14.50 and a --fork command", () => {
+  it("opencode carries forkMinVersion 1.1.54 and a --fork command", () => {
     const opencode = getAgentDefinition("opencode");
-    expect(opencode?.forkMinVersion).toBe("1.14.50");
+    expect(opencode?.forkMinVersion).toBe("1.1.54");
     expect(staticTokens(opencode?.forkCommand as CommandTemplate)).toContain("--fork");
     expect(opencode?.resumeCommand.args).toContainEqual({ flag: "--agent", from: "agent" });
   });

@@ -274,7 +274,9 @@ describe("VaultPanel grouping + states (redesign 4_2)", () => {
       getInitialGroupMode: () => "agent",
       persistGroupMode: (m) => persisted.push(m),
     });
-    expect(host.querySelector('.vault-segmented button[data-mode="agent"]')?.getAttribute("aria-pressed")).toBe("true");
+    expect(host.querySelector('.vault-segmented button[data-mode="agent"]')?.getAttribute("aria-selected")).toBe(
+      "true",
+    );
     panel.render(result([entry({ id: "claude:a" })]));
     expect(host.querySelectorAll(".vault-group-header")).toHaveLength(1); // grouped on seed
     panel.setGroupMode("folder");
@@ -497,6 +499,39 @@ describe("VaultPanel session preview (redesign 5_2)", () => {
     expect(host.querySelector(".vault-preview.is-open")).not.toBeNull();
     expect(host.querySelector(".vault-preview-loading")).not.toBeNull();
     expect(posted).toContainEqual({ type: "requestVaultSessionDetail", entryId: "claude:a" });
+  });
+
+  it("keeps the active row highlighted across a list re-render (W4)", () => {
+    const host = createHost();
+    const panel = new VaultPanel({ host, postMessage: () => {}, getInitialCollapsed: () => false });
+    panel.render(result([entry({ id: "claude:a" }), entry({ id: "codex:b", agent: "codex" })]));
+    host.querySelector<HTMLElement>('.vault-row[data-entry-id="claude:a"]')?.click();
+    expect(host.querySelector('.vault-row[data-entry-id="claude:a"]')?.getAttribute("aria-selected")).toBe("true");
+    // Switching group mode rebuilds every row; the open preview's highlight must
+    // re-attach to the fresh row, not vanish with the detached one.
+    panel.setGroupMode("agent");
+    expect(host.querySelector('.vault-row[data-entry-id="claude:a"]')?.getAttribute("aria-selected")).toBe("true");
+  });
+
+  it("expanding a capped run reveals its hidden steps in place (UI-2)", () => {
+    const host = createHost();
+    const panel = new VaultPanel({ host, postMessage: () => {}, getInitialCollapsed: () => false });
+    panel.render(result([entry({ id: "claude:a" })]));
+    host.querySelector<HTMLElement>(".vault-row")?.click();
+    const tools = Array.from({ length: 7 }, (_, i) => ({ kind: "tool", tool: "Read", detail: `/f${i}.ts` }) as const);
+    panel.handleSessionDetailResponse({
+      type: "vaultSessionDetailResponse",
+      entryId: "claude:a",
+      detail: detail({ timeline: [{ kind: "message", role: "user", text: "go", timestamp: 1 }, ...tools] }),
+    });
+    // The run of 7 tool steps is capped at 5 + a "Show 2 more steps" button.
+    expect(host.querySelectorAll(".vault-preview-message-tool")).toHaveLength(5);
+    const more = host.querySelector<HTMLButtonElement>(".vault-preview-expand");
+    expect(more?.textContent).toBe("Show 2 more steps");
+    more?.click();
+    // Expanded in place: all 7 shown, button gone (no jump-to-top re-render artifact).
+    expect(host.querySelectorAll(".vault-preview-message-tool")).toHaveLength(7);
+    expect(host.querySelector(".vault-preview-expand")).toBeNull();
   });
 
   it("renders the full conversation timeline in order, via textContent", () => {
@@ -948,12 +983,23 @@ describe("VaultPanel 'This folder only' filter", () => {
       persistFolderOnly: (v) => persisted.push(v),
     });
     const toggle = host.querySelector(".vault-folder-toggle");
-    expect(toggle?.getAttribute("aria-pressed")).toBe("true");
+    const checkbox = host.querySelector<HTMLInputElement>(".vault-folder-toggle-cb");
+    expect(checkbox?.checked).toBe(true);
     expect(toggle?.classList.contains("is-active")).toBe(true);
     expect(persisted).toEqual([]); // seed does not persist
 
     panel.toggleFolderOnly();
     panel.toggleFolderOnly();
     expect(persisted).toEqual([false, true]);
+  });
+
+  it("exposes the filter state via isFolderOnly (gates the host cwd re-probe)", () => {
+    const host = createHost();
+    const panel = new VaultPanel({ host, postMessage: () => {} });
+    expect(panel.isFolderOnly()).toBe(false);
+    panel.setFolderOnly(true);
+    expect(panel.isFolderOnly()).toBe(true);
+    panel.setFolderOnly(false);
+    expect(panel.isFolderOnly()).toBe(false);
   });
 });

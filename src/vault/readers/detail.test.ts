@@ -309,6 +309,18 @@ describe("classifyClaudeStyleEvents", () => {
     expect(out.stats.subagentCount).toBe(2);
     expect(out.timeline.filter((i) => i.kind === "subagentSession")).toHaveLength(2);
   });
+
+  it("places an unmatched stub by timestamp, not after newer messages (W6)", () => {
+    const records: Rec[] = [userText("early", { timestamp: 10 }), assistantText("late", { timestamp: 30 })];
+    const out = classifyClaudeStyleEvents(records, {
+      childStubs: [{ entryId: "claude:p:subagent:b", description: "B", timestamp: 20 }],
+    });
+    expect(out.timeline.map((i) => (i.kind === "subagentSession" ? "subagent" : i.kind))).toEqual([
+      "message",
+      "subagent",
+      "message",
+    ]);
+  });
 });
 
 describe("clampDetailLimit (W2)", () => {

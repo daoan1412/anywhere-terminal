@@ -95,7 +95,7 @@ describe("readSqlite: query execution", () => {
     expect(result.rows).toEqual([]);
   });
 
-  it("copies the db and its -wal/-shm sidecars before querying", async () => {
+  it("snapshots the db + its -wal/-shm sidecars before querying (never reads the live store in place; D13)", async () => {
     const deps = makeDeps({
       exec: execWith(async () => ({ stdout: "[]", stderr: "" })),
       exists: vi.fn(async () => true), // db + both sidecars present
@@ -107,7 +107,7 @@ describe("readSqlite: query execution", () => {
     expect(copyCalls).toContain("/x/state.sqlite-shm");
   });
 
-  it("runs the query read-only over the temp copy, not the live db", async () => {
+  it("runs the query read-only over the temp snapshot, never the live db", async () => {
     const deps = makeDeps({ exec: execWith(async () => ({ stdout: "[]", stderr: "" })) });
     await readSqlite("/x/state.sqlite", "SELECT 1", deps);
     const queryCall = (deps.exec as ReturnType<typeof vi.fn>).mock.calls.find((c) => !c[1].includes(":memory:"));
@@ -156,13 +156,13 @@ describe("readSqlite: query execution", () => {
   });
 });
 
-describe("readSqlite: node:sqlite fallback (CLI absent)", () => {
+describe("readSqlite: engine selection (node:sqlite preferred)", () => {
   const cliAbsent = () =>
     vi.fn(async () => {
       throw new Error("command not found: sqlite3");
     });
 
-  it("falls back to node:sqlite when the CLI is unavailable", async () => {
+  it("uses node:sqlite (querying the temp copy) when it is available", async () => {
     const runNodeQuery = vi.fn(async () => ({ rows: [{ id: "n1" }], status: "ok" as const }));
     const deps = makeDeps({
       exec: cliAbsent(),
@@ -172,7 +172,7 @@ describe("readSqlite: node:sqlite fallback (CLI absent)", () => {
     const result = await readSqlite("/x/state.sqlite", "SELECT id FROM t", deps);
     expect(result.status).toBe("ok");
     expect(result.rows).toEqual([{ id: "n1" }]);
-    // The DB was still copied to temp first; node reads the copy, not the live db.
+    // node reads the temp snapshot, not the live db.
     expect(runNodeQuery).toHaveBeenCalledWith("/tmp/at-vault-xyz/db.sqlite", "SELECT id FROM t");
     expect(deps.copy).toHaveBeenCalledWith("/x/state.sqlite", "/tmp/at-vault-xyz/db.sqlite");
   });
@@ -184,16 +184,19 @@ describe("readSqlite: node:sqlite fallback (CLI absent)", () => {
     expect(deps.copy).not.toHaveBeenCalled();
   });
 
-  it("prefers the CLI over node:sqlite when both are available", async () => {
-    const runNodeQuery = vi.fn(async () => ({ rows: [], status: "ok" as const }));
+  it("prefers node:sqlite over the CLI when both are available (avoids the sqlite3 -json slowness; D14)", async () => {
+    const runNodeQuery = vi.fn(async () => ({ rows: [{ id: "node" }], status: "ok" as const }));
+    const cliExec = execWith(async () => ({ stdout: '[{"id":"cli"}]', stderr: "" }));
     const deps = makeDeps({
-      exec: execWith(async () => ({ stdout: '[{"id":"cli"}]', stderr: "" })),
+      exec: cliExec,
       hasNodeSqlite: vi.fn(async () => true),
       runNodeQuery,
     });
     const result = await readSqlite("/x/state.sqlite", "SELECT 1", deps);
-    expect(result.rows).toEqual([{ id: "cli" }]);
-    expect(runNodeQuery).not.toHaveBeenCalled();
+    expect(result.rows).toEqual([{ id: "node" }]);
+    expect(runNodeQuery).toHaveBeenCalledWith("/tmp/at-vault-xyz/db.sqlite", "SELECT 1");
+    // The CLI is not consulted at all (not even its probe) when node:sqlite exists.
+    expect(cliExec).not.toHaveBeenCalled();
   });
 
   it("propagates a node:sqlite query-error", async () => {

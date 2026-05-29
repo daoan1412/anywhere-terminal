@@ -25,8 +25,10 @@ export class VaultLauncher {
   ) {}
 
   async resolve(entryId: string, mode: LaunchMode): Promise<CreateSessionOptions> {
-    const { entries } = await this.vaultService.list();
-    const entry = entries.find((e) => e.id === entryId);
+    // Resolve the single entry by id (point/locate-by-id lookup) instead of a full
+    // `list()` over every agent store — launching must not block on scanning the
+    // whole session index (e.g. the multi-GB opencode db). See VaultService.getEntry.
+    const entry = await this.vaultService.getEntry(entryId);
     if (!entry) {
       throw new VaultLaunchError(`No vault session: ${entryId}`, "unknown-entry");
     }

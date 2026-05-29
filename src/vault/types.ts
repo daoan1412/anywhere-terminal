@@ -4,13 +4,34 @@
 export type SessionStoreFormat = "jsonl" | "sqlite";
 
 /**
+ * The vault's agent ids, in stable list order. SINGLE source of truth: the
+ * `VaultAgentId` union is derived from this array, and the registry record, the
+ * host reader maps, and the webview icon map are all typed against it — so
+ * adding an id here forces (at compile time) a registry entry, both readers, and
+ * a webview icon/accent entry. Lives in types.ts (not registry.ts) so the
+ * webview — which must NOT import the host's launch data — derives its
+ * presentation types from the same source. Ids MUST NOT contain `:` (the
+ * entryId separator); enforced by a test.
+ *
+ * Adding a vault agent (all compile-enforced EXCEPT the CSS step):
+ *   1. add the id here;
+ *   2. add its `AgentVaultDefinition` to `AGENT_RECORD` (registry.ts);
+ *   3. add list + detail readers to VaultService's reader maps (+ a reader module);
+ *   4. add an `AGENT_ICONS` entry — icon + accent + displayName (webview/agentIcons.ts);
+ *   5. add `.vault-badge--<id>` / `.vault-row-dot--<id>` / `.vault-preview--<id>`
+ *      accent CSS — NOT type-checkable (it's CSS); the single manual step.
+ */
+export const VAULT_AGENT_IDS = ["claude", "codex", "opencode"] as const;
+export type VaultAgentId = (typeof VAULT_AGENT_IDS)[number];
+
+/**
  * A vault entry's globally-unique handle: `<agent>:<sessionId>`. The agent id
  * never contains a colon, so the FIRST colon is the separator and the session
  * id keeps any later colons (Claude's nested subagent token
  * `<parent>:subagent:<stem>` rides along intact). Centralized here so every
  * producer/consumer parses the handle identically (S1).
  */
-export function formatEntryId(agent: string, sessionId: string): string {
+export function formatEntryId(agent: VaultAgentId, sessionId: string): string {
   return `${agent}:${sessionId}`;
 }
 
@@ -78,7 +99,7 @@ export interface CommandTemplate {
 }
 
 export interface AgentVaultDefinition {
-  id: string;
+  id: VaultAgentId;
   displayName: string;
   detect: AgentDetectRule;
   sessionStore: SessionStoreDescriptor;
@@ -87,7 +108,7 @@ export interface AgentVaultDefinition {
   /** Tokens: `{{sessionId}}` `{{sessionPath}}` `{{executable}}`. */
   resumeCommand: CommandTemplate;
   forkCommand?: CommandTemplate;
-  /** Minimum agent `--version` for fork support (e.g. opencode "1.14.50"). */
+  /** Minimum agent `--version` for fork support (e.g. opencode "1.1.54"). */
   forkMinVersion?: string;
   /** MVP: always launch in the session's recorded cwd. */
   cwdPolicy: "preserve";
@@ -98,6 +119,13 @@ export interface AgentVaultDefinition {
 export interface VaultSessionEntry {
   /** "<agent>:<sessionId>", globally unique. */
   id: string;
+  /**
+   * Producing readers SHOULD emit a `VaultAgentId` (and build `id` via
+   * `formatEntryId`, whose agent param IS typed). Kept `string` — not narrowed —
+   * because this crosses the host→webview IPC boundary where types are erased,
+   * so the webview MUST treat it as untrusted and resolve icon/accent/label
+   * defensively (unknown → fallback). Narrowing here would be a false guarantee.
+   */
   agent: string;
   sessionId: string;
   /** Bounded title preview only (D4). */

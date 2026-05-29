@@ -406,6 +406,23 @@ export class TerminalViewProvider implements vscode.WebviewViewProvider {
   }
 
   /**
+   * Resolve a terminal pane's REAL current working directory for the vault
+   * "This folder only" filter. Prefers the live OS query (lsof/`/proc`, bounded
+   * ≤500 ms), then the shell-integration-tracked cwd, then the spawn cwd; null
+   * when none resolve (e.g. Windows / unknown pane). Resolves by `sessionId`
+   * from our own SessionManager — never trusts a webview-supplied path. Echoes
+   * `sessionId` so the webview can drop a reply for a no-longer-active pane.
+   */
+  private async handleRequestVaultContextCwd(sessionId: string, webview: vscode.Webview): Promise<void> {
+    const cwd =
+      (await this.sessionManager.getLiveCwd(sessionId)) ??
+      this.sessionManager.getCurrentCwd(sessionId) ??
+      this.sessionManager.getInitialCwd(sessionId) ??
+      null;
+    void this.safeSendWithRetry(webview, { type: "vaultContextCwd", sessionId, cwd });
+  }
+
+  /**
    * Resolve a vault entry from its id for a (rare) context-menu action. Uses the
    * same list-and-find path as `VaultLauncher.resolve` so the host derives every
    * path/cwd/command itself — the webview never sends a path to act on (D9).
@@ -595,6 +612,12 @@ export class TerminalViewProvider implements vscode.WebviewViewProvider {
               webviewView.webview,
               typeof message.limit === "number" ? message.limit : undefined,
             );
+          }
+          break;
+
+        case "requestVaultContextCwd":
+          if (typeof message.sessionId === "string") {
+            void this.handleRequestVaultContextCwd(message.sessionId, webviewView.webview);
           }
           break;
 

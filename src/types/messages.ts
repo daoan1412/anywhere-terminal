@@ -396,6 +396,20 @@ export interface VaultCopyFilePathMessage {
 }
 
 /**
+ * Webview → Extension: resolve the REAL current working directory of a terminal
+ * pane (the host queries its own PTY: lsof/`/proc` live cwd, else the
+ * shell-integration-tracked cwd, else the spawn cwd) so the vault's "This folder
+ * only" filter can scope to the focused pane's actual folder — without depending
+ * on OSC 7 / shell integration in the webview. The host resolves by `sessionId`
+ * from its own SessionManager; it never trusts a webview-supplied path.
+ */
+export interface RequestVaultContextCwdMessage {
+  type: "requestVaultContextCwd";
+  /** The terminal pane (session) id whose live cwd the filter should scope to. */
+  sessionId: string;
+}
+
+/**
  * All messages that can be sent from the WebView to the Extension Host.
  * Use msg.type as the discriminant in switch/case for exhaustive handling.
  */
@@ -432,7 +446,8 @@ export type WebViewToExtensionMessage =
   | VaultOpenSessionFileMessage
   | VaultOpenWorkingDirMessage
   | VaultCopyResumeCommandMessage
-  | VaultCopyFilePathMessage;
+  | VaultCopyFilePathMessage
+  | RequestVaultContextCwdMessage;
 
 /**
  * Webview → Extension. Sent by the editor webview after it has merged the
@@ -875,17 +890,36 @@ export interface VaultSessionsResponseMessage {
   result: VaultListResult;
 }
 
-/**
- * Extension → Webview: reply to `requestVaultSessionDetail`. Echoes the
- * `entryId` so the webview can drop a response for a session that is no longer
- * the active preview (redesign-vault-panel-ui D3 stale-render guard). Carries
- * either the `detail` or an `error` marker.
- */
-export interface VaultSessionDetailResponseMessage {
+interface VaultSessionDetailResponseBase {
   type: "vaultSessionDetailResponse";
+  /**
+   * Echoes the requested entry id so the webview can drop a response for a
+   * session that is no longer the active preview (redesign-vault-panel-ui D3
+   * stale-render guard).
+   */
   entryId: string;
-  detail?: VaultSessionDetail;
-  error?: string;
+}
+
+/**
+ * Extension → Webview: reply to `requestVaultSessionDetail`. Discriminated XOR —
+ * EXACTLY one of `detail` / `error` is present, so a producer cannot compile
+ * while sending both or neither and consumers narrow without ambiguity (W3).
+ */
+export type VaultSessionDetailResponseMessage =
+  | (VaultSessionDetailResponseBase & { detail: VaultSessionDetail; error?: never })
+  | (VaultSessionDetailResponseBase & { error: string; detail?: never });
+
+/**
+ * Extension → Webview: reply to `requestVaultContextCwd`. Echoes `sessionId` so
+ * the webview can drop a reply for a pane that is no longer active (stale-guard,
+ * mirroring the detail `entryId` echo). `cwd` is null only when the OS query
+ * failed and no tracked/initial cwd exists (e.g. Windows) — the webview then
+ * falls back to the workspace root.
+ */
+export interface VaultContextCwdMessage {
+  type: "vaultContextCwd";
+  sessionId: string;
+  cwd: string | null;
 }
 
 /**
@@ -936,6 +970,7 @@ export type ExtensionToWebViewMessage =
   | FlashPaneMessage
   | VaultSessionsResponseMessage
   | VaultSessionDetailResponseMessage
+  | VaultContextCwdMessage
   | OpenVaultMessage;
 
 /**

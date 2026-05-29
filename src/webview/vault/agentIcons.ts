@@ -15,10 +15,14 @@
 //   codex    — opencode/packages/ui/src/assets/icons/provider/openai.svg (already currentColor)
 //   opencode — warp/app/assets/bundled/svg/opencode.svg          (#FF0000 → currentColor)
 
-/** The closed accent set — single source. `VaultAccent` is derived from it, and
- *  the preview's accent-class cleanup iterates it (so a 4th accent updates both). */
-export const VAULT_ACCENTS = ["claude", "codex", "opencode"] as const;
-export type VaultAccent = (typeof VAULT_ACCENTS)[number];
+import { VAULT_AGENT_IDS, type VaultAgentId } from "../../vault/types";
+
+/** Accent ids ARE agent ids (1:1). Derived from the single source
+ *  `VAULT_AGENT_IDS` (types.ts) — never a parallel list — so a new agent extends
+ *  the accent set automatically, and the preview's accent-class cleanup iterates
+ *  it (a new accent updates removal + addition together). */
+export const VAULT_ACCENTS = VAULT_AGENT_IDS;
+export type VaultAccent = VaultAgentId;
 
 export interface AgentIcon {
   /** Inline SVG markup, `fill="currentColor"`, no width/height. */
@@ -44,12 +48,18 @@ const OPENCODE_SVG =
   '<path d="M16.4 4.8H6.8V19.2H16.4V4.8ZM21.2 24H2V0H21.2V24Z"/>' +
   "</svg>";
 
-/** Closed map: agent id → its real brand icon + accent. The only SVG source. */
+/**
+ * Closed map: agent id → its real brand icon + accent + label. The only SVG
+ * source. `satisfies Record<VaultAgentId, AgentIcon>` makes omitting an agent a
+ * COMPILE error (W1 — presentation can no longer silently drift from the host
+ * registry); the `Record<string, AgentIcon>` annotation keeps lookups
+ * string-indexable so session-derived ids resolve to `AgentIcon | undefined`.
+ */
 export const AGENT_ICONS: Record<string, AgentIcon> = {
   claude: { svg: CLAUDE_SVG, accent: "claude", displayName: "Claude Code" },
   codex: { svg: CODEX_SVG, accent: "codex", displayName: "Codex" },
   opencode: { svg: OPENCODE_SVG, accent: "opencode", displayName: "OpenCode" },
-};
+} satisfies Record<VaultAgentId, AgentIcon>;
 
 export function getAgentIcon(agentId: string): AgentIcon | undefined {
   return AGENT_ICONS[agentId];

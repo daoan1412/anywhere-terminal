@@ -19,5 +19,5 @@ The system SHALL store resume/fork command shapes as templates with the substitu
 The registry records MUST encode these exact command shapes (from `docs/research/20260528-cmux-vault-mechanism.md`):
 - Claude resume: `claude --resume {{sessionId}} [--model <m>] [--permission-mode <p>]`; fork: `claude --resume {{sessionId}} --fork-session`.
 - Codex resume: `codex resume {{sessionId}} [-m <m>] [-a <approval>] [-s <sandbox>] [-c model_reasoning_effort=<e>]`; fork: `codex fork {{sessionId}}`.
-- OpenCode resume: `opencode --session {{sessionId}} [-m <model>] [--agent <agent>]`; fork: `opencode --session {{sessionId}} --fork` gated on `forkMinVersion` 1.14.50.
+- OpenCode resume: `opencode --session {{sessionId}} [-m <model>] [--agent <agent>]`; fork: `opencode --session {{sessionId}} --fork` gated on `forkMinVersion` 1.1.54 (when `--fork` was introduced).
 

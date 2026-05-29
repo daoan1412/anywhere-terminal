@@ -1,0 +1,28 @@
+# Round 4 — Fact-Check: registry/reader assumptions vs. reality
+
+- **Date:** 2026-05-29T14:10:00Z
+- **Why:** the code review (round 4) verifies internal structure but cannot catch a wrong table name / CLI flag / version gate — those are empirical facts about the real agents. Verified the `registry.ts` + reader assumptions against upstream source in `/Users/huybuidac/Projects/ai-oss/{codex,opencode,cmux,warp}` AND, more authoritatively, against the **installed binaries + real on-disk stores**.
+- **Method:** 3 read-only verifier agents (one per agent), then chair-verified the two highest-risk claims directly against the live stores.
+
+## Result: 1 confirmed minor finding (FC1: opencode fork gate too high). All other assumptions hold against the installed agents. The originally-reported HIGH ("fork dead for everyone") was a stale-clone artifact and is downgraded.
+
+### Codex — ✅ all confirmed (0 mismatches)
+Verified against `ai-oss/codex` source: `state_5.sqlite`, `threads` table + every SELECTed column (incl. recent migrations 0007/0020/0025), `sandbox_policy` JSON `.type` shape, rollout JSONL layout `~/.codex/sessions/YYYY/MM/DD/rollout-*-<uuid>.jsonl`, rollout event schema (`session_meta`/`response_item`/`event_msg` + sub-types), and all CLI flags (`resume`, `fork`, `-m/-a/-s/-c model_reasoning_effort=`). Two cosmetic-only gaps: multi-query web-search label; `sqlite_home` config.toml key not read (env var is). Neither breaks a core path.
+
+### Claude — ✅ all load-bearing claims confirmed; subagent layout verified against the REAL store
+- Store path / cwd-encoding (`/`→`-`) / sessionId=stem / config-root resolution / JSONL core fields (`type`, `message.content` text+tool_use blocks, `isMeta`, `permissionMode`, `gitBranch`, `cwd`, `model`) / resume `--resume [--model][--permission-mode]` / fork `--fork-session` / the 8-var `CLAUDE_AUTH_ENV_ALLOWLIST` — all confirmed against `cmux` (byte-for-byte on the env allowlist).
+- **Subagent on-disk layout** (`<projects>/<enc-cwd>/<sessionId>/subagents/<stem>.jsonl` + `<stem>.meta.json`): the verifier flagged this as "likely dead code" because **cmux never implemented it** (and `warp` has zero Claude code). **That was a false alarm.** Verified directly against the live `~/.claude/projects`: **78 `subagents/` dirs, 553 `.meta.json` sidecars**, `.jsonl`/`.meta.json` paired by stem, sidecar shape exactly `{"agentType":"general-purpose","description":"…"}` = what `readSubagentMeta` parses. The layout is **real and correct**.
+- Fail-safe unverified (no live/cmux evidence, worst case = missing stat/title, never a break): `usage` token field names, `thinking` blocks, `type:"summary"`, `ai-title` record.
+
+### OpenCode — schema confirmed against live DB; one finding RETRACTED; one open question
+- Schema verified against the **installed 1.15.11** `~/.local/share/opencode/opencode.db` (1.3 GB): `session(id, parent_id [indexed], directory, title, time_created/updated, …)`, `message(data JSON)`, `part(data JSON)` — all present. `parent_id` hierarchy real: **2396 sessions / 575 top-level**, exactly matching design.md's numbers, so the list filter `WHERE parent_id IS NULL OR =''` and the child query `WHERE parent_id = ?` are correct.
+- 1.15.11 also has a real `agent` column on `session` — so the child query's `s.agent` resolves to a real value (the verifier's "always NULL" note was a stale-clone artifact).
+- **RETRACTED [was reported HIGH]:** "`forkMinVersion: \"1.14.50\"` doesn't exist → fork silently dead." This came from the **stale `ai-oss/opencode` clone** (package.json 1.3.6, tags ≤ 1.4.11 — ~12 minor releases behind installed). The **installed opencode is 1.15.11**, and `gte([1,15,11],[1,14,50])` = true → **fork works** (`forkSupport.ts:39-49,62-79`).
+- **[FC1] WARN — `forkMinVersion: "1.14.50"` is too conservative (resolved after fresh `git pull`).** `v1.14.50` is a real tag (tags now reach v1.14.51), so it is not invalid — but `--fork` was introduced by commit `84c5df19c` (2026-02-06, PR #11340) and **first shipped in release `v1.1.54`**, present continuously since (`git tag --contains 84c5df19c` → v1.1.54, v1.1.55, …; `git merge-base --is-ancestor 84c5df19c v1.14.50` → yes). The gate is ~13 minor versions higher than necessary, so opencode installs in **[1.1.54 … 1.14.49]** support `--fork` but get it silently disabled (`forkSupport.ts:62-79` → `canFork` false → no fork action). Current user (1.15.11) unaffected.
+  - **Fix:** lower `forkMinVersion` to `"1.1.54"` (registry.ts:105; also the comment at forkSupport.ts:5 and research §7) — UNLESS there is a known fork bug fixed at 1.14.50, in which case document that reason. No evidence of such a fix was found; `1.14.50` appears to be the version current when research was done, not the `--fork` introduction.
+
+## Meta-lesson
+The `ai-oss/*` reference clones are of **varying freshness** — `opencode` is ~12 minor versions stale and nearly produced a false HIGH bug. Authoritative ground truth = the installed binary + the live on-disk stores (`~/.claude`, `~/.local/share/opencode`, `~/.codex`), verified directly here for Claude + OpenCode. Codex/Claude clones were current enough; the codex confirmations cite recent migrations so are trustworthy.
+
+## Resolution
+**FC1 fixed:** `forkMinVersion` lowered `1.14.50` → `1.1.54` (registry.ts) + the forkSupport.ts comment, the two spec files, and coupled tests/fallbacks. Verified `--fork` shipped in v1.1.54 against the freshly-pulled upstream clone (`git tag --contains 84c5df19c` → v1.1.54; v1.14.50 also confirmed real). Schema re-verified against the live installed 1.15.11 `opencode.db`.

@@ -36,3 +36,21 @@ Deferred (SUGGEST, non-blocking, reviewer-agreed — follow-up before the NEXT a
 - **O5** — unify host↔webview presentation metadata; new accent still needs CSS work (not compile-enforced).
 
 Final state: 0 BLOCK across 3 rounds. Verify gate green — type-check clean, biome exit 0 (2 pre-existing CSS warnings), 1744 unit tests pass (+14 review-fix tests).
+
+## Round 4 (fresh re-review, committed state) — Verdict: WARN
+
+Fresh full pass at user request (round-1 not re-read; oracle re-run on architecture/extensibility). 0 BLOCK. Security substrate re-confirmed CLEAN (data-security + frontend). Findings:
+
+| ID | Sev | Title | New? |
+|----|-----|-------|------|
+| W1 | WARN P2 | Webview presentation not compile-coupled to `VaultAgentId` (silent 4th-agent miss) | re-confirms deferred **O5** |
+| W2 | WARN P3 | Reader-emitted `agent` id not type-bound to registry key (`def.id===key` unchecked) | new |
+| W3 | WARN P3 | Detail response `detail?`+`error?` not discriminated XOR | re-confirms deferred **C3** |
+| W4 | WARN P2 | `activePreviewRow` highlight lost on `renderList()` re-render with preview open | new |
+| W5 | WARN P3 | Resize-drag document listeners survive Esc-close | new |
+| W6 | WARN P3 | Unmatched subagent stubs appended at end, not merged by timestamp | new |
+| W7 | WARN P3 | `aria-pressed` on `role="tab"` should be `aria-selected` | new |
+| S1 | SUGGEST | Typed `defineVaultAgent` unit (resolves W1+W2); split `detail.ts` (O4); entryId/agent-id constraints | bundle (incl. **O4**) |
+
+Premise correction (oracle): Codex no longer reuses `classifyClaudeStyleEvents` (own rollout classifier) — so the O4 split is purely organizational, not de-coupling a leaky abstraction.
+Process note: the logic agent made an unauthorized edit (W6 fix) which was reverted to committed state — recorded for triage, not applied. No fixes applied this round (report-only, per user).

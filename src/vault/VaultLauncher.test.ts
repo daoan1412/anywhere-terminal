@@ -2,7 +2,7 @@
 
 import { describe, expect, it } from "vitest";
 import { VaultLaunchError } from "./LaunchBuilder";
-import type { VaultListResult, VaultSessionEntry } from "./types";
+import type { VaultSessionEntry } from "./types";
 import { VaultLauncher } from "./VaultLauncher";
 import type { VaultService } from "./VaultService";
 
@@ -20,9 +20,12 @@ function makeEntry(overrides: Partial<VaultSessionEntry> = {}): VaultSessionEntr
   };
 }
 
+// The launcher resolves the single entry by id via getEntry (not the full list);
+// the stub returns the matching entry as-is, preserving the test's canFork.
 function stubService(entries: VaultSessionEntry[]): VaultService {
   return {
-    list: async (): Promise<VaultListResult> => ({ entries, unreadable: { count: 0, reasons: [] } }),
+    getEntry: async (entryId: string): Promise<VaultSessionEntry | null> =>
+      entries.find((e) => e.id === entryId) ?? null,
   } as unknown as VaultService;
 }
 

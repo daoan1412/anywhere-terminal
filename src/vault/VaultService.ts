@@ -5,10 +5,10 @@
 
 import { canForkOpenCode } from "./forkSupport";
 import type { ReaderResult } from "./readers/claudeReader";
-import { readClaudeDetail, readClaudeSessions } from "./readers/claudeReader";
-import { readCodexDetail, readCodexSessions } from "./readers/codexReader";
+import { readClaudeDetail, readClaudeEntry, readClaudeSessions } from "./readers/claudeReader";
+import { readCodexDetail, readCodexEntry, readCodexSessions } from "./readers/codexReader";
 import { clampDetailLimit } from "./readers/detail";
-import { readOpenCodeDetail, readOpenCodeSessions } from "./readers/opencodeReader";
+import { readOpenCodeDetail, readOpenCodeEntry, readOpenCodeSessions } from "./readers/opencodeReader";
 import { getAgentDefinition, VAULT_AGENT_IDS, type VaultAgentId } from "./registry";
 import { parseEntryId, type VaultListResult, type VaultSessionDetail, type VaultSessionEntry } from "./types";
 
@@ -36,9 +36,14 @@ export type VaultDetailReaders = Record<
   (sessionId: string, limit?: number) => Promise<VaultSessionDetail | null>
 >;
 
+/** Per-agent single-entry readers (resolve ONE launch entry by id, no full scan).
+ *  Backs `getEntry`, the fast path for resume/fork. */
+export type VaultEntryReaders = Record<VaultAgentId, (sessionId: string) => Promise<VaultSessionEntry | null>>;
+
 export interface VaultServiceDeps {
   readers?: VaultReaders;
   detailReaders?: VaultDetailReaders;
+  entryReaders?: VaultEntryReaders;
   /** Injectable opencode fork probe; defaults to the real version probe. */
   canForkOpenCodeFn?: (minVersion: string) => Promise<boolean>;
 }
@@ -55,14 +60,22 @@ const defaultDetailReaders = {
   opencode: (sessionId, limit) => readOpenCodeDetail(sessionId, {}, limit),
 } satisfies VaultDetailReaders;
 
+const defaultEntryReaders = {
+  claude: (sessionId) => readClaudeEntry(sessionId),
+  codex: (sessionId) => readCodexEntry(sessionId),
+  opencode: (sessionId) => readOpenCodeEntry(sessionId),
+} satisfies VaultEntryReaders;
+
 export class VaultService {
   private readonly readers: VaultReaders;
   private readonly detailReaders: VaultDetailReaders;
+  private readonly entryReaders: VaultEntryReaders;
   private readonly canForkOpenCodeFn: (minVersion: string) => Promise<boolean>;
 
   constructor(deps: VaultServiceDeps = {}) {
     this.readers = deps.readers ?? defaultReaders;
     this.detailReaders = deps.detailReaders ?? defaultDetailReaders;
+    this.entryReaders = deps.entryReaders ?? defaultEntryReaders;
     this.canForkOpenCodeFn = deps.canForkOpenCodeFn ?? ((min) => canForkOpenCode(min));
   }
 
@@ -91,7 +104,7 @@ export class VaultService {
 
     // Resolve fork support. Only spawn the opencode probe when it can matter.
     const hasOpenCode = entries.some((e) => e.agent === "opencode");
-    const opencodeMin = getAgentDefinition("opencode")?.forkMinVersion ?? "1.14.50";
+    const opencodeMin = getAgentDefinition("opencode")?.forkMinVersion ?? "1.1.54";
     let opencodeCanFork = false;
     if (hasOpenCode) {
       try {
@@ -123,6 +136,36 @@ export class VaultService {
     // Clamp the webview-supplied limit so a forged/garbage value can't defeat the
     // reader's timeline bound (W2).
     return this.detailReaders[parsed.agent](parsed.sessionId, clampDetailLimit(limit));
+  }
+
+  /**
+   * Resolve ONE launch entry by id — the fast path for resume/fork. Reads only
+   * the relevant agent's store via a point/locate-by-id lookup (no aggregate
+   * `list()` over every store, no fork probe for agents other than opencode), so
+   * launching is not gated on scanning the full session index. Mirrors getDetail
+   * (resolve-by-id, no cache; D3). Returns null for an unknown agent or an
+   * unresolvable session. canFork is resolved the same way as in list().
+   */
+  async getEntry(entryId: string): Promise<VaultSessionEntry | null> {
+    const parsed = parseEntryId(entryId);
+    if (!parsed || !isVaultAgentId(parsed.agent)) {
+      return null;
+    }
+    const entry = await this.entryReaders[parsed.agent](parsed.sessionId);
+    if (!entry) {
+      return null;
+    }
+    let opencodeCanFork = false;
+    if (entry.agent === "opencode") {
+      const opencodeMin = getAgentDefinition("opencode")?.forkMinVersion ?? "1.1.54";
+      try {
+        opencodeCanFork = await this.canForkOpenCodeFn(opencodeMin);
+      } catch {
+        opencodeCanFork = false;
+      }
+    }
+    entry.canFork = resolveCanFork(entry, opencodeCanFork);
+    return entry;
   }
 }
 

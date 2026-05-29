@@ -491,6 +491,44 @@ async function readFirstUserRecord(filePath: string): Promise<{ text: string; ti
   }
 }
 
+/**
+ * Build one Claude entry from its session file (metadata + first/last record).
+ * Shared by the list scan and the single-entry resolve so both produce identical
+ * entries. Throws on stat/read failure (caller catches → unreadable); returns
+ * null when the file has no usable records (D8). The cwd falls back to the decoded
+ * project-dir name (the file's parent) when the transcript omits it.
+ */
+async function buildClaudeEntry(
+  filePath: string,
+  sessionId: string,
+  configDir: string | undefined,
+): Promise<VaultSessionEntry | null> {
+  const stat = await fs.stat(filePath);
+  const fields = await parseClaudeFile(filePath);
+  if (!fields) {
+    return null;
+  }
+  // Prefer Claude's own regenerated title; fall back to the first prompt.
+  const aiTitle = await readLatestAiTitle(filePath);
+  return {
+    id: formatEntryId("claude", sessionId),
+    agent: "claude",
+    sessionId,
+    title: boundedPreview(aiTitle ?? fields.title ?? ""),
+    cwd: fields.cwd ?? decodeProjectDir(path.basename(path.dirname(filePath))),
+    modified: stat.mtimeMs,
+    flags: {
+      model: fields.model,
+      permissionMode: fields.permissionMode,
+      configDir,
+    },
+    canFork: false, // resolved by VaultService (task 2_5)
+    // File-backed → the webview shows file-targeting context-menu items;
+    // the host re-derives this path by id, never trusting it (D9).
+    sessionPath: filePath,
+  };
+}
+
 export async function readClaudeSessions(options: ClaudeReaderOptions = {}): Promise<ReaderResult> {
   const { configDir, projectsDir } = claudeRoots(options);
 
@@ -511,31 +549,12 @@ export async function readClaudeSessions(options: ClaudeReaderOptions = {}): Pro
     for (const filePath of files) {
       const sessionId = path.basename(filePath, ".jsonl");
       try {
-        const stat = await fs.stat(filePath);
-        const fields = await parseClaudeFile(filePath);
-        if (!fields) {
+        const entry = await buildClaudeEntry(filePath, sessionId, configDir);
+        if (entry) {
+          entries.push(entry);
+        } else {
           unreadable++;
-          continue;
         }
-        // Prefer Claude's own regenerated title; fall back to the first prompt.
-        const aiTitle = await readLatestAiTitle(filePath);
-        entries.push({
-          id: formatEntryId("claude", sessionId),
-          agent: "claude",
-          sessionId,
-          title: boundedPreview(aiTitle ?? fields.title ?? ""),
-          cwd: fields.cwd ?? decodeProjectDir(projectDir),
-          modified: stat.mtimeMs,
-          flags: {
-            model: fields.model,
-            permissionMode: fields.permissionMode,
-            configDir,
-          },
-          canFork: false, // resolved by VaultService (task 2_5)
-          // File-backed → the webview shows file-targeting context-menu items;
-          // the host re-derives this path by id, never trusting it (D9).
-          sessionPath: filePath,
-        });
       } catch {
         unreadable++;
       }
@@ -543,4 +562,27 @@ export async function readClaudeSessions(options: ClaudeReaderOptions = {}): Pro
   }
 
   return { entries, unreadable };
+}
+
+/**
+ * Resolve ONE Claude session to its launch entry by id — the single-entry
+ * counterpart to readClaudeSessions, used by VaultService.getEntry for fast
+ * resume/fork (no full-store scan; D3). Locates the file via the same
+ * containment-checked, metadata-only path resolver. Returns null for an unsafe
+ * id or an unlocatable/unparseable session.
+ */
+export async function readClaudeEntry(
+  sessionId: string,
+  options: ClaudeReaderOptions = {},
+): Promise<VaultSessionEntry | null> {
+  const { configDir } = claudeRoots(options);
+  const filePath = await resolveClaudeSessionPath(sessionId, options);
+  if (!filePath) {
+    return null;
+  }
+  try {
+    return await buildClaudeEntry(filePath, sessionId, configDir);
+  } catch {
+    return null;
+  }
 }

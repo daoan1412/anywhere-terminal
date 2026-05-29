@@ -34,13 +34,21 @@ import {
 /** Bound the SQLite read so the vault list stays cheap (D2). */
 const ROW_LIMIT = 500;
 
-const CODEX_THREADS_SQL = `SELECT id, rollout_path, cwd, title, model, git_branch,
+const CODEX_THREAD_COLUMNS = `id, rollout_path, cwd, title, model, git_branch,
        approval_mode, sandbox_policy, reasoning_effort,
-       first_user_message, updated_at_ms
+       first_user_message, updated_at_ms`;
+
+const CODEX_THREADS_SQL = `SELECT ${CODEX_THREAD_COLUMNS}
 FROM threads
 WHERE archived = 0
 ORDER BY updated_at_ms DESC
 LIMIT ${ROW_LIMIT}`;
+
+/** Single-thread lookup for the single-entry resolve (readCodexEntry). `id` is
+ *  validated by isSafeCodexId before this is called, so the embed is injection-safe. */
+function codexThreadByIdSql(id: string): string {
+  return `SELECT ${CODEX_THREAD_COLUMNS} FROM threads WHERE id = '${id}' LIMIT 1`;
+}
 
 export interface CodexReaderOptions {
   home?: string;
@@ -142,6 +150,35 @@ async function readFirstLine(filePath: string): Promise<string | undefined> {
   }
 }
 
+/**
+ * Build one minimal Codex entry from a rollout jsonl's `session_meta` first line.
+ * Shared by the JSONL fallback list and the single-entry resolve. Throws on
+ * read/parse failure (caller catches → unreadable); returns null when the first
+ * line is empty. `sessionIdOverride` forces the resolved id on the by-id path so
+ * the resume command targets the requested session even if `payload.id` is absent.
+ */
+async function buildCodexJsonlEntry(filePath: string, sessionIdOverride?: string): Promise<VaultSessionEntry | null> {
+  const first = await readFirstLine(filePath);
+  if (!first) {
+    return null;
+  }
+  const obj = JSON.parse(first) as { payload?: { id?: unknown; cwd?: unknown } };
+  const payload = obj.payload ?? {};
+  const sessionId = sessionIdOverride ?? asString(payload.id) ?? path.basename(filePath, ".jsonl");
+  const stat = await fs.stat(filePath);
+  return {
+    id: formatEntryId("codex", sessionId),
+    agent: "codex",
+    sessionId,
+    title: "",
+    cwd: asString(payload.cwd) ?? "",
+    modified: stat.mtimeMs,
+    flags: {},
+    canFork: false,
+    sessionPath: filePath, // the rollout jsonl backs this session (UI hint)
+  };
+}
+
 /** Degraded source: minimal entries from session_meta first lines. */
 async function readCodexJsonlFallback(sessionsDir: string): Promise<ReaderResult> {
   const files = await walkJsonl(sessionsDir);
@@ -150,26 +187,12 @@ async function readCodexJsonlFallback(sessionsDir: string): Promise<ReaderResult
 
   for (const filePath of files) {
     try {
-      const first = await readFirstLine(filePath);
-      if (!first) {
+      const entry = await buildCodexJsonlEntry(filePath);
+      if (entry) {
+        entries.push(entry);
+      } else {
         unreadable++;
-        continue;
       }
-      const obj = JSON.parse(first) as { payload?: { id?: unknown; cwd?: unknown } };
-      const payload = obj.payload ?? {};
-      const sessionId = asString(payload.id) ?? path.basename(filePath, ".jsonl");
-      const stat = await fs.stat(filePath);
-      entries.push({
-        id: formatEntryId("codex", sessionId),
-        agent: "codex",
-        sessionId,
-        title: "",
-        cwd: asString(payload.cwd) ?? "",
-        modified: stat.mtimeMs,
-        flags: {},
-        canFork: false,
-        sessionPath: filePath, // the rollout jsonl backs this session (UI hint)
-      });
     } catch {
       unreadable++;
     }
@@ -223,6 +246,41 @@ export async function readCodexSessions(options: CodexReaderOptions = {}): Promi
     }
   }
   return { entries, unreadable };
+}
+
+/**
+ * Resolve ONE Codex session to its launch entry by id — the single-entry
+ * counterpart to readCodexSessions, used by VaultService.getEntry for fast
+ * resume/fork (a `threads` point lookup, not the full-store scan; D3). Falls back
+ * to the rollout jsonl (located by its filename uuid) when no SQLite DB exists.
+ * Returns null for an unsafe id or an unlocatable session.
+ */
+export async function readCodexEntry(
+  sessionId: string,
+  options: CodexReaderOptions = {},
+): Promise<VaultSessionEntry | null> {
+  if (!isSafeCodexId(sessionId)) {
+    return null;
+  }
+  const { dbPath, sessionsDir } = codexDirs(options);
+  const readSqliteFn = options.readSqliteFn ?? readSqlite;
+
+  const result = await readSqliteFn(dbPath, codexThreadByIdSql(sessionId));
+  if (result.status === "ok") {
+    return result.rows.length > 0 ? mapThreadRow(result.rows[0]) : null;
+  }
+  if (result.status === "no-db" || result.status === "no-sqlite3") {
+    const filePath = await findCodexRolloutByFilename(sessionId, sessionsDir);
+    if (!filePath) {
+      return null;
+    }
+    try {
+      return await buildCodexJsonlEntry(filePath, sessionId);
+    } catch {
+      return null;
+    }
+  }
+  return null; // query-error → unresolved (caller treats null as unknown-entry)
 }
 
 // ── On-demand session detail (redesign-vault-panel-ui 2_4) ──────────────────

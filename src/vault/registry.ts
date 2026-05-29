@@ -7,7 +7,11 @@
 // small per-agent reader (src/vault/readers/) because path layout + schema
 // differ per agent.
 
-import type { AgentVaultDefinition } from "./types";
+import { type AgentVaultDefinition, VAULT_AGENT_IDS, type VaultAgentId } from "./types";
+
+// Re-exported for back-compat: the SINGLE source now lives in types.ts (so the
+// webview can share it without importing the host's launch data). See types.ts.
+export { VAULT_AGENT_IDS, type VaultAgentId } from "./types";
 
 /**
  * Claude's auth/config env allowlist — the only host env vars forwarded to a
@@ -97,23 +101,14 @@ const opencode: AgentVaultDefinition = {
     executable: "opencode",
     args: ["--session", "{{sessionId}}", { flag: "-m", from: "model" }, { flag: "--agent", from: "agent" }],
   },
-  // opencode --session <sessionId> --fork (gated ≥ 1.14.50)
+  // opencode --session <sessionId> --fork (gated ≥ 1.1.54, when --fork landed)
   forkCommand: {
     executable: "opencode",
     args: ["--session", "{{sessionId}}", "--fork"],
   },
-  forkMinVersion: "1.14.50",
+  forkMinVersion: "1.1.54",
   cwdPolicy: "preserve",
 };
-
-/**
- * The vault's agent ids, in stable list order. SINGLE source of truth — the
- * union below is derived from this array (not maintained separately), and
- * `AGENT_RECORD` is typed against the union, so adding an id here forces a
- * registry entry + a reader and is enforced at compile time (W3).
- */
-export const VAULT_AGENT_IDS = ["claude", "codex", "opencode"] as const;
-export type VaultAgentId = (typeof VAULT_AGENT_IDS)[number];
 
 // `satisfies Record<VaultAgentId, …>` makes omitting an agent a compile error
 // while keeping the public map string-indexable (callers pass `entry.agent`).

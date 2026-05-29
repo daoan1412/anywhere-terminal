@@ -5,7 +5,7 @@ import * as path from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { SqliteResult } from "../sqlite";
-import { readCodexSessions } from "./codexReader";
+import { readCodexEntry, readCodexSessions } from "./codexReader";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const FIXTURE_CODEX_DIR = path.join(here, "..", "__fixtures__", "codex");
@@ -105,6 +105,34 @@ describe("readCodexSessions: fallback + errors", () => {
     const { entries, unreadable } = await readCodexSessions({ codexDir: "/nonexistent/.codex", readSqliteFn: fn });
     expect(entries).toEqual([]);
     expect(unreadable).toBe(0);
+  });
+});
+
+describe("readCodexEntry: single-entry resolve", () => {
+  it("resolves one thread by id (point lookup on the threads table)", async () => {
+    const fn = stubSqlite({ status: "ok", rows: [SAMPLE_ROWS[0]] });
+    const entry = await readCodexEntry("t1", { codexDir: "/x/.codex", readSqliteFn: fn });
+    const [dbPath, sql] = fn.mock.calls[0];
+    expect(dbPath).toBe("/x/.codex/state_5.sqlite");
+    expect(sql).toContain("WHERE id = 't1'");
+    expect(entry?.id).toBe("codex:t1");
+    expect(entry?.flags.model).toBe("gpt-5-codex");
+  });
+
+  it("returns null for an unsafe id without touching the db", async () => {
+    const fn = stubSqlite({ status: "ok", rows: [] });
+    expect(await readCodexEntry("../escape", { codexDir: "/x/.codex", readSqliteFn: fn })).toBeNull();
+    expect(fn).not.toHaveBeenCalled();
+  });
+
+  it("returns null when the thread row is missing", async () => {
+    const fn = stubSqlite({ status: "ok", rows: [] });
+    expect(await readCodexEntry("ghost", { codexDir: "/x/.codex", readSqliteFn: fn })).toBeNull();
+  });
+
+  it("returns null (no throw) when no DB and no rollout matches the id", async () => {
+    const fn = stubSqlite({ status: "no-db", rows: [] });
+    expect(await readCodexEntry("no-such-uuid", { codexDir: FIXTURE_CODEX_DIR, readSqliteFn: fn })).toBeNull();
   });
 });
 

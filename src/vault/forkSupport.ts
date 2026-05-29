@@ -1,9 +1,10 @@
 // src/vault/forkSupport.ts — OpenCode fork version gate.
 // See: design.md (Risk Map: Fork on OpenCode), specs/vault-session-launch/spec.md
-//      (Fork a session when supported), docs/research §7 (minimum 1.14.50).
+//      (Fork a session when supported).
 //
-// Fork on OpenCode only works on >= 1.14.50, so we probe `opencode --version`
-// once and compare. Claude/Codex have no version gate (handled in VaultService).
+// `opencode --fork` landed in v1.1.54 (commit 84c5df19c, 2026-02-06), so we probe
+// `opencode --version` once and compare against the registry's `forkMinVersion`.
+// Claude/Codex have no version gate (handled in VaultService).
 
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";

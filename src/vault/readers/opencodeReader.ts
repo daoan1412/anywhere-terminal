@@ -29,7 +29,11 @@ const DETAIL_PART_LIMIT = 5000;
 /** Bound the direct-child stubs embedded in a parent's detail timeline. */
 const CHILD_LIMIT = 100;
 
-const OPENCODE_SESSION_SQL = `SELECT s.id, s.title, s.directory, s.time_updated, (
+// Shared SELECT (columns + correlated title/first-prompt subqueries). The list
+// adds the top-level `parent_id` filter + ordering/limit; the single-entry resolve
+// (readOpenCodeEntry) adds `WHERE s.id = ?` and keeps no filter so a child session
+// is still resolvable by id for resume.
+const OPENCODE_SESSION_SELECT = `SELECT s.id, s.title, s.directory, s.time_updated, (
     SELECT data FROM message
     WHERE session_id = s.id AND data LIKE '%"role":"assistant"%'
     ORDER BY time_created DESC LIMIT 1
@@ -39,7 +43,9 @@ const OPENCODE_SESSION_SQL = `SELECT s.id, s.title, s.directory, s.time_updated,
       AND p.data LIKE '%"type":"text"%' AND p.data NOT LIKE '%"synthetic":true%'
     ORDER BY p.time_created ASC LIMIT 1
 ) AS first_user_part
-FROM session s
+FROM session s`;
+
+const OPENCODE_SESSION_SQL = `${OPENCODE_SESSION_SELECT}
 WHERE s.parent_id IS NULL OR s.parent_id = ''
 ORDER BY s.time_updated DESC
 LIMIT ${ROW_LIMIT}`;
@@ -116,7 +122,11 @@ function mapSessionRow(row: Record<string, unknown>): VaultSessionEntry | null {
   };
 }
 
-export async function readOpenCodeSessions(options: OpenCodeReaderOptions = {}): Promise<ReaderResult> {
+/** Resolve the opencode db path + sqlite reader, shared by the list and single-entry paths. */
+function resolveOpencodePaths(options: OpenCodeReaderOptions): {
+  dbPath: string;
+  readSqliteFn: typeof readSqlite;
+} {
   const home = options.home ?? os.homedir();
   // OpenCode resolves its data dir via the `xdg-basedir` package, which is the
   // SAME on every OS (it is NOT OS-aware): `$XDG_DATA_HOME/opencode` else
@@ -124,8 +134,11 @@ export async function readOpenCodeSessions(options: OpenCodeReaderOptions = {}):
   // NOT %APPDATA%). Mirror that here. See docs/research/20260529-cross-platform-store-paths-sqlite.md.
   const xdgData = process.env.XDG_DATA_HOME?.trim() || path.join(home, ".local", "share");
   const dataDir = options.dataDir ?? path.join(xdgData, "opencode");
-  const dbPath = path.join(dataDir, "opencode.db");
-  const readSqliteFn = options.readSqliteFn ?? readSqlite;
+  return { dbPath: path.join(dataDir, "opencode.db"), readSqliteFn: options.readSqliteFn ?? readSqlite };
+}
+
+export async function readOpenCodeSessions(options: OpenCodeReaderOptions = {}): Promise<ReaderResult> {
+  const { dbPath, readSqliteFn } = resolveOpencodePaths(options);
 
   const result = await readSqliteFn(dbPath, OPENCODE_SESSION_SQL);
 
@@ -147,6 +160,29 @@ export async function readOpenCodeSessions(options: OpenCodeReaderOptions = {}):
     }
   }
   return { entries, unreadable };
+}
+
+/**
+ * Resolve ONE OpenCode session to its launch entry by id — the single-entry
+ * counterpart to readOpenCodeSessions, used by VaultService.getEntry for fast
+ * resume/fork (a point lookup, not the full-store scan; D3). No `parent_id`
+ * filter so a child (subagent) session is still resolvable by id. Returns null
+ * for an unsafe id or a missing row.
+ */
+export async function readOpenCodeEntry(
+  sessionId: string,
+  options: OpenCodeReaderOptions = {},
+): Promise<VaultSessionEntry | null> {
+  if (!isSafeOpenCodeId(sessionId)) {
+    return null;
+  }
+  const { dbPath, readSqliteFn } = resolveOpencodePaths(options);
+  // `sessionId` is validated to `[A-Za-z0-9_-]+` above, so embedding it is safe.
+  const result = await readSqliteFn(dbPath, `${OPENCODE_SESSION_SELECT} WHERE s.id = '${sessionId}' LIMIT 1`);
+  if (result.status !== "ok" || result.rows.length === 0) {
+    return null;
+  }
+  return mapSessionRow(result.rows[0]);
 }
 
 // ── On-demand session detail (redesign-vault-panel-ui 2_3) ──────────────────

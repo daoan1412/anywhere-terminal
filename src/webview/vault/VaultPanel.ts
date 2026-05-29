@@ -327,7 +327,8 @@ export class VaultPanel {
   private readonly searchInput: HTMLInputElement;
   private readonly searchBarEl: HTMLElement;
   private readonly searchBtnEl: HTMLButtonElement;
-  private readonly folderToggleEl: HTMLButtonElement;
+  private readonly folderToggleEl: HTMLLabelElement;
+  private readonly folderCheckboxEl: HTMLInputElement;
   private readonly segmentedEl: HTMLElement;
   private readonly statusEl: HTMLElement;
   private readonly bodyEl: HTMLElement;
@@ -364,6 +365,11 @@ export class VaultPanel {
   private activePreviewEntryId: string | null = null;
   private activePreviewEntry: VaultSessionEntry | null = null;
   private activePreviewRow: HTMLElement | null = null;
+  /** Tears down an in-flight resize drag (document listeners + pointer capture)
+   *  WITHOUT committing its geometry. Invoked by closePreview so an Esc /
+   *  click-outside mid-drag can't leak listeners or persist a half-dragged
+   *  size (W5). Undefined when no drag is active. */
+  private cancelActiveResize?: () => void;
   /** Whether the preview is expanded to fill the whole webview viewport. */
   private previewMaximized = false;
   /** Remembered floating size+position (survives close→reopen). Null until the
@@ -515,13 +521,17 @@ export class VaultPanel {
     }
     toolbar.appendChild(this.segmentedEl);
 
-    // "This folder only" — scope the list to the active terminal pane's cwd.
-    this.folderToggleEl = document.createElement("button");
-    this.folderToggleEl.type = "button";
+    // "This folder only" — a checkbox; when checked, scope the list to the
+    // active terminal pane's cwd.
+    this.folderToggleEl = document.createElement("label");
     this.folderToggleEl.className = "vault-folder-toggle";
-    this.folderToggleEl.textContent = "This folder";
-    this.folderToggleEl.setAttribute("aria-pressed", "false");
-    this.folderToggleEl.addEventListener("click", () => this.toggleFolderOnly());
+    this.folderCheckboxEl = document.createElement("input");
+    this.folderCheckboxEl.type = "checkbox";
+    this.folderCheckboxEl.className = "vault-folder-toggle-cb";
+    const folderText = document.createElement("span");
+    folderText.textContent = "This folder only";
+    this.folderToggleEl.append(this.folderCheckboxEl, folderText);
+    this.folderCheckboxEl.addEventListener("change", () => this.setFolderOnly(this.folderCheckboxEl.checked));
     toolbar.appendChild(this.folderToggleEl);
 
     this.statusEl = document.createElement("div");
@@ -564,14 +574,20 @@ export class VaultPanel {
   }
 
   private syncSegmented(): void {
+    // role="tab" → active state is communicated via aria-selected, not aria-pressed (W7).
     for (const btn of Array.from(this.segmentedEl.querySelectorAll<HTMLButtonElement>("button"))) {
-      btn.setAttribute("aria-pressed", btn.dataset.mode === this.groupMode ? "true" : "false");
+      btn.setAttribute("aria-selected", btn.dataset.mode === this.groupMode ? "true" : "false");
     }
   }
 
   /** Whether the vault section is collapsed to its header strip. */
   isCollapsed(): boolean {
     return this.collapsed;
+  }
+
+  /** Whether the "This folder only" filter is active (gates the cwd re-query). */
+  isFolderOnly(): boolean {
+    return this.folderOnly;
   }
 
   /** Collapse/expand the section. Persists unless `persist: false`. */
@@ -692,8 +708,8 @@ export class VaultPanel {
   /** Set the "This folder only" filter. Persists unless `persist: false`. */
   setFolderOnly(folderOnly: boolean, opts: { persist?: boolean } = {}): void {
     this.folderOnly = folderOnly;
+    this.folderCheckboxEl.checked = folderOnly;
     this.folderToggleEl.classList.toggle("is-active", folderOnly);
-    this.folderToggleEl.setAttribute("aria-pressed", folderOnly ? "true" : "false");
     this.syncFolderToggleTitle();
     if (opts.persist !== false) {
       this.persistFolderOnly?.(folderOnly);
@@ -797,6 +813,22 @@ export class VaultPanel {
       if (!expanded && overflow > 0) {
         this.listEl.appendChild(this.renderShowMore(group.key, overflow));
       }
+    }
+
+    // A re-render (group/filter/search change or a host push) rebuilds every row,
+    // so the open preview's selection highlight lands on a now-detached node. Re-
+    // apply it to the fresh row so the preview stays anchored to its source (W4).
+    // If that row is no longer visible (filtered out / collapsed / behind "show
+    // more"), clear the stale ref — the preview stays open, just unanchored.
+    if (this.activePreviewEntryId) {
+      // Match on dataset rather than a `[data-entry-id="…"]` selector so an
+      // entryId's `:` separator needs no CSS escaping (and no CSS.escape dep).
+      const row =
+        Array.from(this.listEl.querySelectorAll<HTMLElement>(".vault-row")).find(
+          (r) => r.dataset.entryId === this.activePreviewEntryId,
+        ) ?? null;
+      this.activePreviewRow = row;
+      row?.setAttribute("aria-selected", "true");
     }
   }
 
@@ -1080,6 +1112,9 @@ export class VaultPanel {
   }
 
   private closePreview(): void {
+    // Abort an in-flight resize drag first so its document listeners don't
+    // outlive the closed preview and overwrite previewGeometry on release (W5).
+    this.cancelActiveResize?.();
     this.previewEl.classList.remove("is-open");
     this.previewEl.replaceChildren();
     // Keep previewGeometry + previewMaximized so the next open restores them (#1).
@@ -1204,12 +1239,19 @@ export class VaultPanel {
       this.previewEl.style.width = `${w}px`;
       this.previewEl.style.height = `${h}px`;
     };
-    const onUp = (e: PointerEvent): void => {
-      handle.releasePointerCapture?.(e.pointerId);
+    const teardown = (): void => {
       document.removeEventListener("pointermove", onMove);
       document.removeEventListener("pointerup", onUp);
+      handle.releasePointerCapture?.(ev.pointerId);
+      this.cancelActiveResize = undefined;
+    };
+    const onUp = (): void => {
+      teardown();
       this.capturePreviewGeometry(); // remember size/pos across close→reopen (#1)
     };
+    // Exposed so closePreview can abort a drag in progress (W5) — abort drops the
+    // mid-drag geometry (no capturePreviewGeometry), unlike a normal pointerup.
+    this.cancelActiveResize = teardown;
     document.addEventListener("pointermove", onMove);
     document.addEventListener("pointerup", onUp);
   }
@@ -1612,7 +1654,16 @@ export class VaultPanel {
       btn.addEventListener("click", () => {
         this.expandedRuns.add(idx);
         if (this.activePreviewEntry && this.activePreviewDetail) {
+          // renderPreviewDetail rebuilds the body from scratch, so the new body
+          // starts at scrollTop 0 — preserve the current scroll so expanding a
+          // run reveals its steps in place instead of jumping to the top. Content
+          // above the button is positionally stable, so the same offset holds.
+          const prevScroll = this.previewEl.querySelector<HTMLElement>(".vault-preview-body")?.scrollTop ?? 0;
           this.renderPreviewDetail(this.activePreviewEntry, this.activePreviewDetail);
+          const newBody = this.previewEl.querySelector<HTMLElement>(".vault-preview-body");
+          if (newBody) {
+            newBody.scrollTop = prevScroll;
+          }
         }
       });
       body.appendChild(btn);

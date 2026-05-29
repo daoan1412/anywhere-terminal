@@ -4,7 +4,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import { __resetForkSupportCache, canForkOpenCode, gte, parseFirstSemver } from "./forkSupport";
 import type { ReaderResult } from "./readers/claudeReader";
 import type { VaultSessionEntry } from "./types";
-import { type VaultReaders, VaultService } from "./VaultService";
+import { type VaultEntryReaders, type VaultReaders, VaultService } from "./VaultService";
 
 function entry(agent: string, sessionId: string, modified: number): VaultSessionEntry {
   return {
@@ -28,6 +28,15 @@ function makeReaders(overrides: Partial<VaultReaders> = {}): VaultReaders {
     claude: vi.fn(async () => result([])),
     codex: vi.fn(async () => result([])),
     opencode: vi.fn(async () => result([])),
+    ...overrides,
+  };
+}
+
+function makeEntryReaders(overrides: Partial<VaultEntryReaders> = {}): VaultEntryReaders {
+  return {
+    claude: vi.fn(async () => null),
+    codex: vi.fn(async () => null),
+    opencode: vi.fn(async () => null),
     ...overrides,
   };
 }
@@ -105,7 +114,7 @@ describe("VaultService.list: fork resolution", () => {
     const svc = new VaultService({ readers, canForkOpenCodeFn: probe });
     const { entries } = await svc.list();
     expect(entries[0].canFork).toBe(false);
-    expect(probe).toHaveBeenCalledWith("1.14.50");
+    expect(probe).toHaveBeenCalledWith("1.1.54");
   });
 
   it("opencode canFork is false when the probe rejects", async () => {
@@ -124,6 +133,65 @@ describe("VaultService.list: fork resolution", () => {
     const svc = new VaultService({ readers, canForkOpenCodeFn: probe });
     await svc.list();
     expect(probe).not.toHaveBeenCalled();
+  });
+});
+
+describe("VaultService.getEntry: single-entry resolve", () => {
+  it("resolves ONLY the matching agent's reader (others not called) — the fast launch path", async () => {
+    const claude = vi.fn(async () => entry("claude", "c1", 1));
+    const codex = vi.fn(async () => null);
+    const opencode = vi.fn(async () => null);
+    const svc = new VaultService({ entryReaders: { claude, codex, opencode }, canForkOpenCodeFn: async () => false });
+    const e = await svc.getEntry("claude:c1");
+    expect(e?.id).toBe("claude:c1");
+    expect(claude).toHaveBeenCalledWith("c1");
+    expect(codex).not.toHaveBeenCalled();
+    expect(opencode).not.toHaveBeenCalled();
+  });
+
+  it("returns null for an unknown agent or a malformed id", async () => {
+    const svc = new VaultService({ entryReaders: makeEntryReaders(), canForkOpenCodeFn: async () => false });
+    expect(await svc.getEntry("bogus:x")).toBeNull();
+    expect(await svc.getEntry("no-colon")).toBeNull();
+  });
+
+  it("returns null when the agent reader can't resolve the session", async () => {
+    const svc = new VaultService({
+      entryReaders: makeEntryReaders({ codex: vi.fn(async () => null) }),
+      canForkOpenCodeFn: async () => false,
+    });
+    expect(await svc.getEntry("codex:missing")).toBeNull();
+  });
+
+  it("resolves canFork for claude WITHOUT spawning the opencode probe", async () => {
+    const probe = vi.fn(async () => true);
+    const svc = new VaultService({
+      entryReaders: makeEntryReaders({ claude: vi.fn(async () => entry("claude", "c1", 1)) }),
+      canForkOpenCodeFn: probe,
+    });
+    const e = await svc.getEntry("claude:c1");
+    expect(e?.canFork).toBe(true);
+    expect(probe).not.toHaveBeenCalled();
+  });
+
+  it("opencode canFork follows the probe (and only opencode triggers it)", async () => {
+    const probe = vi.fn(async () => true);
+    const svc = new VaultService({
+      entryReaders: makeEntryReaders({ opencode: vi.fn(async () => entry("opencode", "o1", 1)) }),
+      canForkOpenCodeFn: probe,
+    });
+    const e = await svc.getEntry("opencode:o1");
+    expect(e?.canFork).toBe(true);
+    expect(probe).toHaveBeenCalledWith("1.1.54");
+  });
+
+  it("opencode canFork is false when the probe says so", async () => {
+    const svc = new VaultService({
+      entryReaders: makeEntryReaders({ opencode: vi.fn(async () => entry("opencode", "o1", 1)) }),
+      canForkOpenCodeFn: async () => false,
+    });
+    const e = await svc.getEntry("opencode:o1");
+    expect(e?.canFork).toBe(false);
   });
 });
 

@@ -3,7 +3,7 @@
 import * as path from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { SqliteResult } from "../sqlite";
-import { readOpenCodeSessions } from "./opencodeReader";
+import { readOpenCodeEntry, readOpenCodeSessions } from "./opencodeReader";
 
 function stubSqlite(result: SqliteResult) {
   return vi.fn(async (_dbPath: string, _sql: string) => result);
@@ -113,6 +113,30 @@ describe("readOpenCodeSessions", () => {
     const { entries, unreadable } = await readOpenCodeSessions({ dataDir: "/x/oc", readSqliteFn: fn });
     expect(entries).toEqual([]);
     expect(unreadable).toBe(1);
+  });
+});
+
+describe("readOpenCodeEntry: single-entry resolve", () => {
+  it("resolves one session by id (point lookup, no parent_id list filter)", async () => {
+    const fn = stubSqlite({ status: "ok", rows: [ROWS[0]] });
+    const entry = await readOpenCodeEntry("s1", { dataDir: "/x/oc", readSqliteFn: fn });
+    const [dbPath, sql] = fn.mock.calls[0];
+    expect(dbPath).toBe("/x/oc/opencode.db");
+    expect(sql).toContain("WHERE s.id = 's1'");
+    expect(sql).not.toContain("parent_id"); // children are resumable too
+    expect(entry?.id).toBe("opencode:s1");
+    expect(entry?.cwd).toBe("/Users/me/oc");
+  });
+
+  it("returns null for an unsafe id without touching the db", async () => {
+    const fn = stubSqlite({ status: "ok", rows: [] });
+    expect(await readOpenCodeEntry("../etc/passwd", { dataDir: "/x/oc", readSqliteFn: fn })).toBeNull();
+    expect(fn).not.toHaveBeenCalled();
+  });
+
+  it("returns null when no row matches", async () => {
+    const fn = stubSqlite({ status: "ok", rows: [] });
+    expect(await readOpenCodeEntry("ghost", { dataDir: "/x/oc", readSqliteFn: fn })).toBeNull();
   });
 });
 
