@@ -917,7 +917,11 @@
 .webview-layout.file-tree--right.file-tree--root-collapsed .file-tree-header {
   flex: 1 1 auto;
   flex-direction: column;
-  padding: 4px 0;
+  /* No own padding — the root row below carries the 8px top inset. Adding it
+     here too would stack (4 + 8 = 12px) and push the file-tree chevron 4px
+     below the vault's (whose header sits at a flat 8px), misaligning the two
+     side-by-side collapsed strips. */
+  padding: 0;
   align-items: stretch;
   justify-content: flex-start;
   height: auto;
