@@ -129,6 +129,64 @@ const splitRenderer = new SplitTreeRenderer({
   onActivePaneChange: () => syncVaultToActivePane(),
 });
 
+/**
+ * FLIP-animate the sidebar region around a collapse toggle, the way VS Code's
+ * paneview animates its panes: freeze the region + its two sections to their
+ * CURRENT pixel sizes, apply the layout change, then transition `flex-basis` in
+ * pixels to the final sizes (grow/shrink disabled for the tween). Animating an
+ * explicit pixel dimension — instead of `flex-grow`, whose ratio interpolates
+ * non-linearly in pixel terms — keeps the file tree (the in-region grow-sibling)
+ * from bouncing. Inline styles are always cleared after the tween so the steady
+ * state reverts to the class-based flex; a failed/early-cleared tween therefore
+ * degrades to the correct final layout, never a stuck size.
+ */
+function runAuxCollapseAnimation(apply: () => void): void {
+  const region = document.getElementById("aux-region");
+  const layout = document.getElementById("webview-layout");
+  if (!region || !layout) {
+    apply();
+    return;
+  }
+  if (window.matchMedia?.("(prefers-reduced-motion: reduce)").matches) {
+    apply();
+    return;
+  }
+  // Region axis follows the dock: height for top/bottom, width for left/right.
+  const vertical = layout.classList.contains("file-tree--top") || layout.classList.contains("file-tree--bottom");
+  const els = [region, ...Array.from(region.children)] as HTMLElement[];
+  const measure = (el: HTMLElement): number =>
+    vertical ? el.getBoundingClientRect().height : el.getBoundingClientRect().width;
+
+  const before = els.map(measure);
+  apply();
+  const after = els.map(measure);
+  if (els.every((_, i) => Math.abs(before[i] - after[i]) < 0.5)) {
+    return; // nothing resized — no tween needed
+  }
+
+  for (let i = 0; i < els.length; i++) {
+    const s = els[i].style;
+    s.transition = "none";
+    s.flexGrow = "0";
+    s.flexShrink = "0";
+    s.flexBasis = `${before[i]}px`;
+  }
+  void region.offsetWidth; // reflow so the "from" sizes register
+  for (let i = 0; i < els.length; i++) {
+    const s = els[i].style;
+    s.transition = "flex-basis 150ms ease-out";
+    s.flexBasis = `${after[i]}px`;
+  }
+  window.setTimeout(() => {
+    for (const el of els) {
+      el.style.transition = "";
+      el.style.flexGrow = "";
+      el.style.flexShrink = "";
+      el.style.flexBasis = "";
+    }
+  }, 170);
+}
+
 /** Resolve the active terminal pane's tracked cwd (OSC 7), or null. */
 function getActivePaneCwd(): string | null {
   const tabId = store.activeTabId;
@@ -717,9 +775,9 @@ function handleInit(msg: InitMessage): void {
       // the current OSC 7 value (not a null captured before the shell emitted
       // it). Toggling "This folder only" then scopes immediately.
       getContextCwd: () => getActivePaneCwd(),
-      // Reuse the file tree's collapse-animation gate so the vault's
-      // expand/collapse animates in step with it (shared `#aux-region`).
-      armAnimation: () => fileTreeController?.panel.armCollapseAnimation(),
+      // VS-Code-style pixel FLIP of the shared region so expanding/collapsing
+      // the vault doesn't bounce the file tree (the grow-sibling).
+      animateCollapse: (apply) => runAuxCollapseAnimation(apply),
     });
     // Seed the folder-filter context to the current active pane; it updates on
     // every pane select / tab switch. A vault that restored expanded refreshes

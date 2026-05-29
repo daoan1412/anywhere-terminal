@@ -125,22 +125,32 @@ describe("VaultPanel collapse", () => {
     expect(count?.textContent).toBe("2");
   });
 
-  it("arms the shared collapse animation on user toggles but not on the seed", () => {
+  it("runs the collapse animation (applying the change) on user toggles but not on the seed", () => {
     const host = createHost();
-    let arms = 0;
-    const panel = new VaultPanel({ host, postMessage: () => {}, armAnimation: () => arms++ });
-    // Constructor seed (persist:false) must NOT animate.
-    expect(arms).toBe(0);
+    let calls = 0;
+    const panel = new VaultPanel({
+      host,
+      postMessage: () => {},
+      animateCollapse: (apply) => {
+        calls++;
+        apply();
+      },
+    });
+    // Constructor seed (persist:false) applies directly — not animated.
+    expect(calls).toBe(0);
+    expect(panel.isCollapsed()).toBe(true);
 
     panel.toggleCollapsed(); // collapsed -> expanded (user)
-    expect(arms).toBe(1);
-    panel.toggleCollapsed(); // expanded -> collapsed (user)
-    expect(arms).toBe(2);
+    expect(calls).toBe(1);
+    expect(panel.isCollapsed()).toBe(false);
+    expect(host.classList.contains("vault-collapsed")).toBe(false); // apply() ran
 
-    // A no-op (already expanded) should not arm.
-    panel.expand();
-    panel.expand();
-    expect(arms).toBe(3);
+    panel.toggleCollapsed(); // expanded -> collapsed (user)
+    expect(calls).toBe(2);
+
+    panel.expand(); // collapsed -> expanded
+    panel.expand(); // already expanded — no-op, no animation
+    expect(calls).toBe(3);
   });
 
   it("requests the session list when expanding (refresh on open)", () => {

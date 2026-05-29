@@ -1363,13 +1363,8 @@ export class FileTreePanel {
    * transition on the panel's flex runs only for user-initiated
    * collapse/expand toggles — sash drags and initial mount stay instant.
    * Pattern mirrors VS Code's `setupAnimation` in `paneview.ts`.
-   *
-   * Public so the sibling vault section (`VaultPanel`) can arm the SAME gate
-   * on its own collapse toggle — both sections share `#aux-region` and the
-   * `.file-tree--anim` transition rule covers both, so the vault animates
-   * consistently with the file tree.
    */
-  armCollapseAnimation(): void {
+  private armCollapseAnimation(): void {
     const wrapper = this.deps.layoutWrapper;
     if (!wrapper) {
       return;

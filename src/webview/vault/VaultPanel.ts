@@ -36,12 +36,14 @@ export interface VaultPanelDeps {
    */
   getContextCwd?: () => string | null;
   /**
-   * Arm the shared layout collapse animation (`FileTreePanel.armCollapseAnimation`)
-   * so the vault's expand/collapse animates in step with the file tree — both
-   * sections share `#aux-region` and the same `.file-tree--anim` transition.
-   * Called just before the collapsed-class toggle on user-initiated toggles.
+   * Run the collapse animation around the visual state change. Receives an
+   * `apply` callback that performs the actual class toggle; the implementation
+   * (in `main.ts`) FLIP-animates the shared `#aux-region` in pixels so the
+   * file tree (the in-region grow-sibling) doesn't bounce. Called only on
+   * user-initiated toggles; the constructor seed applies the change directly.
+   * When absent (tests), the change is applied synchronously with no animation.
    */
-  armAnimation?: () => void;
+  animateCollapse?: (apply: () => void) => void;
 }
 
 /** True iff `child` equals `parent` or sits inside its subtree (either separator). */
@@ -109,7 +111,7 @@ export class VaultPanel {
   private readonly persistCollapsed?: (collapsed: boolean) => void;
   private readonly persistFolderOnly?: (folderOnly: boolean) => void;
   private readonly getContextCwd?: () => string | null;
-  private readonly armAnimation?: () => void;
+  private readonly animateCollapse?: (apply: () => void) => void;
 
   private entries: VaultSessionEntry[] = [];
   private unreadable = 0;
@@ -126,7 +128,7 @@ export class VaultPanel {
     this.persistCollapsed = deps.persistCollapsed;
     this.persistFolderOnly = deps.persistFolderOnly;
     this.getContextCwd = deps.getContextCwd;
-    this.armAnimation = deps.armAnimation;
+    this.animateCollapse = deps.animateCollapse;
 
     this.host.classList.add("vault-panel");
     this.host.replaceChildren();
@@ -207,14 +209,18 @@ export class VaultPanel {
   setCollapsed(collapsed: boolean, opts: { persist?: boolean } = {}): void {
     const wasCollapsed = this.collapsed;
     this.collapsed = collapsed;
-    // Arm the shared layout collapse transition BEFORE toggling the class so
-    // the browser captures the current flex as the animation's "from" value
-    // (same ordering the file tree uses). User-initiated toggles only — the
-    // constructor seed passes persist:false and must stay instant.
-    if (collapsed !== wasCollapsed && opts.persist !== false) {
-      this.armAnimation?.();
+    // The class toggle is what changes the flex layout; the animator FLIPs the
+    // region around it (pixel basis, no grow tween → the file tree doesn't
+    // bounce). User-initiated toggles animate; the constructor seed (persist:
+    // false) and the no-animator case (tests) apply the change instantly.
+    const applyVisual = (): void => {
+      this.host.classList.toggle("vault-collapsed", collapsed);
+    };
+    if (collapsed !== wasCollapsed && opts.persist !== false && this.animateCollapse) {
+      this.animateCollapse(applyVisual);
+    } else {
+      applyVisual();
     }
-    this.host.classList.toggle("vault-collapsed", collapsed);
     this.headerEl.setAttribute("aria-expanded", collapsed ? "false" : "true");
     if (opts.persist !== false) {
       this.persistCollapsed?.(collapsed);
