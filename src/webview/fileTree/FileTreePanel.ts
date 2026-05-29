@@ -112,6 +112,14 @@ export interface FileTreePanelDeps {
   regionEl?: HTMLElement;
   /** Toggle the vault section's collapsed state (file-tree header button). */
   onToggleVault?: () => void;
+  /**
+   * Run a pixel-FLIP collapse animation around the root-collapse class toggle
+   * so the shared `#aux-region` resizes smoothly and the in-region grow-sibling
+   * (the vault) doesn't bounce — the vault uses the same helper. Receives the
+   * class toggle and MUST invoke it synchronously between its measurements.
+   * Optional — tests / unwired callers fall back to the CSS flex transition.
+   */
+  animateCollapse?: (apply: () => void) => void;
 }
 
 const EMPTY_STATE_CLASS = "file-tree-empty";
@@ -1347,13 +1355,23 @@ export class FileTreePanel {
     }
     const collapsed = !!this.tree && !!this.rootNode && !this.searchActive && !this.tree.isExpanded(this.rootNode);
     const changed = this.hasSyncedRootCollapseOnce && collapsed !== this.lastRootCollapsedStamped;
-    if (changed) {
-      // Arm the CSS transition BEFORE we toggle the class so the browser
-      // captures the starting flex-basis as the "from" value of the
-      // transition. Without this ordering the transition can no-op.
+    const applyToggle = (): void => {
+      wrapper.classList.toggle("file-tree--root-collapsed", collapsed);
+    };
+    if (changed && this.deps.animateCollapse) {
+      // Pixel FLIP of the shared region (same helper the vault uses): it
+      // measures around the class toggle, so hand it the toggle. Animating the
+      // region's pixel size keeps the vault grow-sibling from bouncing.
+      this.deps.animateCollapse(applyToggle);
+    } else if (changed) {
+      // Fallback (tests / no region wired): arm the CSS flex transition BEFORE
+      // toggling so the browser captures the starting flex-basis as the "from"
+      // value. Without this ordering the transition can no-op.
       this.armCollapseAnimation();
+      applyToggle();
+    } else {
+      applyToggle();
     }
-    wrapper.classList.toggle("file-tree--root-collapsed", collapsed);
     this.lastRootCollapsedStamped = collapsed;
     this.hasSyncedRootCollapseOnce = true;
   }

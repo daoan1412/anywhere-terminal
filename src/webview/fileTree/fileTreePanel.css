@@ -891,11 +891,17 @@
   padding: 8px 0;
 }
 /* The chevron + count read awkwardly tilted in a vertical strip — keep the
- * chevron upright (a quick-expand affordance) and drop the count badge. */
+ * chevron upright (a quick-expand affordance) and drop the count badge.
+ * Direction mirrors the collapsed file-tree chevron so the two side-by-side
+ * strips point the same way: left dock → `›` (terminal is to the right);
+ * right dock → `‹` (terminal is to the left). */
 .webview-layout.file-tree--left .aux-region > .vault-panel.vault-collapsed .vault-header__chevron,
 .webview-layout.file-tree--right .aux-region > .vault-panel.vault-collapsed .vault-header__chevron {
   text-orientation: upright;
   transform: none;
+}
+.webview-layout.file-tree--right .aux-region > .vault-panel.vault-collapsed .vault-header__chevron {
+  transform: rotate(180deg);
 }
 .webview-layout.file-tree--left .aux-region > .vault-panel.vault-collapsed .vault-header__count,
 .webview-layout.file-tree--right .aux-region > .vault-panel.vault-collapsed .vault-header__count {

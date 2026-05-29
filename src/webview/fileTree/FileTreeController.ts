@@ -56,6 +56,8 @@ export interface FileTreeControllerDeps {
   regionEl?: HTMLElement;
   /** Toggle the vault section's collapsed state (file-tree header button). Optional. */
   onToggleVault?: () => void;
+  /** Pixel-FLIP collapse animation around the root-collapse toggle (shared with the vault). Optional. */
+  animateCollapse?: (apply: () => void) => void;
 }
 
 type TerminalLocationKey = "sidebar" | "panel" | "editor";
@@ -119,6 +121,7 @@ export class FileTreeController {
       layoutWrapper: deps.layoutWrapper,
       regionEl: deps.regionEl,
       onToggleVault: deps.onToggleVault,
+      animateCollapse: deps.animateCollapse,
       onLayoutChange: deps.onLayoutChange,
       getPersistedState: () => getLocationState(),
       persistState: (state) => {

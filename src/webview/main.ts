@@ -153,36 +153,52 @@ function runAuxCollapseAnimation(apply: () => void): void {
   }
   // Region axis follows the dock: height for top/bottom, width for left/right.
   const vertical = layout.classList.contains("file-tree--top") || layout.classList.contains("file-tree--bottom");
-  const els = [region, ...Array.from(region.children)] as HTMLElement[];
+  const all = [region, ...Array.from(region.children)] as HTMLElement[];
   const measure = (el: HTMLElement): number =>
     vertical ? el.getBoundingClientRect().height : el.getBoundingClientRect().width;
 
-  const before = els.map(measure);
+  const before = all.map(measure);
   apply();
-  const after = els.map(measure);
-  if (els.every((_, i) => Math.abs(before[i] - after[i]) < 0.5)) {
+  const after = all.map(measure);
+
+  // Only tween elements whose size actually changed. Freezing an UNCHANGED
+  // element — e.g. the region during an internal vault↔tree split, where its
+  // edge size is constant — to a pixel flex-basis can introduce a 1px
+  // border/box-sizing snap that reads as a small "bounce". Leaving it on its
+  // native `flex: 0 0 var(--file-tree-size)` keeps it rock-solid.
+  const movers = all
+    .map((el, i) => ({ el, from: before[i], to: after[i] }))
+    .filter((m) => Math.abs(m.from - m.to) >= 0.5);
+  if (movers.length === 0) {
     return; // nothing resized — no tween needed
   }
 
-  for (let i = 0; i < els.length; i++) {
-    const s = els[i].style;
+  // `box-sizing: border-box` makes flex-basis count border + padding, so the
+  // px we measured (getBoundingClientRect = border box) equals the px we set.
+  // Without it a bordered section (region's border-top in bottom dock, the
+  // vault's seam border) lands ~1px off and snaps when the tween ends.
+  for (const m of movers) {
+    const s = m.el.style;
+    s.boxSizing = "border-box";
     s.transition = "none";
     s.flexGrow = "0";
     s.flexShrink = "0";
-    s.flexBasis = `${before[i]}px`;
+    s.flexBasis = `${m.from}px`;
   }
   void region.offsetWidth; // reflow so the "from" sizes register
-  for (let i = 0; i < els.length; i++) {
-    const s = els[i].style;
+  for (const m of movers) {
+    const s = m.el.style;
     s.transition = "flex-basis 150ms ease-out";
-    s.flexBasis = `${after[i]}px`;
+    s.flexBasis = `${m.to}px`;
   }
   window.setTimeout(() => {
-    for (const el of els) {
-      el.style.transition = "";
-      el.style.flexGrow = "";
-      el.style.flexShrink = "";
-      el.style.flexBasis = "";
+    for (const m of movers) {
+      const s = m.el.style;
+      s.transition = "";
+      s.flexGrow = "";
+      s.flexShrink = "";
+      s.flexBasis = "";
+      s.boxSizing = "";
     }
   }, 170);
 }
@@ -735,6 +751,9 @@ function handleInit(msg: InitMessage): void {
       // the header's vault button toggles the section stacked above.
       regionEl: auxRegion ?? undefined,
       onToggleVault: () => vaultPanel?.toggleCollapsed(),
+      // Same VS-Code-style pixel FLIP the vault uses — collapsing/expanding the
+      // file tree resizes the shared region smoothly without bouncing the vault.
+      animateCollapse: (apply) => runAuxCollapseAnimation(apply),
       init: { workspaceRoot: msg.workspaceRoot, rootGeneration: msg.rootGeneration },
       store,
       postMessage: (m) => vscode.postMessage(m),
