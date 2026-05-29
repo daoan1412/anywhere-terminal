@@ -36,6 +36,7 @@ import type {
   TabRemovedMessage,
   TabRenamedMessage,
   ThemeChangedMessage,
+  VaultSessionDetailResponseMessage,
   VaultSessionsResponseMessage,
   WorkspaceRootChangedMessage,
 } from "../../types/messages";
@@ -90,6 +91,7 @@ export interface MessageHandlers {
   // ── AI coding vault (add-ai-coding-vault) ──
   // Optional: a webview without a mounted vault panel safely ignores these.
   onVaultSessionsResponse?(msg: VaultSessionsResponseMessage): void;
+  onVaultSessionDetailResponse?(msg: VaultSessionDetailResponseMessage): void;
   onOpenVault?(msg: OpenVaultMessage): void;
 }
 
@@ -203,6 +205,9 @@ export function createMessageRouter(handlers: MessageHandlers): (msg: ExtensionT
         break;
       case "vaultSessionsResponse":
         handlers.onVaultSessionsResponse?.(msg);
+        break;
+      case "vaultSessionDetailResponse":
+        handlers.onVaultSessionDetailResponse?.(msg);
         break;
       case "openVault":
         handlers.onOpenVault?.(msg);

@@ -1,0 +1,5 @@
+{"type":"user","cwd":"/Users/me/proj","gitBranch":"main","permissionMode":"default","sessionId":"sess-titled","timestamp":"2026-05-01T00:00:00Z","message":{"role":"user","content":[{"type":"text","text":"please redesign the whole vault panel with a lot of detail so this prompt is long enough to differ from the title"}]}}
+{"type":"assistant","message":{"role":"assistant","model":"claude-opus-4-7","content":[{"type":"text","text":"On it."}]}}
+{"type":"ai-title","aiTitle":"Stale early title","sessionId":"sess-titled"}
+{"type":"user","message":{"role":"user","content":[{"type":"text","text":"keep going"}]}}
+{"type":"ai-title","aiTitle":"Redesign the AI Vault panel","sessionId":"sess-titled"}

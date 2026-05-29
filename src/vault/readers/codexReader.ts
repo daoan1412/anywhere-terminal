@@ -14,8 +14,9 @@ import * as path from "node:path";
 import * as readline from "node:readline";
 import { boundedPreview } from "../preview";
 import { readSqlite } from "../sqlite";
-import type { VaultSessionEntry } from "../types";
+import type { VaultActivityStep, VaultSessionDetail, VaultSessionEntry, VaultTimelineItem } from "../types";
 import type { ReaderResult } from "./claudeReader";
+import { boundActivity, boundTimeline, MAX_MESSAGE_TEXT, truncate } from "./detail";
 
 /** Bound the SQLite read so the vault list stays cheap (D2). */
 const ROW_LIMIT = 500;
@@ -82,6 +83,9 @@ function mapThreadRow(row: Record<string, unknown>): VaultSessionEntry | null {
       reasoningEffort: asString(row.reasoning_effort),
     },
     canFork: false, // resolved by VaultService (task 2_5)
+    // File-backed iff a rollout transcript exists (UI hint only, D9). The host
+    // re-derives this path by id; it never trusts a webview-supplied path.
+    sessionPath: asString(row.rollout_path),
   };
 }
 
@@ -151,6 +155,7 @@ async function readCodexJsonlFallback(sessionsDir: string): Promise<ReaderResult
         modified: stat.mtimeMs,
         flags: {},
         canFork: false,
+        sessionPath: filePath, // the rollout jsonl backs this session (UI hint)
       });
     } catch {
       unreadable++;
@@ -166,16 +171,21 @@ function envDir(value: string | undefined): string | undefined {
   return trimmed ? trimmed : undefined;
 }
 
-export async function readCodexSessions(options: CodexReaderOptions = {}): Promise<ReaderResult> {
+/**
+ * Resolve Codex's dirs. Codex resolves its home as `$CODEX_HOME` (when set) else
+ * `~/.codex`; the default is correct on Windows too (`os.homedir()` =
+ * `%USERPROFILE%`). The SQLite DB can be relocated independently via
+ * `$CODEX_SQLITE_HOME`. See docs/research/20260529-cross-platform-store-paths-sqlite.md.
+ */
+function codexDirs(options: CodexReaderOptions): { dbPath: string; sessionsDir: string } {
   const home = options.home ?? os.homedir();
-  // Codex resolves its home as `$CODEX_HOME` (when set) else `~/.codex`; the
-  // default is correct on Windows too (`os.homedir()` = `%USERPROFILE%`). The
-  // SQLite DB can be relocated independently via `$CODEX_SQLITE_HOME`. See
-  // docs/research/20260529-cross-platform-store-paths-sqlite.md.
   const codexDir = options.codexDir ?? envDir(process.env.CODEX_HOME) ?? path.join(home, ".codex");
   const sqliteDir = envDir(process.env.CODEX_SQLITE_HOME) ?? codexDir;
-  const dbPath = path.join(sqliteDir, "state_5.sqlite");
-  const sessionsDir = path.join(codexDir, "sessions");
+  return { dbPath: path.join(sqliteDir, "state_5.sqlite"), sessionsDir: path.join(codexDir, "sessions") };
+}
+
+export async function readCodexSessions(options: CodexReaderOptions = {}): Promise<ReaderResult> {
+  const { dbPath, sessionsDir } = codexDirs(options);
   const readSqliteFn = options.readSqliteFn ?? readSqlite;
 
   const result = await readSqliteFn(dbPath, CODEX_THREADS_SQL);
@@ -200,4 +210,337 @@ export async function readCodexSessions(options: CodexReaderOptions = {}): Promi
     }
   }
   return { entries, unreadable };
+}
+
+// ── On-demand session detail (redesign-vault-panel-ui 2_4) ──────────────────
+//
+// The Codex rollout JSONL is NOT Claude-shaped (build-time discovery, design
+// D4): records are `{timestamp, type, payload}` with `type` ∈ session_meta /
+// event_msg / response_item / turn_context. So this reader has its own
+// classifier; when no rollout exists it degrades to a partial detail built from
+// the `threads` index (`first_user_message`).
+
+const PARTIAL_LIMITED_REASON = "No transcript file for this Codex session — showing index only.";
+
+function objField(v: unknown): Record<string, unknown> | undefined {
+  return v && typeof v === "object" && !Array.isArray(v) ? (v as Record<string, unknown>) : undefined;
+}
+
+function num(v: unknown): number {
+  return typeof v === "number" && Number.isFinite(v) ? v : 0;
+}
+
+function parseTs(v: unknown): number {
+  if (typeof v === "number") {
+    return Number.isFinite(v) ? v : 0;
+  }
+  if (typeof v === "string") {
+    const ms = Date.parse(v);
+    return Number.isNaN(ms) ? 0 : ms;
+  }
+  return 0;
+}
+
+/** Session ids are uuids; reject anything that could escape a filename/SQL. */
+function isSafeCodexId(id: string): boolean {
+  return /^[A-Za-z0-9-]+$/.test(id);
+}
+
+/** Primary arg for a Codex `function_call` (arguments is a JSON string). */
+function codexFunctionLabel(args: unknown): string | undefined {
+  const raw = asString(args);
+  let obj: Record<string, unknown> | undefined;
+  if (typeof args === "string") {
+    try {
+      obj = objField(JSON.parse(args));
+    } catch {
+      obj = undefined;
+    }
+  } else {
+    obj = objField(args);
+  }
+  if (obj) {
+    for (const k of ["cmd", "command", "file_path", "path", "query", "pattern"]) {
+      const s = asString(obj[k]);
+      if (s) {
+        return s;
+      }
+    }
+    for (const v of Object.values(obj)) {
+      const s = asString(v);
+      if (s) {
+        return s;
+      }
+    }
+  }
+  return raw;
+}
+
+/** Best-effort reasoning text from a Codex `reasoning` item — only the plaintext
+ *  `summary[].text` (the bulk is `encrypted_content`, which we never surface). */
+function codexReasoningText(payload: Record<string, unknown>): string | undefined {
+  const summary = payload.summary;
+  if (Array.isArray(summary)) {
+    const parts: string[] = [];
+    for (const s of summary) {
+      const t = asString(objField(s)?.text);
+      if (t) {
+        parts.push(t);
+      }
+    }
+    const joined = parts.join(" ").trim();
+    if (joined) {
+      return joined;
+    }
+  }
+  return asString(payload.content);
+}
+
+/** Label an `apply_patch`-style custom tool: prefer the `*** … File: <p>` line, else first line. */
+function codexPatchLabel(input: unknown): string | undefined {
+  const text = asString(input);
+  if (!text) {
+    return undefined;
+  }
+  const lines = text.split("\n");
+  for (const line of lines) {
+    const m = line.match(/\*\*\* (?:Add|Update|Delete) File:\s*(.+)/);
+    if (m) {
+      return m[1].trim();
+    }
+  }
+  for (const line of lines) {
+    const t = line.trim();
+    if (t) {
+      return t;
+    }
+  }
+  return undefined;
+}
+
+/**
+ * Dedicated classifier for the Codex rollout schema → bounded session detail
+ * (same `VaultSessionDetail` shape as Claude/OpenCode, so D5/D6 bounds hold).
+ */
+export function classifyCodexRolloutEvents(
+  records: Record<string, unknown>[],
+  limit?: number,
+): Omit<VaultSessionDetail, "entryId"> {
+  let firstPrompt: string | undefined;
+  let latestMessage: VaultSessionDetail["latestMessage"];
+  const activity: VaultActivityStep[] = [];
+  const timeline: VaultTimelineItem[] = [];
+  let messageCount = 0;
+  let toolCount = 0;
+  let totalTokens: number | undefined;
+
+  for (const rec of records) {
+    if (!rec || typeof rec !== "object") {
+      continue;
+    }
+    const payload = objField(rec.payload);
+    if (!payload) {
+      continue;
+    }
+    const type = rec.type;
+    const ptype = payload.type;
+    const ts = parseTs(rec.timestamp);
+
+    if (type === "event_msg") {
+      if (ptype === "user_message") {
+        const m = asString(payload.message);
+        if (m) {
+          messageCount++;
+          if (firstPrompt === undefined) {
+            firstPrompt = truncate(m);
+          }
+          latestMessage = { role: "user", text: truncate(m), timestamp: ts };
+          timeline.push({ kind: "message", role: "user", text: truncate(m, MAX_MESSAGE_TEXT), timestamp: ts });
+        }
+      } else if (ptype === "agent_message") {
+        const m = asString(payload.message);
+        if (m) {
+          messageCount++;
+          latestMessage = { role: "assistant", text: truncate(m), timestamp: ts };
+          timeline.push({ kind: "message", role: "assistant", text: truncate(m, MAX_MESSAGE_TEXT), timestamp: ts });
+        }
+      } else if (ptype === "token_count") {
+        const tot = objField(objField(payload.info)?.total_token_usage);
+        const n = tot ? num(tot.total_tokens) : 0;
+        if (n > 0) {
+          totalTokens = n; // last token_count is the cumulative session total (D7)
+        }
+      }
+    } else if (type === "response_item") {
+      if (ptype === "function_call") {
+        toolCount++;
+        const name = asString(payload.name) ?? "tool";
+        const label = codexFunctionLabel(payload.arguments);
+        const step: VaultActivityStep = { kind: "tool", tool: name, detail: label ? truncate(label) : undefined };
+        activity.push(step);
+        timeline.push(step);
+      } else if (ptype === "custom_tool_call") {
+        toolCount++;
+        const name = asString(payload.name) ?? "tool";
+        const label = codexPatchLabel(payload.input);
+        const step: VaultActivityStep = { kind: "tool", tool: name, detail: label ? truncate(label) : undefined };
+        activity.push(step);
+        timeline.push(step);
+      } else if (ptype === "web_search_call") {
+        toolCount++;
+        const q = asString(objField(payload.action)?.query);
+        const step: VaultActivityStep = { kind: "tool", tool: "WebSearch", detail: q ? truncate(q) : undefined };
+        activity.push(step);
+        timeline.push(step);
+      } else if (ptype === "reasoning") {
+        const t = codexReasoningText(payload);
+        if (t) {
+          timeline.push({ kind: "thinking", text: truncate(t, MAX_MESSAGE_TEXT), timestamp: ts });
+        }
+      }
+      // function_call_output / custom_tool_call_output / reasoning / message → skipped
+    }
+  }
+
+  const bounded = boundTimeline(timeline, limit);
+  return {
+    firstPrompt,
+    recentActivity: boundActivity(activity),
+    latestMessage,
+    timeline: bounded.timeline,
+    ...(bounded.truncated ? { truncated: true } : {}),
+    stats: {
+      messageCount,
+      toolCount,
+      subagentCount: 0,
+      ...(totalTokens !== undefined ? { tokenCount: totalTokens } : {}),
+    },
+  };
+}
+
+/** Read every parseable record from a rollout jsonl (skip-malformed, D8). */
+async function streamCodexRecords(filePath: string): Promise<Record<string, unknown>[] | null> {
+  const records: Record<string, unknown>[] = [];
+  let stream: ReturnType<typeof createReadStream> | undefined;
+  let rl: readline.Interface | undefined;
+  try {
+    stream = createReadStream(filePath, { encoding: "utf8" });
+    rl = readline.createInterface({ input: stream, crlfDelay: Number.POSITIVE_INFINITY });
+    for await (const line of rl) {
+      const trimmed = line.trim();
+      if (!trimmed) {
+        continue;
+      }
+      try {
+        const parsed = JSON.parse(trimmed);
+        if (parsed && typeof parsed === "object") {
+          records.push(parsed as Record<string, unknown>);
+        }
+      } catch {
+        // skip a corrupt line, keep reading (D8)
+      }
+    }
+  } catch {
+    return null;
+  } finally {
+    rl?.close();
+    stream?.destroy();
+  }
+  return records;
+}
+
+/** True iff `p` resolves inside `root`. */
+function isUnder(p: string, root: string): boolean {
+  const rel = path.relative(root, p);
+  return rel !== "" && !rel.startsWith("..") && !path.isAbsolute(rel);
+}
+
+/** Find the rollout jsonl by the session uuid embedded in its filename. */
+async function findCodexRolloutByFilename(sessionId: string, sessionsDir: string): Promise<string | null> {
+  const suffix = `-${sessionId}.jsonl`;
+  let dirents: import("node:fs").Dirent[];
+  const stack = [sessionsDir];
+  while (stack.length > 0) {
+    const dir = stack.pop();
+    if (!dir) {
+      break;
+    }
+    try {
+      dirents = await fs.readdir(dir, { withFileTypes: true });
+    } catch {
+      continue;
+    }
+    for (const dirent of dirents) {
+      const full = path.join(dir, dirent.name);
+      if (dirent.isDirectory()) {
+        stack.push(full);
+      } else if (dirent.isFile() && dirent.name.endsWith(suffix)) {
+        return full;
+      }
+    }
+  }
+  return null;
+}
+
+/** Best-effort: the `threads` index row for one session (rollout_path + first prompt). */
+async function queryCodexThread(
+  sessionId: string,
+  dbPath: string,
+  readSqliteFn: typeof readSqlite,
+): Promise<{ rolloutPath?: string; firstUserMessage?: string } | null> {
+  const sql = `SELECT rollout_path, first_user_message FROM threads WHERE id = '${sessionId}' LIMIT 1`;
+  const res = await readSqliteFn(dbPath, sql);
+  if (res.status !== "ok" || res.rows.length === 0) {
+    return null;
+  }
+  const row = res.rows[0];
+  return { rolloutPath: asString(row.rollout_path), firstUserMessage: asString(row.first_user_message) };
+}
+
+/**
+ * On-demand detail for a Codex session: classify the rollout jsonl when one can
+ * be located (full detail); otherwise return a labeled partial detail from the
+ * `threads` index. Returns null when the session can't be located at all.
+ */
+export async function readCodexDetail(
+  sessionId: string,
+  options: CodexReaderOptions = {},
+  limit?: number,
+): Promise<VaultSessionDetail | null> {
+  if (!isSafeCodexId(sessionId)) {
+    return null;
+  }
+  const { dbPath, sessionsDir } = codexDirs(options);
+  const readSqliteFn = options.readSqliteFn ?? readSqlite;
+
+  const thread = await queryCodexThread(sessionId, dbPath, readSqliteFn);
+
+  // Prefer the index's rollout_path (containment-checked); else scan by filename.
+  let rolloutPath = thread?.rolloutPath && isUnder(thread.rolloutPath, sessionsDir) ? thread.rolloutPath : undefined;
+  if (!rolloutPath) {
+    rolloutPath = (await findCodexRolloutByFilename(sessionId, sessionsDir)) ?? undefined;
+  }
+
+  if (rolloutPath) {
+    const records = await streamCodexRecords(rolloutPath);
+    if (records && records.length > 0) {
+      return { entryId: `codex:${sessionId}`, ...classifyCodexRolloutEvents(records, limit) };
+    }
+  }
+
+  if (thread?.firstUserMessage) {
+    return {
+      entryId: `codex:${sessionId}`,
+      firstPrompt: truncate(thread.firstUserMessage),
+      recentActivity: [],
+      timeline: [
+        { kind: "message", role: "user", text: truncate(thread.firstUserMessage, MAX_MESSAGE_TEXT), timestamp: 0 },
+      ],
+      stats: { messageCount: 0, toolCount: 0, subagentCount: 0 },
+      partial: true,
+      limitedReason: PARTIAL_LIMITED_REASON,
+    };
+  }
+
+  return null;
 }

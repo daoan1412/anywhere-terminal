@@ -86,4 +86,11 @@ export interface WebviewState {
    * so the scope choice survives reloads. Absent → off (show all).
    */
   vaultFolderOnly?: boolean;
+  /**
+   * Vault grouping mode — "recent" (flat), "agent", or "folder". Persisted so
+   * the chosen grouping survives reloads. Absent → "recent" (default).
+   *
+   * See: asimov/changes/redesign-vault-panel-ui/design.md D2.
+   */
+  vaultGroupMode?: "recent" | "agent" | "folder";
 }

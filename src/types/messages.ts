@@ -2,7 +2,7 @@
 // Used by both Extension Host and WebView code.
 // See: docs/design/message-protocol.md
 
-import type { VaultListResult } from "../vault/types";
+import type { VaultListResult, VaultSessionDetail } from "../vault/types";
 
 // ─── Shared Types ───────────────────────────────────────────────────
 
@@ -348,6 +348,53 @@ export interface VaultForkMessage {
   entryId: string;
 }
 
+// ── Session preview + context menu (redesign-vault-panel-ui D3, D9) ──
+// Every one of these carries the entry `id` ONLY. The host resolves the
+// session's on-disk location from the id within the agent's store and derives
+// any path/cwd itself — it NEVER trusts a webview-supplied path.
+
+/** Webview → Extension: read one session's bounded detail for the preview overlay. */
+export interface RequestVaultSessionDetailMessage {
+  type: "requestVaultSessionDetail";
+  entryId: string;
+  /**
+   * Max timeline items to return (most-recent kept). Omitted on the initial
+   * open (host uses its default); the webview sends a larger value to load
+   * older messages when the user scrolls to the top of the transcript.
+   */
+  limit?: number;
+}
+
+/** Webview → Extension: reveal the session's file in the OS file manager. */
+export interface VaultRevealInOSMessage {
+  type: "vaultRevealInOS";
+  entryId: string;
+}
+
+/** Webview → Extension: open the session's file in an editor. */
+export interface VaultOpenSessionFileMessage {
+  type: "vaultOpenSessionFile";
+  entryId: string;
+}
+
+/** Webview → Extension: open the session's recorded working directory. */
+export interface VaultOpenWorkingDirMessage {
+  type: "vaultOpenWorkingDir";
+  entryId: string;
+}
+
+/** Webview → Extension: copy the session's resume command to the clipboard (host-side). */
+export interface VaultCopyResumeCommandMessage {
+  type: "vaultCopyResumeCommand";
+  entryId: string;
+}
+
+/** Webview → Extension: copy the session's file path to the clipboard (host-side). */
+export interface VaultCopyFilePathMessage {
+  type: "vaultCopyFilePath";
+  entryId: string;
+}
+
 /**
  * All messages that can be sent from the WebView to the Extension Host.
  * Use msg.type as the discriminant in switch/case for exhaustive handling.
@@ -379,7 +426,13 @@ export type WebViewToExtensionMessage =
   | ScrollbackDumpMessage
   | RequestVaultSessionsMessage
   | VaultResumeMessage
-  | VaultForkMessage;
+  | VaultForkMessage
+  | RequestVaultSessionDetailMessage
+  | VaultRevealInOSMessage
+  | VaultOpenSessionFileMessage
+  | VaultOpenWorkingDirMessage
+  | VaultCopyResumeCommandMessage
+  | VaultCopyFilePathMessage;
 
 /**
  * Webview → Extension. Sent by the editor webview after it has merged the
@@ -823,6 +876,19 @@ export interface VaultSessionsResponseMessage {
 }
 
 /**
+ * Extension → Webview: reply to `requestVaultSessionDetail`. Echoes the
+ * `entryId` so the webview can drop a response for a session that is no longer
+ * the active preview (redesign-vault-panel-ui D3 stale-render guard). Carries
+ * either the `detail` or an `error` marker.
+ */
+export interface VaultSessionDetailResponseMessage {
+  type: "vaultSessionDetailResponse";
+  entryId: string;
+  detail?: VaultSessionDetail;
+  error?: string;
+}
+
+/**
  * Extension → Webview: open/focus the vault panel. The `openVault` command
  * posts this; the webview expands the vault section (stacked above the file
  * tree) and re-requests the session list.
@@ -869,6 +935,7 @@ export type ExtensionToWebViewMessage =
   | RequestScrollbackDumpMessage
   | FlashPaneMessage
   | VaultSessionsResponseMessage
+  | VaultSessionDetailResponseMessage
   | OpenVaultMessage;
 
 /**

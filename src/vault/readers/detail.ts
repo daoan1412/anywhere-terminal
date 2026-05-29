@@ -1,0 +1,396 @@
+// src/vault/readers/detail.ts — Shared, bounded, defensive substrate for the
+// on-demand session-detail readers (redesign-vault-panel-ui D4/D5/D6).
+//
+// IO-free helpers + a classifier for Claude-style mixed-event JSONL transcripts
+// (also reused by Codex rollout traces). Everything here is bounded (D5) and
+// records tool/subagent CALLS only — never tool results as standalone steps
+// (D6). `firstPrompt`/`latestMessage` are captured independently of the bounded
+// recent-activity tail, and synthetic / sidechain records are excluded so the
+// preview reflects the main conversation.
+
+import type { VaultActivityStep, VaultTimelineItem } from "../types";
+
+/** ~600-char cap per text field (D5). */
+export const MAX_DETAIL_TEXT = 600;
+/** Most-recent-N activity steps surfaced in the bounded `recentActivity` (D5). */
+export const MAX_ACTIVITY_STEPS = 12;
+/** Per-message text cap in the full timeline — generous but still bounded. */
+export const MAX_MESSAGE_TEXT = 2000;
+/** Most-recent-N timeline items surfaced (the preview is still bounded). */
+export const MAX_TIMELINE_ITEMS = 400;
+
+/** Keep only the most-recent `limit` items; flag when older were dropped. */
+export function boundTimeline(
+  items: VaultTimelineItem[],
+  limit = MAX_TIMELINE_ITEMS,
+): { timeline: VaultTimelineItem[]; truncated: boolean } {
+  const cap = Math.max(1, limit);
+  if (items.length <= cap) {
+    return { timeline: items, truncated: false };
+  }
+  return { timeline: items.slice(items.length - cap), truncated: true };
+}
+
+type Rec = Record<string, unknown>;
+
+/**
+ * A discovered sub-session (Claude `Agent`/`Task` spawn) the classifier can fold
+ * into the parent timeline as a lazy `subagentSession`, matched to its spawning
+ * tool call by `description`.
+ */
+export interface ClaudeChildStub {
+  /** Resolvable `<agent>:<id>` the webview fetches on expand. */
+  entryId: string;
+  /** `agentType` / `subagent_type` — the agent persona. */
+  agentType?: string;
+  /** The spawn description (matches the tool call's `input.description`). */
+  description?: string;
+  /** The subagent's first prompt (collapsed-block preview). */
+  firstMessage?: string;
+  /** First-record timestamp (placement fallback for unmatched stubs). */
+  timestamp?: number;
+}
+
+export interface ClassifyOptions {
+  /** Most-recent timeline-item cap (incremental load-more grows it). */
+  limit?: number;
+  /** Keep `isSidechain` records — true when classifying a subagent file whose
+   *  content IS the sidechain (vs. the main file, where they are noise). */
+  includeSidechain?: boolean;
+  /** Sub-sessions to fold in at their spawning `Agent`/`Task` call. */
+  childStubs?: ClaudeChildStub[];
+}
+
+/** Result of classifying a transcript — `readDetail` adds `entryId`. */
+export interface ClassifiedDetail {
+  firstPrompt?: string;
+  recentActivity: VaultActivityStep[];
+  latestMessage?: { role: "user" | "assistant"; text: string; timestamp: number };
+  timeline: VaultTimelineItem[];
+  truncated?: boolean;
+  stats: { messageCount: number; toolCount: number; subagentCount: number; tokenCount?: number };
+}
+
+/** Collapse whitespace, trim, cap at `max`, append an ellipsis when cut. */
+export function truncate(text: string, max = MAX_DETAIL_TEXT): string {
+  const oneLine = text.replace(/\s+/g, " ").trim();
+  return oneLine.length > max ? `${oneLine.slice(0, max)}…` : oneLine;
+}
+
+/** Keep only the most-recent `max` steps (the tail). */
+export function boundActivity<T>(steps: T[], max = MAX_ACTIVITY_STEPS): T[] {
+  return steps.length > max ? steps.slice(steps.length - max) : steps;
+}
+
+function str(v: unknown): string | undefined {
+  return typeof v === "string" && v.trim() ? v.trim() : undefined;
+}
+
+function asObj(v: unknown): Rec | undefined {
+  return v && typeof v === "object" && !Array.isArray(v) ? (v as Rec) : undefined;
+}
+
+function num(v: unknown): number {
+  return typeof v === "number" && Number.isFinite(v) ? v : 0;
+}
+
+/** Concise primary argument for a tool call (D6). */
+export function toolLabel(name: string, input: unknown): string | undefined {
+  const obj = asObj(input) ?? {};
+  switch (name) {
+    case "Read":
+    case "Edit":
+    case "MultiEdit":
+    case "Write":
+      return str(obj.file_path);
+    case "Bash":
+      return str(obj.command);
+    case "Grep":
+    case "Glob":
+      return str(obj.pattern);
+    default: {
+      for (const v of Object.values(obj)) {
+        const s = str(v);
+        if (s) {
+          return s;
+        }
+      }
+      return undefined;
+    }
+  }
+}
+
+const COMMAND_NAME_RE = /<command-name>([\s\S]*?)<\/command-name>/;
+const COMMAND_ARGS_RE = /<command-args>([\s\S]*?)<\/command-args>/;
+
+/**
+ * Strip Claude Code's local-command wrappers from a user message, returning the
+ * human-typed prompt — or `undefined` when the message is pure plumbing.
+ *
+ * Claude injects synthetic `user` records the human never typed: the
+ * `<local-command-caveat>` banner, command stdout, and slash-command wrappers
+ * (`<command-name>/foo</command-name><command-args>…`). A bare slash command
+ * (`/clear`, `/compact`) carries no prompt, so it's dropped and the next real
+ * message wins; a command WITH args surfaces those args (the real intent).
+ */
+export function cleanPromptText(raw: string): string | undefined {
+  const t = raw.trim();
+  if (!t) {
+    return undefined;
+  }
+  if (
+    t.startsWith("<local-command-caveat>") ||
+    t.startsWith("<local-command-stdout>") ||
+    t.startsWith("<command-stdout>")
+  ) {
+    return undefined; // injected banner / command output — never a prompt
+  }
+  if (t.includes("<command-name>") || t.includes("<command-message>")) {
+    const name = COMMAND_NAME_RE.exec(t)?.[1]?.trim() ?? "";
+    const args = COMMAND_ARGS_RE.exec(t)?.[1]?.trim() ?? "";
+    if (!args) {
+      return undefined; // bare command (e.g. /clear) — no prompt to surface
+    }
+    return name ? `${name} ${args}` : args;
+  }
+  return t;
+}
+
+/** Join `text` blocks (or a string) from a message's `content`. */
+function extractText(content: unknown): string | undefined {
+  if (typeof content === "string") {
+    return content.trim() || undefined;
+  }
+  if (Array.isArray(content)) {
+    const text = content
+      .filter((b): b is Rec => !!b && typeof b === "object")
+      .filter((b) => b.type === "text" && typeof b.text === "string")
+      .map((b) => b.text as string)
+      .join(" ")
+      .trim();
+    return text || undefined;
+  }
+  return undefined;
+}
+
+function parseTimestamp(rec: Rec): number {
+  const t = rec.timestamp;
+  if (typeof t === "number") {
+    return Number.isFinite(t) ? t : 0;
+  }
+  if (typeof t === "string") {
+    const ms = Date.parse(t);
+    return Number.isNaN(ms) ? 0 : ms;
+  }
+  return 0;
+}
+
+/** Cheap diff stat from an Edit's old/new strings (newline delta only). */
+function lineDelta(oldStr: unknown, newStr: unknown): { added: number; removed: number } | undefined {
+  if (typeof oldStr !== "string" || typeof newStr !== "string") {
+    return undefined;
+  }
+  const oldLines = oldStr === "" ? 0 : oldStr.split("\n").length;
+  const newLines = newStr === "" ? 0 : newStr.split("\n").length;
+  const added = Math.max(0, newLines - oldLines);
+  const removed = Math.max(0, oldLines - newLines);
+  return added === 0 && removed === 0 ? undefined : { added, removed };
+}
+
+/**
+ * Classify Claude-style mixed-event records into bounded session detail.
+ * Records are the parsed JSONL objects (each with `type`, `message`,
+ * `isSidechain?`, `timestamp?`). Only `user`/`assistant`, non-sidechain records
+ * are considered; everything else (summary, last-prompt, ai-title, system, …)
+ * is ignored.
+ */
+export function classifyClaudeStyleEvents(records: Rec[], opts: ClassifyOptions = {}): ClassifiedDetail {
+  const limit = opts.limit ?? MAX_TIMELINE_ITEMS;
+  const includeSidechain = opts.includeSidechain === true;
+  // Mutable pool — each Agent/Task call consumes its matching stub (by
+  // description); whatever is left is appended after the walk.
+  const stubs = [...(opts.childStubs ?? [])];
+  let firstPrompt: string | undefined;
+  const activity: VaultActivityStep[] = [];
+  const timeline: VaultTimelineItem[] = [];
+  let latestMessage: ClassifiedDetail["latestMessage"];
+  let messageCount = 0;
+  let toolCount = 0;
+  let subagentCount = 0;
+  let outputTokens = 0;
+  let lastContextTokens = 0;
+  let sawUsage = false;
+
+  for (const rec of records) {
+    if (!rec || typeof rec !== "object") {
+      continue;
+    }
+    if (rec.isSidechain === true && !includeSidechain) {
+      continue; // subagent-thread record, not the main conversation (D5)
+    }
+    if (rec.isMeta === true) {
+      continue; // injected (caveat banner, skill/context, system reminder) — not a human turn
+    }
+    const type = rec.type;
+    if (type !== "user" && type !== "assistant") {
+      continue; // summary / last-prompt / system / … are not conversation
+    }
+    const msg = asObj(rec.message);
+    if (!msg) {
+      continue;
+    }
+    const content = msg.content;
+
+    if (type === "user") {
+      const raw = extractText(content);
+      const text = raw ? cleanPromptText(raw) : undefined;
+      if (text) {
+        messageCount++;
+        if (firstPrompt === undefined) {
+          firstPrompt = truncate(text);
+        }
+        const ts = parseTimestamp(rec);
+        latestMessage = { role: "user", text: truncate(text), timestamp: ts };
+        timeline.push({ kind: "message", role: "user", text: truncate(text, MAX_MESSAGE_TEXT), timestamp: ts });
+      }
+      // A pure tool_result user message has no text → not a message, not
+      // first/latest, and never an activity step (tool plumbing, D6).
+      continue;
+    }
+
+    // assistant
+    messageCount++;
+    const ts = parseTimestamp(rec);
+    const text = extractText(content);
+    if (text) {
+      latestMessage = { role: "assistant", text: truncate(text), timestamp: ts };
+    }
+    if (Array.isArray(content)) {
+      // Walk the content blocks in order so thinking / text / tool calls land in
+      // the timeline in the sequence the assistant produced them.
+      for (const b of content) {
+        const block = asObj(b);
+        if (!block) {
+          continue;
+        }
+        if (block.type === "text" && typeof block.text === "string") {
+          const t = (block.text as string).trim();
+          if (t) {
+            timeline.push({ kind: "message", role: "assistant", text: truncate(t, MAX_MESSAGE_TEXT), timestamp: ts });
+          }
+        } else if (block.type === "thinking" && typeof block.thinking === "string") {
+          const t = (block.thinking as string).trim();
+          if (t) {
+            timeline.push({ kind: "thinking", text: truncate(t, MAX_MESSAGE_TEXT), timestamp: ts });
+          }
+        } else if (block.type === "tool_use") {
+          const name = str(block.name) ?? "tool";
+          const input = block.input;
+          if (name === "Task" || name === "Agent") {
+            subagentCount++;
+            const inObj = asObj(input) ?? {};
+            const sub = str(inObj.subagent_type) ?? str(inObj.agent) ?? "subagent";
+            const prompt = str(inObj.prompt) ?? str(inObj.description);
+            // Fold in a stored subagent transcript (matched by description) as a
+            // lazy nested block; else surface the call as a plain subagent step.
+            const matchIdx = matchStub(stubs, str(inObj.description), sub);
+            if (matchIdx >= 0) {
+              const [stub] = stubs.splice(matchIdx, 1);
+              activity.push({ kind: "subagent", name: sub, prompt: prompt ? truncate(prompt) : undefined });
+              timeline.push(stubToItem(stub, sub, prompt, ts));
+            } else {
+              const step: VaultActivityStep = {
+                kind: "subagent",
+                name: sub,
+                prompt: prompt ? truncate(prompt) : undefined,
+              };
+              activity.push(step);
+              timeline.push(step);
+            }
+          } else {
+            toolCount++;
+            const label = toolLabel(name, input);
+            const inObj = asObj(input) ?? {};
+            const diff =
+              name === "Edit" || name === "MultiEdit" ? lineDelta(inObj.old_string, inObj.new_string) : undefined;
+            const step: VaultActivityStep = {
+              kind: "tool",
+              tool: name,
+              detail: label ? truncate(label) : undefined,
+              diff,
+            };
+            activity.push(step);
+            timeline.push(step);
+          }
+        }
+      }
+    } else if (text) {
+      timeline.push({ kind: "message", role: "assistant", text: truncate(text, MAX_MESSAGE_TEXT), timestamp: ts });
+    }
+
+    const usage = asObj(msg.usage);
+    if (usage) {
+      sawUsage = true;
+      outputTokens += num(usage.output_tokens);
+      // Last turn's context ≈ input + cache. Overwritten each turn so it's the
+      // final context size, not a (double-counting) cumulative input sum (D7).
+      lastContextTokens =
+        num(usage.input_tokens) + num(usage.cache_read_input_tokens) + num(usage.cache_creation_input_tokens);
+    }
+  }
+
+  // Subagent files with no matched spawn call (e.g. a teammate launched a
+  // different way) still surface — appended in their own chronological order.
+  for (const stub of stubs.sort((a, b) => (a.timestamp ?? 0) - (b.timestamp ?? 0))) {
+    subagentCount++;
+    timeline.push(stubToItem(stub, stub.agentType ?? "subagent", undefined, stub.timestamp));
+  }
+
+  const tokenCount = sawUsage ? outputTokens + lastContextTokens : undefined;
+  const bounded = boundTimeline(timeline, limit);
+  return {
+    firstPrompt,
+    recentActivity: boundActivity(activity),
+    latestMessage,
+    timeline: bounded.timeline,
+    ...(bounded.truncated ? { truncated: true } : {}),
+    stats: {
+      messageCount,
+      toolCount,
+      subagentCount,
+      ...(tokenCount !== undefined ? { tokenCount } : {}),
+    },
+  };
+}
+
+/** Index of the first unconsumed stub whose description (else agentType) matches
+ *  a spawn call, or -1. Description match is exact (trimmed); agentType is the
+ *  fallback when the call carries no description. */
+function matchStub(stubs: ClaudeChildStub[], description: string | undefined, agentType: string): number {
+  const want = description?.trim();
+  if (want) {
+    const i = stubs.findIndex((s) => s.description?.trim() === want);
+    if (i >= 0) {
+      return i;
+    }
+  }
+  return stubs.findIndex((s) => s.agentType && s.agentType === agentType);
+}
+
+/** Build a `subagentSession` timeline item from a matched stub + spawn call. */
+function stubToItem(
+  stub: ClaudeChildStub,
+  agentType: string,
+  prompt: string | undefined,
+  ts: number | undefined,
+): VaultTimelineItem {
+  const firstMessage = stub.firstMessage ?? prompt;
+  return {
+    kind: "subagentSession",
+    entryId: stub.entryId,
+    title: stub.description || agentType,
+    ...(firstMessage ? { firstMessage: truncate(firstMessage) } : {}),
+    ...(stub.agentType || agentType ? { agent: stub.agentType ?? agentType } : {}),
+    ...(ts !== undefined ? { timestamp: ts } : {}),
+  };
+}

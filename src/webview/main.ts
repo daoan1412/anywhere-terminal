@@ -571,6 +571,9 @@ const routeMessage = createMessageRouter({
   onVaultSessionsResponse(msg) {
     vaultPanel?.render(msg.result);
   },
+  onVaultSessionDetailResponse(msg) {
+    vaultPanel?.handleSessionDetailResponse(msg);
+  },
   onOpenVault() {
     // Open the vault section (it sits above the file tree, both visible) and
     // re-read the agents' session stores — source files are the source of
@@ -790,6 +793,9 @@ function handleInit(msg: InitMessage): void {
       // "This folder only" scope — default off (show all).
       getInitialFolderOnly: () => store.getState().vaultFolderOnly === true,
       persistFolderOnly: (folderOnly) => store.updateState({ vaultFolderOnly: folderOnly }),
+      // Grouping mode — default "recent". Persisted across reloads.
+      getInitialGroupMode: () => store.getState().vaultGroupMode ?? "recent",
+      persistGroupMode: (mode) => store.updateState({ vaultGroupMode: mode }),
       // Live active-pane cwd, pulled on each render so the folder filter uses
       // the current OSC 7 value (not a null captured before the shell emitted
       // it). Toggling "This folder only" then scopes immediately.

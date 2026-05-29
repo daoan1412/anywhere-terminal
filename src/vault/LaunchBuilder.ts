@@ -55,6 +55,37 @@ function expandArgs(template: CommandTemplate, entry: VaultSessionEntry): string
   return args;
 }
 
+/**
+ * Quote one argv token for a readable, paste-safe POSIX command string. Simple
+ * tokens (ids, flags, `key=value`) pass through unquoted; anything else is
+ * single-quote wrapped (which neutralizes metacharacters). The result is COPIED
+ * for the user to inspect/run — never executed by us.
+ */
+function shellQuoteArg(arg: string): string {
+  if (arg === "") {
+    return "''";
+  }
+  if (/^[A-Za-z0-9_./:=@-]+$/.test(arg)) {
+    return arg;
+  }
+  return `'${arg.replace(/'/g, "'\\''")}'`;
+}
+
+/**
+ * Render the registry resume template (executable + captured flags) to a single
+ * shell command string for "Copy Resume Command" (redesign-vault-panel-ui D9).
+ * Reuses the same flag substitution as `build`.
+ */
+export function buildResumeCommandString(entry: VaultSessionEntry): string {
+  const def = getAgentDefinition(entry.agent);
+  if (!def) {
+    throw new VaultLaunchError(`Unknown agent: ${entry.agent}`, "unknown-agent");
+  }
+  const template = def.resumeCommand;
+  const args = expandArgs(template, entry);
+  return [template.executable, ...args].map(shellQuoteArg).join(" ");
+}
+
 function buildClaudeEnv(
   def: AgentVaultDefinition,
   entry: VaultSessionEntry,

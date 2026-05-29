@@ -22,7 +22,7 @@ function makeEntry(overrides: Partial<VaultSessionEntry> = {}): VaultSessionEntr
 
 function stubService(entries: VaultSessionEntry[]): VaultService {
   return {
-    list: async (): Promise<VaultListResult> => ({ entries, unreadable: 0 }),
+    list: async (): Promise<VaultListResult> => ({ entries, unreadable: { count: 0, reasons: [] } }),
   } as unknown as VaultService;
 }
 

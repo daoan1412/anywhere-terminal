@@ -2,7 +2,8 @@ import * as vscode from "vscode";
 import type { SessionManager } from "../session/SessionManager";
 import { readTerminalConfig, readTerminalSettings } from "../settings/SettingsReader";
 import type { ThemeChangedMessage, WebViewToExtensionMessage } from "../types/messages";
-import type { LaunchMode } from "../vault/LaunchBuilder";
+import { buildResumeCommandString, type LaunchMode } from "../vault/LaunchBuilder";
+import type { VaultSessionEntry } from "../vault/types";
 import type { VaultLauncher } from "../vault/VaultLauncher";
 import type { VaultService } from "../vault/VaultService";
 import { FileTreeHost } from "./fileTreeHost";
@@ -374,6 +375,111 @@ export class TerminalViewProvider implements vscode.WebviewViewProvider {
   }
 
   /**
+   * On-demand session detail for the preview overlay. The webview sends the
+   * entry id ONLY; `getDetail` resolves the session by id within the agent's
+   * store (no full list, no cache — D3). The reply echoes `entryId` so the
+   * webview can drop a stale response (D3 stale-render guard).
+   */
+  private async handleRequestVaultSessionDetail(
+    entryId: string,
+    webview: vscode.Webview,
+    limit?: number,
+  ): Promise<void> {
+    if (!this.vaultService) {
+      return;
+    }
+    try {
+      const detail = await this.vaultService.getDetail(entryId, limit);
+      void this.safeSendWithRetry(
+        webview,
+        detail
+          ? { type: "vaultSessionDetailResponse", entryId, detail }
+          : { type: "vaultSessionDetailResponse", entryId, error: "Session not found." },
+      );
+    } catch (err) {
+      void this.safeSendWithRetry(webview, {
+        type: "vaultSessionDetailResponse",
+        entryId,
+        error: err instanceof Error ? err.message : "Failed to read session detail",
+      });
+    }
+  }
+
+  /**
+   * Resolve a vault entry from its id for a (rare) context-menu action. Uses the
+   * same list-and-find path as `VaultLauncher.resolve` so the host derives every
+   * path/cwd/command itself — the webview never sends a path to act on (D9).
+   */
+  private async resolveVaultEntry(entryId: string): Promise<VaultSessionEntry | undefined> {
+    if (!this.vaultService) {
+      return undefined;
+    }
+    const { entries } = await this.vaultService.list();
+    return entries.find((e) => e.id === entryId);
+  }
+
+  /** Reveal the session's transcript file in the OS file manager. */
+  private async handleVaultRevealInOS(entryId: string): Promise<void> {
+    const sessionPath = (await this.resolveVaultEntry(entryId))?.sessionPath;
+    if (!sessionPath) {
+      return; // DB-backed session (no file) → no-op
+    }
+    await vscode.commands.executeCommand("revealFileInOS", vscode.Uri.file(sessionPath));
+  }
+
+  /** Open the session's transcript file in an editor. */
+  private async handleVaultOpenSessionFile(entryId: string, webview: vscode.Webview): Promise<void> {
+    const sessionPath = (await this.resolveVaultEntry(entryId))?.sessionPath;
+    if (!sessionPath) {
+      return;
+    }
+    try {
+      await vscode.window.showTextDocument(vscode.Uri.file(sessionPath), { preview: true });
+    } catch (err) {
+      void this.safeSendWithRetry(webview, {
+        type: "error",
+        message: err instanceof Error ? err.message : "Failed to open session file",
+        severity: "error",
+      });
+    }
+  }
+
+  /** Open the session's recorded working directory in the OS file manager. */
+  private async handleVaultOpenWorkingDir(entryId: string): Promise<void> {
+    const cwd = (await this.resolveVaultEntry(entryId))?.cwd;
+    if (!cwd) {
+      return;
+    }
+    await vscode.env.openExternal(vscode.Uri.file(cwd));
+  }
+
+  /** Build the session's resume command and copy it to the clipboard (host-side). */
+  private async handleVaultCopyResumeCommand(entryId: string, webview: vscode.Webview): Promise<void> {
+    const entry = await this.resolveVaultEntry(entryId);
+    if (!entry) {
+      return;
+    }
+    try {
+      await vscode.env.clipboard.writeText(buildResumeCommandString(entry));
+    } catch (err) {
+      void this.safeSendWithRetry(webview, {
+        type: "error",
+        message: err instanceof Error ? err.message : "Failed to copy resume command",
+        severity: "error",
+      });
+    }
+  }
+
+  /** Copy the session's transcript file path to the clipboard (host-side). */
+  private async handleVaultCopyFilePath(entryId: string): Promise<void> {
+    const sessionPath = (await this.resolveVaultEntry(entryId))?.sessionPath;
+    if (!sessionPath) {
+      return;
+    }
+    await vscode.env.clipboard.writeText(sessionPath);
+  }
+
+  /**
    * Route incoming webview messages to appropriate handlers.
    *
    * See: docs/design/webview-provider.md#§8, docs/design/message-protocol.md#§10
@@ -479,6 +585,46 @@ export class TerminalViewProvider implements vscode.WebviewViewProvider {
         case "vaultFork":
           if (typeof message.entryId === "string") {
             void this.handleVaultLaunch(message.entryId, "fork", webviewView.webview);
+          }
+          break;
+
+        case "requestVaultSessionDetail":
+          if (typeof message.entryId === "string") {
+            void this.handleRequestVaultSessionDetail(
+              message.entryId,
+              webviewView.webview,
+              typeof message.limit === "number" ? message.limit : undefined,
+            );
+          }
+          break;
+
+        case "vaultRevealInOS":
+          if (typeof message.entryId === "string") {
+            void this.handleVaultRevealInOS(message.entryId);
+          }
+          break;
+
+        case "vaultOpenSessionFile":
+          if (typeof message.entryId === "string") {
+            void this.handleVaultOpenSessionFile(message.entryId, webviewView.webview);
+          }
+          break;
+
+        case "vaultOpenWorkingDir":
+          if (typeof message.entryId === "string") {
+            void this.handleVaultOpenWorkingDir(message.entryId);
+          }
+          break;
+
+        case "vaultCopyResumeCommand":
+          if (typeof message.entryId === "string") {
+            void this.handleVaultCopyResumeCommand(message.entryId, webviewView.webview);
+          }
+          break;
+
+        case "vaultCopyFilePath":
+          if (typeof message.entryId === "string") {
+            void this.handleVaultCopyFilePath(message.entryId);
           }
           break;
 

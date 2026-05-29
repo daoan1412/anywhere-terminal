@@ -1,0 +1,1159 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<title>AI Vault — VS Code panel mockup v2</title>
+<link rel="stylesheet" href="https://unpkg.com/@vscode/codicons@0.0.36/dist/codicon.css" />
+
+<style>
+  /* ─────────────────────────────────────────────────────────────────────
+     PAGE CHROME (mockup-only — do NOT lift into the extension)
+     ───────────────────────────────────────────────────────────────────── */
+  html, body {
+    margin: 0;
+    background: #1a1a1a;
+    color: #ccc;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
+    -webkit-font-smoothing: antialiased;
+    overflow-x: auto;
+  }
+  .mockup {
+    display: flex;
+    flex-wrap: nowrap;
+    gap: 28px;
+    padding: 28px;
+    width: max-content;
+    align-items: flex-start;
+  }
+  .mockup-col          { display: flex; flex-direction: column; gap: 28px; flex: 0 0 auto; }
+  .mockup-col--narrow  { width: 360px; }
+  .mockup-col--wide    { width: 760px; }
+  .mockup-label {
+    font: 11px/1.4 ui-monospace, SFMono-Regular, Menlo, monospace;
+    letter-spacing: 0.04em;
+    color: #888;
+    text-transform: uppercase;
+    margin-bottom: 8px;
+  }
+  .mockup-label b { color: #ddd; font-weight: 600; text-transform: none; letter-spacing: 0; }
+  .mockup-frame {
+    border: 1px solid #2a2a2a;
+    border-radius: 6px;
+    overflow: hidden;
+    background: var(--vscode-sideBar-background);
+  }
+  .mockup-frame--sidebar { width: 320px; }
+  .mockup-frame--wide    { width: 720px; height: 600px; }
+
+  /* ─────────────────────────────────────────────────────────────────────
+     VS CODE THEME FALLBACKS — only for standalone preview.
+     In the real webview, VS Code injects every --vscode-* var, so these
+     :root values are dead. Every rule below references the var, not the literal.
+     ───────────────────────────────────────────────────────────────────── */
+  :root {
+    --vscode-foreground:                         #cccccc;
+    --vscode-descriptionForeground:              #989898;
+    --vscode-disabledForeground:                 #6f6f6f;
+
+    --vscode-sideBar-background:                 #181818;
+    --vscode-sideBarSectionHeader-background:    #181818;
+    --vscode-sideBarTitle-foreground:            #cccccc;
+    --vscode-editor-background:                  #1f1f1f;
+
+    --vscode-list-hoverBackground:               #2a2a2a;
+    --vscode-list-activeSelectionBackground:     #04395e;
+    --vscode-list-activeSelectionForeground:     #ffffff;
+    --vscode-list-inactiveSelectionBackground:   #37373d;
+
+    --vscode-input-background:                   #313131;
+    --vscode-input-foreground:                   #cccccc;
+    --vscode-input-border:                       transparent;
+    --vscode-input-placeholderForeground:        #989898;
+
+    --vscode-button-background:                  #0e639c;
+    --vscode-button-foreground:                  #ffffff;
+    --vscode-button-hoverBackground:             #1177bb;
+    --vscode-button-secondaryBackground:         #3a3d41;
+    --vscode-button-secondaryForeground:         #ffffff;
+    --vscode-button-secondaryHoverBackground:    #45494e;
+
+    --vscode-badge-background:                   #4d4d4d;
+    --vscode-badge-foreground:                   #ffffff;
+
+    --vscode-focusBorder:                        #0078d4;
+    --vscode-widget-border:                      #313131;
+    --vscode-panel-border:                       #2b2b2b;
+    --vscode-menu-background:                    #1f1f1f;
+    --vscode-menu-foreground:                    #cccccc;
+    --vscode-menu-border:                        #454545;
+    --vscode-menu-separatorBackground:           #454545;
+    --vscode-menu-selectionBackground:           #04395e;
+    --vscode-menu-selectionForeground:           #ffffff;
+
+    --vscode-inputValidation-warningBackground:  #352a05;
+    --vscode-inputValidation-warningBorder:      #b89500;
+    --vscode-inputValidation-warningForeground:  #cccccc;
+
+    --vscode-font-family:                        "SF Pro Text", -apple-system, "Segoe UI", system-ui, sans-serif;
+    --vscode-editor-font-family:                 ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+
+    /* Agent accents — brand, not theme. Low chroma so they sit on any theme. */
+    --vault-accent-claude:   oklch(0.72 0.12 45);
+    --vault-accent-codex:    oklch(0.74 0.09 165);
+    --vault-accent-opencode: oklch(0.74 0.10 285);
+  }
+
+  /* ═════════════════════════════════════════════════════════════════════
+     ▼▼▼  LIFT EVERYTHING FROM HERE DOWN INTO THE EXTENSION CSS  ▼▼▼
+     ═════════════════════════════════════════════════════════════════════ */
+
+  .vault-panel {
+    background: var(--vscode-sideBar-background);
+    color: var(--vscode-foreground);
+    font-family: var(--vscode-font-family);
+    font-size: 13px;
+    line-height: 1.4;
+    display: flex;
+    flex-direction: column;
+    min-width: 0;
+    height: 100%;
+    position: relative;       /* anchor for the floating .vault-preview */
+    container-type: inline-size;
+    container-name: vault;
+  }
+
+  /* ── Header ─────────────────────────────────────────────────────────── */
+  .vault-header { display: flex; flex-direction: column; gap: 8px; padding: 10px 12px 8px; }
+  .vault-title-row {
+    display: flex; align-items: center; justify-content: space-between; gap: 8px; min-width: 0;
+  }
+  .vault-title {
+    font-size: 11px; font-weight: 600; letter-spacing: 0.08em; text-transform: uppercase;
+    color: var(--vscode-sideBarTitle-foreground); margin: 0;
+  }
+  .vault-title-actions { display: flex; gap: 2px; }
+  .vault-icon-btn {
+    background: transparent; border: 1px solid transparent; color: var(--vscode-foreground);
+    width: 22px; height: 22px; border-radius: 4px;
+    display: inline-flex; align-items: center; justify-content: center;
+    cursor: pointer; opacity: 0.7;
+  }
+  .vault-icon-btn:hover { background: var(--vscode-list-hoverBackground); opacity: 1; }
+  .vault-icon-btn:focus-visible { outline: 1px solid var(--vscode-focusBorder); outline-offset: -1px; opacity: 1; }
+  .vault-icon-btn[aria-pressed="true"] { background: var(--vscode-list-hoverBackground); opacity: 1; }
+
+  .vault-search { position: relative; display: flex; align-items: center; }
+  .vault-search .codicon-search {
+    position: absolute; left: 8px; color: var(--vscode-input-placeholderForeground);
+    font-size: 14px; pointer-events: none;
+  }
+  .vault-search-input {
+    flex: 1;
+    background: var(--vscode-input-background);
+    color: var(--vscode-input-foreground);
+    border: 1px solid var(--vscode-input-border);
+    border-radius: 2px;
+    padding: 4px 8px 4px 28px;
+    font: inherit; font-size: 13px;
+    height: 26px; box-sizing: border-box; outline: none; min-width: 0;
+  }
+  .vault-search-input::placeholder { color: var(--vscode-input-placeholderForeground); }
+  .vault-search-input:focus { outline: 1px solid var(--vscode-focusBorder); outline-offset: -1px; }
+
+  /* ── Toolbar ────────────────────────────────────────────────────────── */
+  .vault-toolbar {
+    display: flex; align-items: center; justify-content: space-between;
+    gap: 8px; padding: 4px 12px 8px; min-width: 0;
+  }
+  .vault-segmented { display: inline-flex; gap: 2px; }
+  .vault-segmented button {
+    background: transparent; border: 1px solid transparent;
+    color: var(--vscode-descriptionForeground);
+    font: inherit; font-size: 12px;
+    padding: 3px 8px; border-radius: 4px; cursor: pointer;
+    display: inline-flex; align-items: center; gap: 4px;
+  }
+  .vault-segmented button .codicon { font-size: 12px; }
+  .vault-segmented button:hover { background: var(--vscode-list-hoverBackground); color: var(--vscode-foreground); }
+  .vault-segmented button[aria-pressed="true"] { background: var(--vscode-list-hoverBackground); color: var(--vscode-foreground); }
+  .vault-segmented button:focus-visible { outline: 1px solid var(--vscode-focusBorder); outline-offset: -1px; }
+
+  .vault-filter {
+    display: inline-flex; align-items: center; gap: 6px;
+    color: var(--vscode-descriptionForeground); font-size: 12px;
+    cursor: pointer; user-select: none; white-space: nowrap;
+  }
+  .vault-filter input { accent-color: var(--vscode-button-background); margin: 0; }
+
+  /* ── Status / notice ────────────────────────────────────────────────── */
+  .vault-status {
+    padding: 4px 12px; font-size: 11px; color: var(--vscode-descriptionForeground);
+  }
+  /* Subtle inline warning — tinted, not a block. */
+  .vault-notice {
+    display: flex; align-items: center; gap: 8px;
+    margin: 0 12px 6px; padding: 6px 8px;
+    font-size: 12px; color: var(--vscode-foreground);
+    background: color-mix(in srgb, var(--vscode-inputValidation-warningBackground) 60%, transparent);
+    border-left: 2px solid var(--vscode-inputValidation-warningBorder);
+    border-radius: 2px;
+  }
+  .vault-notice .codicon-warning { color: var(--vscode-inputValidation-warningBorder); font-size: 13px; }
+  .vault-notice .vault-notice-action {
+    margin-left: auto; background: transparent; border: 0;
+    color: var(--vscode-descriptionForeground);
+    font: inherit; font-size: 11px;
+    text-decoration: underline; cursor: pointer; padding: 0;
+  }
+  .vault-notice .vault-notice-action:hover { color: var(--vscode-foreground); }
+
+  /* ── Body: list + (optional) preview pane ───────────────────────────── */
+  .vault-body {
+    display: flex; flex: 1; min-height: 0; min-width: 0;
+  }
+  .vault-list {
+    list-style: none; margin: 0; padding: 0 0 8px;
+    overflow-y: auto; flex: 1 1 auto; min-width: 0; min-height: 0;
+  }
+  .vault-preview {
+    /* Floats on top of the panel — NOT a split sibling. JS toggles
+       `.is-open` when a row is clicked / Space / Enter. Esc or
+       click-outside closes. JS may anchor it to the active row by
+       overriding top/left inline. */
+    position: absolute;
+    z-index: 5;
+    display: none;
+    flex-direction: column;
+    width: 340px;
+    max-width: calc(100% - 16px);
+    max-height: calc(100% - 100px);
+    top: 88px;                       /* clear of header + toolbar */
+    right: 8px;
+    background: var(--vscode-editor-background);
+    color: var(--vscode-foreground);
+    border: 1px solid var(--vscode-widget-border);
+    border-radius: 6px;
+    box-shadow: 0 12px 32px rgba(0, 0, 0, 0.5);
+    overflow: hidden;
+  }
+  .vault-preview.is-open { display: flex; }
+  /* On a narrow panel the floating card centers + grows so it doesn't
+     overlap critical controls. */
+  @container vault (max-width: 460px) {
+    .vault-preview {
+      top: 8px; left: 8px; right: 8px;
+      width: auto;
+      max-height: calc(100% - 16px);
+    }
+  }
+
+  /* ── Group headers ──────────────────────────────────────────────────── */
+  .vault-group-header {
+    position: sticky; top: 0; z-index: 1;
+    display: flex; align-items: center; gap: 6px;
+    padding: 8px 12px 4px;
+    font-size: 11px; font-weight: 600;
+    letter-spacing: 0.04em; text-transform: uppercase;
+    color: var(--vscode-descriptionForeground);
+    background: var(--vscode-sideBarSectionHeader-background);
+  }
+  .vault-group-header .codicon { font-size: 12px; }
+  .vault-group-header .vault-group-count {
+    font-weight: 400; text-transform: none; letter-spacing: 0;
+    color: var(--vscode-descriptionForeground); opacity: 0.7;
+  }
+  .vault-group-header .vault-group-dot {
+    width: 8px; height: 8px; border-radius: 50%;
+    background: var(--vault-accent-claude);
+  }
+  /* Folder-mode header has a chevron + folder icon and uses normal-case text. */
+  .vault-group-header--folder {
+    text-transform: none; letter-spacing: 0;
+    font-size: 12px; font-weight: 600;
+    color: var(--vscode-foreground);
+  }
+  .vault-group-header--folder .codicon-chevron-down { font-size: 14px; color: var(--vscode-descriptionForeground); }
+  .vault-group-header--folder .codicon-folder       { color: var(--vscode-descriptionForeground); }
+
+  /* ─────────────────────────────────────────────────────────────────────
+     ROW — single line, four cells. Truncation happens in the title cell.
+     ───────────────────────────────────────────────────────────────────── */
+  .vault-row {
+    /* badge | title | cwd-chip | time      (actions overlay floats on top) */
+    display: grid;
+    grid-template-columns: 22px minmax(0, 1fr) auto auto;
+    column-gap: 10px;
+    align-items: center;
+    padding: 6px 12px;
+    margin: 0 4px;
+    border: 1px solid transparent;
+    border-radius: 2px;
+    position: relative;        /* anchor for the .vault-row-actions overlay */
+    cursor: pointer;
+    min-width: 0;
+  }
+  .vault-row + .vault-row {
+    box-shadow: inset 0 1px 0 0 color-mix(in srgb, var(--vscode-foreground) 6%, transparent);
+  }
+  .vault-row:hover { background: var(--vscode-list-hoverBackground); }
+  .vault-row:focus-visible,
+  .vault-row.is-focused { outline: 1px solid var(--vscode-focusBorder); outline-offset: -1px; }
+  .vault-row[aria-selected="true"] {
+    background: var(--vscode-list-activeSelectionBackground);
+    color: var(--vscode-list-activeSelectionForeground);
+  }
+
+  /* Agent badge */
+  .vault-badge {
+    width: 20px; height: 20px; border-radius: 6px;
+    display: inline-flex; align-items: center; justify-content: center;
+    font-size: 11px; font-weight: 600; line-height: 1; flex-shrink: 0;
+    --_accent: var(--vault-accent-claude);
+    background: color-mix(in srgb, var(--_accent) 18%, transparent);
+    color: var(--_accent);
+    border: 1px solid color-mix(in srgb, var(--_accent) 35%, transparent);
+  }
+  .vault-badge--claude   { --_accent: var(--vault-accent-claude); }
+  .vault-badge--codex    { --_accent: var(--vault-accent-codex); }
+  .vault-badge--opencode { --_accent: var(--vault-accent-opencode); }
+
+  /* Title — single line, ellipsis truncation. */
+  .vault-row-title {
+    color: var(--vscode-foreground);
+    font-size: 13px; font-weight: 500;
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+    min-width: 0;
+  }
+  /* Wrapper tokens (until claudeReader strips them) get monospace-dim look so
+     the line reads as syntax, not corruption. */
+  .vault-row-title .vault-token {
+    font-family: var(--vscode-editor-font-family);
+    color: var(--vscode-descriptionForeground);
+    font-weight: 400; font-size: 12px;
+  }
+
+  /* cwd chip — folder icon + leaf segment, mono, dim. Single-line.
+     No overflow:hidden — that collapses the chip's intrinsic size in the
+     grid `auto` track. Folder leaves are short in practice; the title (1fr)
+     shrinks first if a row gets cramped. */
+  .vault-row-cwd {
+    display: inline-flex; align-items: center; gap: 4px;
+    font-family: var(--vscode-editor-font-family);
+    font-size: 11px;
+    color: var(--vscode-descriptionForeground);
+    white-space: nowrap;
+    flex-shrink: 0;
+  }
+  .vault-row-cwd .codicon-folder { font-size: 12px; opacity: 0.8; }
+  .vault-row-cwd .vault-cwd-parent { opacity: 0.55; }
+  .vault-row-cwd .vault-cwd-leaf   { color: var(--vscode-foreground); opacity: 0.85; }
+
+  /* Time — tabular, fixed-width-feel. */
+  .vault-row-time {
+    font-size: 11px;
+    color: var(--vscode-descriptionForeground);
+    font-variant-numeric: tabular-nums;
+    white-space: nowrap; flex-shrink: 0;
+    min-width: 36px; text-align: right;
+  }
+
+  /* ── Resume action: hover/focus only, icon-only, overlays the right edge ── */
+  .vault-row-actions {
+    position: absolute;
+    top: 0; bottom: 0; right: 0;
+    display: flex; align-items: center;
+    padding: 0 8px 0 36px;     /* left pad = width of the gradient fade */
+    /* Fade covers `time` so the icon overlay reads as one continuous chip. */
+    background: linear-gradient(
+      to right,
+      transparent 0%,
+      var(--vscode-list-hoverBackground) 40%,
+      var(--vscode-list-hoverBackground) 100%
+    );
+    opacity: 0;
+    pointer-events: none;
+    transition: opacity 60ms linear;
+  }
+  .vault-row:hover .vault-row-actions,
+  .vault-row:focus-within .vault-row-actions,
+  .vault-row.is-context-open .vault-row-actions {
+    opacity: 1; pointer-events: auto;
+  }
+  /* On the selected row, fade matches the selection color, not hover. */
+  .vault-row[aria-selected="true"] .vault-row-actions {
+    background: linear-gradient(
+      to right,
+      transparent 0%,
+      var(--vscode-list-activeSelectionBackground) 40%,
+      var(--vscode-list-activeSelectionBackground) 100%
+    );
+  }
+
+  /* Resume = single icon-only button. No text, no fork. Right-click on the
+     row opens the context menu — there is no ⋯ trigger. */
+  .vault-action {
+    background: var(--vscode-button-background);
+    color: var(--vscode-button-foreground);
+    border: 0;
+    width: 22px; height: 22px;
+    border-radius: 3px;
+    font: inherit;
+    display: inline-flex; align-items: center; justify-content: center;
+    cursor: pointer;
+  }
+  .vault-action .codicon { font-size: 13px; }
+  .vault-action--resume:hover { background: var(--vscode-button-hoverBackground); }
+  .vault-action--resume:focus-visible { outline: 1px solid var(--vscode-focusBorder); outline-offset: 1px; }
+
+  /* `vault-action--fork` retained as a CSS hook so existing JS that queries
+     the selector doesn't crash. No instances are rendered anymore. */
+  .vault-action--fork { display: none !important; }
+
+  /* ── Narrow-mode tweak: hide cwd chip when there isn't room ────────── */
+  @container vault (max-width: 380px) {
+    .vault-row-cwd { display: none; }   /* leaf falls back to the title= tooltip */
+  }
+
+  /* ─────────────────────────────────────────────────────────────────────
+     CONTEXT MENU — opens on right-click of a row. Positioned by the host
+     (JS sets top/left to the cursor); CSS only styles it.
+     ───────────────────────────────────────────────────────────────────── */
+  .vault-context-menu {
+    position: absolute;
+    min-width: 220px;
+    background: var(--vscode-menu-background);
+    color: var(--vscode-menu-foreground);
+    border: 1px solid var(--vscode-menu-border);
+    border-radius: 5px;
+    box-shadow: 0 8px 24px rgba(0,0,0,0.4);
+    padding: 4px 0;
+    font-size: 13px;
+    z-index: 10;
+  }
+  .vault-context-menu button {
+    display: flex; align-items: center; gap: 10px;
+    width: 100%; background: transparent; border: 0; text-align: left;
+    color: inherit; font: inherit;
+    padding: 5px 14px; cursor: pointer;
+  }
+  .vault-context-menu button:hover,
+  .vault-context-menu button:focus-visible {
+    background: var(--vscode-menu-selectionBackground);
+    color: var(--vscode-menu-selectionForeground);
+    outline: none;
+  }
+  .vault-context-menu button .codicon {
+    width: 14px; color: var(--vscode-descriptionForeground); font-size: 14px;
+  }
+  .vault-context-menu button:hover .codicon { color: inherit; }
+  .vault-context-menu hr {
+    margin: 4px 0; border: 0;
+    border-top: 1px solid var(--vscode-menu-separatorBackground);
+  }
+  .vault-context-menu kbd {
+    margin-left: auto;
+    font: 11px var(--vscode-editor-font-family);
+    color: var(--vscode-descriptionForeground);
+  }
+
+  /* ─────────────────────────────────────────────────────────────────────
+     PREVIEW PANE
+     ───────────────────────────────────────────────────────────────────── */
+  .vault-preview-header {
+    padding: 12px 14px 10px;
+    border-bottom: 1px solid var(--vscode-widget-border);
+    display: flex; flex-direction: column; gap: 8px;
+  }
+  .vault-preview-title-row {
+    display: flex; align-items: center; gap: 8px;
+  }
+  .vault-preview-title {
+    flex: 1; min-width: 0;
+    font-size: 13px; font-weight: 600; color: var(--vscode-foreground);
+    margin: 0; line-height: 1.4;
+    /* 2-line clamp so very long titles don't dominate the pane. */
+    display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical;
+    overflow: hidden; word-break: break-word;
+  }
+  /* Right-side action cluster in the title row: Resume (primary) + Close. */
+  .vault-preview-title-actions {
+    display: inline-flex; align-items: center; gap: 4px;
+    flex-shrink: 0;
+  }
+  .vault-preview-resume {
+    background: var(--vscode-button-background);
+    color: var(--vscode-button-foreground);
+    border: 0; border-radius: 3px;
+    width: 22px; height: 22px;
+    font: inherit;
+    display: inline-flex; align-items: center; justify-content: center;
+    cursor: pointer;
+  }
+  .vault-preview-resume .codicon { font-size: 13px; }
+  .vault-preview-resume:hover { background: var(--vscode-button-hoverBackground); }
+  .vault-preview-resume:focus-visible { outline: 1px solid var(--vscode-focusBorder); outline-offset: 1px; }
+  .vault-preview-close {
+    flex-shrink: 0;
+    background: transparent; border: 0; color: var(--vscode-foreground);
+    width: 22px; height: 22px; border-radius: 4px;
+    display: inline-flex; align-items: center; justify-content: center;
+    cursor: pointer; opacity: 0.6;
+  }
+  .vault-preview-close:hover { background: var(--vscode-list-hoverBackground); opacity: 1; }
+
+  .vault-preview-meta {
+    display: grid; grid-template-columns: auto 1fr;
+    column-gap: 10px; row-gap: 4px;
+    font-size: 11px; color: var(--vscode-descriptionForeground);
+  }
+  .vault-preview-meta dt {
+    color: var(--vscode-descriptionForeground);
+    text-transform: uppercase; letter-spacing: 0.04em;
+    font-size: 10px; padding-top: 1px;
+  }
+  .vault-preview-meta dd {
+    margin: 0; color: var(--vscode-foreground);
+    font-family: var(--vscode-editor-font-family); font-size: 11px;
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  }
+  .vault-preview-meta dd code {
+    background: transparent; padding: 0;
+  }
+
+  .vault-preview-body {
+    flex: 1; min-height: 0;
+    padding: 12px 14px;
+    overflow-y: auto;
+    display: flex; flex-direction: column; gap: 12px;
+  }
+  .vault-preview-section-label {
+    font-size: 10px; font-weight: 600;
+    text-transform: uppercase; letter-spacing: 0.06em;
+    color: var(--vscode-descriptionForeground);
+  }
+  .vault-preview-message {
+    border-left: 2px solid color-mix(in srgb, var(--vscode-foreground) 15%, transparent);
+    padding: 2px 0 2px 10px;
+    font-size: 12px; line-height: 1.5;
+    color: var(--vscode-foreground);
+  }
+  .vault-preview-message-role {
+    font-size: 10px; text-transform: uppercase; letter-spacing: 0.06em;
+    color: var(--vscode-descriptionForeground);
+    margin-bottom: 2px;
+  }
+  .vault-preview-message-user { border-left-color: var(--vault-accent-claude); }
+  .vault-preview-message-assistant { border-left-color: color-mix(in srgb, var(--vscode-foreground) 25%, transparent); }
+  /* Tool call: monospaced content, dim border. The role line carries an
+     icon + tool name; the body is the file path or first arg. */
+  .vault-preview-message-tool { border-left-color: color-mix(in srgb, var(--vscode-foreground) 18%, transparent); }
+  .vault-preview-message-tool p {
+    font-family: var(--vscode-editor-font-family);
+    font-size: 11px;
+    color: var(--vscode-foreground);
+  }
+  .vault-preview-message-tool p .vault-preview-diff-add { color: oklch(0.72 0.10 145); }
+  .vault-preview-message-tool p .vault-preview-diff-del { color: oklch(0.68 0.13 25); }
+  .vault-preview-message-tool p .vault-preview-mute     { color: var(--vscode-descriptionForeground); }
+  /* Subagent call — uses the opencode accent so it visually breaks up the
+     timeline (different from user / assistant / tool). */
+  .vault-preview-message-subagent { border-left-color: var(--vault-accent-opencode); }
+  .vault-preview-message-subagent p {
+    font-size: 12px; color: var(--vscode-foreground);
+  }
+  /* Role line: tighter when paired with an inline icon. */
+  .vault-preview-message-role .codicon {
+    font-size: 11px; vertical-align: -1px; margin-right: 3px;
+  }
+  .vault-preview-message p { margin: 0; }
+  .vault-preview-message + .vault-preview-message { margin-top: 0; }
+
+  /* (Footer removed — the Resume button now lives in the preview header.) */
+
+  /* Preview empty state (no row selected). */
+  .vault-preview-empty {
+    flex: 1;
+    display: flex; flex-direction: column; align-items: center; justify-content: center;
+    gap: 8px; padding: 24px; text-align: center;
+    color: var(--vscode-descriptionForeground); font-size: 12px;
+  }
+  .vault-preview-empty .codicon { font-size: 24px; opacity: 0.5; }
+
+  /* ── Empty / no-match states ─────────────────────────────────────────── */
+  .vault-empty {
+    padding: 32px 24px; text-align: center;
+    color: var(--vscode-descriptionForeground);
+    display: flex; flex-direction: column; align-items: center; gap: 10px;
+  }
+  .vault-empty .codicon { font-size: 28px; opacity: 0.6; }
+  .vault-empty-title { color: var(--vscode-foreground); font-size: 13px; font-weight: 500; }
+  .vault-empty-body  { font-size: 12px; max-width: 240px; line-height: 1.5; }
+  .vault-empty-body code {
+    font-family: var(--vscode-editor-font-family);
+    background: var(--vscode-input-background);
+    padding: 1px 5px; border-radius: 3px; font-size: 11px;
+  }
+</style>
+</head>
+
+<body>
+<div class="mockup">
+
+  <!-- ═══════════════ NARROW COLUMN ═══════════════ -->
+  <div class="mockup-col mockup-col--narrow">
+
+    <!-- 1. Narrow · single-line list · hover/Resume overlay + context menu -->
+    <div>
+      <div class="mockup-label">1 · <b>Sidebar (~320px)</b> · single-line · hover state · context menu</div>
+      <div class="mockup-frame mockup-frame--sidebar" style="height: 480px;">
+
+        <aside class="vault-panel" role="region" aria-label="AI Vault">
+
+          <div class="vault-header">
+            <div class="vault-title-row">
+              <h2 class="vault-title">AI Vault</h2>
+              <div class="vault-title-actions">
+                <button class="vault-icon-btn" title="Refresh" aria-label="Refresh">
+                  <i class="codicon codicon-refresh"></i>
+                </button>
+              </div>
+            </div>
+            <div class="vault-search">
+              <i class="codicon codicon-search" aria-hidden="true"></i>
+              <input class="vault-search-input" type="search" placeholder="Search sessions…" aria-label="Search" />
+            </div>
+          </div>
+
+          <div class="vault-toolbar">
+            <div class="vault-segmented" role="tablist" aria-label="Group by">
+              <button role="tab" aria-pressed="true"><i class="codicon codicon-history"></i>Recent</button>
+              <button role="tab" aria-pressed="false"><i class="codicon codicon-organization"></i>Agent</button>
+              <button role="tab" aria-pressed="false"><i class="codicon codicon-folder"></i>Folder</button>
+            </div>
+            <label class="vault-filter" title="Limit to current workspace">
+              <input type="checkbox" />
+              This folder
+            </label>
+          </div>
+
+          <div class="vault-notice" role="status">
+            <i class="codicon codicon-warning" aria-hidden="true"></i>
+            <span><b>1 session</b> couldn't be read</span>
+            <button class="vault-notice-action" type="button">Details</button>
+          </div>
+
+          <div class="vault-body">
+            <ul class="vault-list" role="listbox" aria-label="Sessions">
+
+              <!-- Row: noisy command-message wrapper title — single line, truncates clean. -->
+              <li class="vault-row" role="option" tabindex="0">
+                <span class="vault-badge vault-badge--claude" aria-label="Claude Code">
+                  <i class="codicon codicon-sparkle"></i>
+                </span>
+                <span class="vault-row-title">
+                  <span class="vault-token">&lt;command-message&gt;</span>asimov-plan<span class="vault-token">&lt;/command-message&gt;</span>
+                </span>
+                <span class="vault-row-cwd" title="/Users/huybuidac/Projects/ai-oss/anywhere-terminal/">
+                  <i class="codicon codicon-folder" aria-hidden="true"></i>
+                  <span class="vault-cwd-leaf">anywhere-terminal</span>
+                </span>
+                <span class="vault-row-time">10h</span>
+                <span class="vault-row-actions" aria-hidden="true">
+                  <button class="vault-action vault-action--resume" title="Resume"><i class="codicon codicon-debug-start"></i></button>
+                </span>
+              </li>
+
+              <!-- Hover state forced — shows the Resume overlay sitting on the gradient fade.
+                   The fade visually covers `time` so the overlay looks like one chip. -->
+              <li class="vault-row" role="option" tabindex="0" style="background: var(--vscode-list-hoverBackground);">
+                <span class="vault-badge vault-badge--claude"><i class="codicon codicon-sparkle"></i></span>
+                <span class="vault-row-title">nghiên cứu terminal — warp + cmux deep dive</span>
+                <span class="vault-row-cwd" title="/Users/huybuidac/Projects/ai-oss/anywhere-terminal/">
+                  <i class="codicon codicon-folder"></i>
+                  <span class="vault-cwd-leaf">anywhere-terminal</span>
+                </span>
+                <span class="vault-row-time">2h</span>
+                <span class="vault-row-actions" style="opacity:1; pointer-events:auto;">
+                  <button class="vault-action vault-action--resume" title="Resume"><i class="codicon codicon-debug-start"></i></button>
+                </span>
+              </li>
+
+              <li class="vault-row" role="option" tabindex="0">
+                <span class="vault-badge vault-badge--codex"><i class="codicon codicon-circuit-board"></i></span>
+                <span class="vault-row-title">Refactor websocket binary frame handling and add backpressure</span>
+                <span class="vault-row-cwd" title="/Users/huybuidac/Projects/cyberk/work/bootstrap-agent/">
+                  <i class="codicon codicon-folder"></i>
+                  <span class="vault-cwd-leaf">bootstrap-agent</span>
+                </span>
+                <span class="vault-row-time">1d</span>
+                <span class="vault-row-actions">
+                  <button class="vault-action vault-action--resume" title="Resume"><i class="codicon codicon-debug-start"></i></button>
+                </span>
+              </li>
+
+              <!-- Row with context menu open. The menu is a sibling positioned by JS;
+                   in the mockup we hard-position it. .is-context-open keeps the
+                   action overlay visible while the menu is up. -->
+              <li class="vault-row is-context-open" role="option" tabindex="0" style="background: var(--vscode-list-hoverBackground);">
+                <span class="vault-badge vault-badge--opencode"><i class="codicon codicon-symbol-misc"></i></span>
+                <span class="vault-row-title">Review kiến trúc export-terminal-session</span>
+                <span class="vault-row-cwd" title="/Users/huybuidac/Projects/ai-oss/anywhere-terminal/packages/core/">
+                  <i class="codicon codicon-folder"></i>
+                  <span class="vault-cwd-leaf">core</span>
+                </span>
+                <span class="vault-row-time">3d</span>
+                <span class="vault-row-actions" style="opacity:1; pointer-events:auto;">
+                  <button class="vault-action vault-action--resume" title="Resume"><i class="codicon codicon-debug-start"></i></button>
+                </span>
+
+                <!-- Context menu — pinned to the more-button area for the mockup. -->
+                <div class="vault-context-menu" role="menu" style="top: 28px; right: 8px;">
+                  <button role="menuitem"><i class="codicon codicon-debug-start"></i> Resume in New Tab</button>
+                  <hr />
+                  <button role="menuitem"><i class="codicon codicon-go-to-file"></i> Open</button>
+                  <button role="menuitem"><i class="codicon codicon-folder-opened"></i> Reveal in Finder</button>
+                  <hr />
+                  <button role="menuitem"><i class="codicon codicon-copy"></i> Copy File Path</button>
+                  <button role="menuitem"><i class="codicon codicon-terminal"></i> Copy Resume Command</button>
+                  <button role="menuitem"><i class="codicon codicon-folder"></i> Open Working Directory</button>
+                </div>
+              </li>
+
+              <li class="vault-row" role="option" tabindex="0">
+                <span class="vault-badge vault-badge--claude"><i class="codicon codicon-sparkle"></i></span>
+                <span class="vault-row-title">
+                  <span class="vault-token">&lt;local-command-caveat&gt;</span> Caveat: the messages below were generated…
+                </span>
+                <span class="vault-row-cwd" title="/Users/huybuidac/Projects/cyberk/work/bootstrap-agent/">
+                  <i class="codicon codicon-folder"></i>
+                  <span class="vault-cwd-leaf">bootstrap-agent</span>
+                </span>
+                <span class="vault-row-time">1w</span>
+                <span class="vault-row-actions">
+                  <button class="vault-action vault-action--resume" title="Resume"><i class="codicon codicon-debug-start"></i></button>
+                </span>
+              </li>
+
+              <li class="vault-row" role="option" tabindex="0">
+                <span class="vault-badge vault-badge--codex"><i class="codicon codicon-circuit-board"></i></span>
+                <span class="vault-row-title">Calculate simple sum (@general subagent)</span>
+                <span class="vault-row-cwd" title="/Users/huybuidac/Projects/cyberk/CLIProxyAPI/">
+                  <i class="codicon codicon-folder"></i>
+                  <span class="vault-cwd-leaf">CLIProxyAPI</span>
+                </span>
+                <span class="vault-row-time">1w</span>
+                <span class="vault-row-actions">
+                  <button class="vault-action vault-action--resume" title="Resume"><i class="codicon codicon-debug-start"></i></button>
+                </span>
+              </li>
+
+            </ul>
+          </div>
+        </aside>
+      </div>
+    </div>
+
+    <!-- 2. Empty state -->
+    <div>
+      <div class="mockup-label">2 · <b>Sidebar</b> · empty state</div>
+      <div class="mockup-frame mockup-frame--sidebar">
+        <aside class="vault-panel">
+          <div class="vault-header">
+            <div class="vault-title-row"><h2 class="vault-title">AI Vault</h2></div>
+            <div class="vault-search">
+              <i class="codicon codicon-search"></i>
+              <input class="vault-search-input" type="search" placeholder="Search sessions…" />
+            </div>
+          </div>
+          <div class="vault-empty">
+            <i class="codicon codicon-archive"></i>
+            <div class="vault-empty-title">No AI sessions yet</div>
+            <div class="vault-empty-body">
+              Sessions appear here after you run <code>claude</code>, <code>codex</code>, or <code>opencode</code> in a terminal.
+            </div>
+          </div>
+        </aside>
+      </div>
+    </div>
+
+    <!-- 3. No-search-matches -->
+    <div>
+      <div class="mockup-label">3 · <b>Sidebar</b> · no matches</div>
+      <div class="mockup-frame mockup-frame--sidebar">
+        <aside class="vault-panel">
+          <div class="vault-header">
+            <div class="vault-title-row"><h2 class="vault-title">AI Vault</h2></div>
+            <div class="vault-search">
+              <i class="codicon codicon-search"></i>
+              <input class="vault-search-input" type="search" value="websocket binary frame" />
+            </div>
+          </div>
+          <div class="vault-empty">
+            <i class="codicon codicon-search-stop"></i>
+            <div class="vault-empty-title">No matching sessions</div>
+            <div class="vault-empty-body">Try a shorter query or clear the <em>This folder</em> filter.</div>
+          </div>
+        </aside>
+      </div>
+    </div>
+
+  </div>
+
+  <!-- ═══════════════ WIDE COLUMN ═══════════════ -->
+  <div class="mockup-col mockup-col--wide">
+
+    <!-- 4. Wide · split layout: list + preview · grouped By agent -->
+    <div>
+      <div class="mockup-label">4 · <b>Wide (~720px)</b> · grouped <em>By agent</em> · floating preview overlay (opens on row click)</div>
+      <div class="mockup-frame mockup-frame--wide">
+        <aside class="vault-panel">
+
+          <div class="vault-header">
+            <div class="vault-title-row">
+              <h2 class="vault-title">AI Vault · 14 sessions</h2>
+              <div class="vault-title-actions">
+                <button class="vault-icon-btn" title="Refresh"><i class="codicon codicon-refresh"></i></button>
+              </div>
+            </div>
+            <div class="vault-search">
+              <i class="codicon codicon-search"></i>
+              <input class="vault-search-input" type="search" placeholder="Search sessions, prompts, paths…" />
+            </div>
+          </div>
+
+          <div class="vault-toolbar">
+            <div class="vault-segmented" role="tablist">
+              <button role="tab" aria-pressed="false"><i class="codicon codicon-history"></i>Recent</button>
+              <button role="tab" aria-pressed="true"><i class="codicon codicon-organization"></i>Agent</button>
+              <button role="tab" aria-pressed="false"><i class="codicon codicon-folder"></i>Folder</button>
+            </div>
+            <label class="vault-filter"><input type="checkbox" /> This folder</label>
+          </div>
+
+          <div class="vault-body">
+
+            <ul class="vault-list" role="listbox">
+
+              <li class="vault-group-header" role="presentation">
+                <span class="vault-group-dot" style="background: var(--vault-accent-claude);"></span>
+                Claude Code <span class="vault-group-count">· 6</span>
+              </li>
+
+              <li class="vault-row" role="option" tabindex="0" aria-selected="true">
+                <span class="vault-badge vault-badge--claude"><i class="codicon codicon-sparkle"></i></span>
+                <span class="vault-row-title">/asimov-plan tinh chỉnh lại file tree khi hiển thị dưới terminal</span>
+                <span class="vault-row-cwd" title="/Users/huybuidac/Projects/ai-oss/anywhere-terminal/">
+                  <i class="codicon codicon-folder"></i>
+                  <span class="vault-cwd-leaf">anywhere-terminal</span>
+                </span>
+                <span class="vault-row-time">1m</span>
+                <span class="vault-row-actions">
+                  <button class="vault-action vault-action--resume" title="Resume"><i class="codicon codicon-debug-start"></i></button>
+                </span>
+              </li>
+
+              <li class="vault-row" role="option" tabindex="0">
+                <span class="vault-badge vault-badge--claude"><i class="codicon codicon-sparkle"></i></span>
+                <span class="vault-row-title">@skills/export-pdf — xuất @bidding/security-approaches.md</span>
+                <span class="vault-row-cwd" title="/Users/huybuidac/Projects/cyberk/work/bootstrap-agent/">
+                  <i class="codicon codicon-folder"></i>
+                  <span class="vault-cwd-leaf">bootstrap-agent</span>
+                </span>
+                <span class="vault-row-time">9h</span>
+                <span class="vault-row-actions">
+                  <button class="vault-action vault-action--resume" title="Resume"><i class="codicon codicon-debug-start"></i></button>
+                </span>
+              </li>
+
+              <li class="vault-row" role="option" tabindex="0">
+                <span class="vault-badge vault-badge--claude"><i class="codicon codicon-sparkle"></i></span>
+                <span class="vault-row-title">
+                  <span class="vault-token">&lt;command-message&gt;</span>asimov-plan<span class="vault-token">&lt;/command-message&gt;</span>
+                </span>
+                <span class="vault-row-cwd" title="/Users/huybuidac/Projects/ai-oss/anywhere-terminal/">
+                  <i class="codicon codicon-folder"></i>
+                  <span class="vault-cwd-leaf">anywhere-terminal</span>
+                </span>
+                <span class="vault-row-time">10h</span>
+                <span class="vault-row-actions">
+                  <button class="vault-action vault-action--resume" title="Resume"><i class="codicon codicon-debug-start"></i></button>
+                </span>
+              </li>
+
+              <li class="vault-group-header" role="presentation">
+                <span class="vault-group-dot" style="background: var(--vault-accent-codex);"></span>
+                Codex <span class="vault-group-count">· 4</span>
+              </li>
+
+              <li class="vault-row" role="option" tabindex="0">
+                <span class="vault-badge vault-badge--codex"><i class="codicon codicon-circuit-board"></i></span>
+                <span class="vault-row-title">Refactor websocket binary frame handling and add backpressure</span>
+                <span class="vault-row-cwd" title="/Users/huybuidac/Projects/cyberk/work/bootstrap-agent/">
+                  <i class="codicon codicon-folder"></i>
+                  <span class="vault-cwd-leaf">bootstrap-agent</span>
+                </span>
+                <span class="vault-row-time">1d</span>
+                <span class="vault-row-actions">
+                  <button class="vault-action vault-action--resume" title="Resume"><i class="codicon codicon-debug-start"></i></button>
+                </span>
+              </li>
+
+              <li class="vault-row" role="option" tabindex="0">
+                <span class="vault-badge vault-badge--codex"><i class="codicon codicon-circuit-board"></i></span>
+                <span class="vault-row-title">Calculate simple sum (@general subagent)</span>
+                <span class="vault-row-cwd" title="/Users/huybuidac/Projects/cyberk/CLIProxyAPI/">
+                  <i class="codicon codicon-folder"></i>
+                  <span class="vault-cwd-leaf">CLIProxyAPI</span>
+                </span>
+                <span class="vault-row-time">1w</span>
+                <span class="vault-row-actions">
+                  <button class="vault-action vault-action--resume" title="Resume"><i class="codicon codicon-debug-start"></i></button>
+                </span>
+              </li>
+
+              <li class="vault-group-header" role="presentation">
+                <span class="vault-group-dot" style="background: var(--vault-accent-opencode);"></span>
+                OpenCode <span class="vault-group-count">· 4</span>
+              </li>
+
+              <li class="vault-row" role="option" tabindex="0">
+                <span class="vault-badge vault-badge--opencode"><i class="codicon codicon-symbol-misc"></i></span>
+                <span class="vault-row-title">Review kiến trúc export-terminal-session</span>
+                <span class="vault-row-cwd" title="/Users/huybuidac/Projects/ai-oss/anywhere-terminal/packages/core/">
+                  <i class="codicon codicon-folder"></i>
+                  <span class="vault-cwd-leaf">core</span>
+                </span>
+                <span class="vault-row-time">19h</span>
+                <span class="vault-row-actions">
+                  <button class="vault-action vault-action--resume" title="Resume"><i class="codicon codicon-debug-start"></i></button>
+                </span>
+              </li>
+
+            </ul>
+          </div>
+
+          <!-- ── Floating preview overlay ── -->
+          <!-- In real use this is rendered/positioned by JS when a row is
+               activated (click / Enter / Space). The `is-open` class flips
+               display. Esc or click-outside closes. -->
+          <aside class="vault-preview is-open" aria-label="Session preview">
+            <header class="vault-preview-header">
+              <div class="vault-preview-title-row">
+                <span class="vault-badge vault-badge--claude" aria-label="Claude Code">
+                  <i class="codicon codicon-sparkle"></i>
+                </span>
+                <h3 class="vault-preview-title">/asimov-plan tinh chỉnh lại file tree khi hiển thị dưới terminal</h3>
+                <div class="vault-preview-title-actions">
+                  <!-- Triangle-only Resume button — no label, just ▶. -->
+                  <button class="vault-preview-resume" title="Resume session" aria-label="Resume session">
+                    <i class="codicon codicon-debug-start"></i>
+                  </button>
+                  <button class="vault-preview-close" aria-label="Close preview"><i class="codicon codicon-close"></i></button>
+                </div>
+              </div>
+              <dl class="vault-preview-meta">
+                <dt>Folder</dt>
+                <dd title="/Users/huybuidac/Projects/ai-oss/anywhere-terminal/">…/ai-oss/<b>anywhere-terminal</b></dd>
+                <dt>Modified</dt>
+                <dd>1 minute ago</dd>
+                <dt>Activity</dt>
+                <dd>24 msgs · 18.2k tok · 8 tools · 1 subagent</dd>
+              </dl>
+            </header>
+
+            <div class="vault-preview-body">
+
+              <div class="vault-preview-section-label">First prompt</div>
+              <div class="vault-preview-message vault-preview-message-user">
+                <div class="vault-preview-message-role">
+                  <i class="codicon codicon-account"></i> User
+                </div>
+                <p>tinh chỉnh lại file tree: 1. khi hiển thị ở dưới terminal panel, các folder nên hiển thị icon chevron rõ ràng hơn. 2. khi click vào file, mở trong editor mà không di chuyển focus…</p>
+              </div>
+
+              <div class="vault-preview-section-label">Recent activity</div>
+
+              <!-- Tool call: file read. Path is mono. -->
+              <div class="vault-preview-message vault-preview-message-tool">
+                <div class="vault-preview-message-role">
+                  <i class="codicon codicon-file-code"></i> Read
+                </div>
+                <p>packages/core/file-tree.ts</p>
+              </div>
+
+              <!-- Tool call: edit, with diff stat. -->
+              <div class="vault-preview-message vault-preview-message-tool">
+                <div class="vault-preview-message-role">
+                  <i class="codicon codicon-edit"></i> Edit
+                </div>
+                <p>
+                  packages/core/file-tree.ts
+                  <span class="vault-preview-mute">·</span>
+                  <span class="vault-preview-diff-add">+14</span>
+                  <span class="vault-preview-diff-del">−3</span>
+                </p>
+              </div>
+
+              <!-- Subagent invocation. -->
+              <div class="vault-preview-message vault-preview-message-subagent">
+                <div class="vault-preview-message-role">
+                  <i class="codicon codicon-organization"></i> Subagent → asm-review-frontend
+                </div>
+                <p>Review the chevron + preserveFocus change. Check that nothing in the file-tree contract regresses.</p>
+              </div>
+
+              <!-- Tool call: bash. -->
+              <div class="vault-preview-message vault-preview-message-tool">
+                <div class="vault-preview-message-role">
+                  <i class="codicon codicon-terminal"></i> Bash
+                </div>
+                <p>npm run test --workspace packages/core</p>
+              </div>
+
+              <div class="vault-preview-section-label">Latest message</div>
+              <div class="vault-preview-message vault-preview-message-assistant">
+                <div class="vault-preview-message-role">
+                  <i class="codicon codicon-sparkle"></i> Assistant · 1m ago
+                </div>
+                <p>Tao đã đổi sang dùng codicon-chevron-right cho folder collapsed và codicon-chevron-down cho folder expanded. Click file giờ dùng <code>{preserveFocus: true}</code> trong showTextDocument. Mày check thử…</p>
+              </div>
+            </div>
+          </aside>
+
+        </aside>
+      </div>
+    </div>
+
+    <!-- 5. Wide · grouped By folder · no cwd repeated in rows -->
+    <div>
+      <div class="mockup-label">5 · <b>Wide</b> · grouped <em>By folder</em> · collapsible groups · cwd dropped from rows</div>
+      <div class="mockup-frame mockup-frame--wide">
+        <aside class="vault-panel">
+
+          <div class="vault-header">
+            <div class="vault-title-row">
+              <h2 class="vault-title">AI Vault · 14 sessions</h2>
+              <div class="vault-title-actions">
+                <button class="vault-icon-btn" title="Refresh"><i class="codicon codicon-refresh"></i></button>
+              </div>
+            </div>
+            <div class="vault-search">
+              <i class="codicon codicon-search"></i>
+              <input class="vault-search-input" type="search" placeholder="Search sessions, prompts, paths…" />
+            </div>
+          </div>
+
+          <div class="vault-toolbar">
+            <div class="vault-segmented" role="tablist">
+              <button role="tab" aria-pressed="false"><i class="codicon codicon-history"></i>Recent</button>
+              <button role="tab" aria-pressed="false"><i class="codicon codicon-organization"></i>Agent</button>
+              <button role="tab" aria-pressed="true"><i class="codicon codicon-folder"></i>Folder</button>
+            </div>
+            <label class="vault-filter"><input type="checkbox" /> This folder</label>
+          </div>
+
+          <div class="vault-body">
+            <ul class="vault-list" role="listbox">
+
+              <!-- Folder group: cwd is implied by the header, so rows omit the cwd chip
+                   entirely. Grid in row collapses cleanly because the column is auto. -->
+              <li class="vault-group-header vault-group-header--folder" role="presentation">
+                <i class="codicon codicon-chevron-down" aria-hidden="true"></i>
+                <i class="codicon codicon-folder"></i>
+                anywhere-terminal
+                <span class="vault-group-count">· 5</span>
+              </li>
+
+              <li class="vault-row" role="option" tabindex="0" aria-selected="true">
+                <span class="vault-badge vault-badge--claude"><i class="codicon codicon-sparkle"></i></span>
+                <span class="vault-row-title">/asimov-plan tinh chỉnh lại file tree khi hiển thị dưới terminal</span>
+                <span class="vault-row-time">1m</span>
+                <span class="vault-row-actions">
+                  <button class="vault-action vault-action--resume" title="Resume"><i class="codicon codicon-debug-start"></i></button>
+                </span>
+              </li>
+              <li class="vault-row" role="option" tabindex="0">
+                <span class="vault-badge vault-badge--claude"><i class="codicon codicon-sparkle"></i></span>
+                <span class="vault-row-title">nghiên cứu terminal — warp + cmux deep dive</span>
+                <span class="vault-row-time">2h</span>
+                <span class="vault-row-actions">
+                  <button class="vault-action vault-action--resume" title="Resume"><i class="codicon codicon-debug-start"></i></button>
+                </span>
+              </li>
+              <li class="vault-row" role="option" tabindex="0">
+                <span class="vault-badge vault-badge--opencode"><i class="codicon codicon-symbol-misc"></i></span>
+                <span class="vault-row-title">Exact websocket-binary-final-ok reply</span>
+                <span class="vault-row-time">20h</span>
+                <span class="vault-row-actions">
+                  <button class="vault-action vault-action--resume" title="Resume"><i class="codicon codicon-debug-start"></i></button>
+                </span>
+              </li>
+              <li class="vault-row" role="option" tabindex="0">
+                <span class="vault-badge vault-badge--claude"><i class="codicon codicon-sparkle"></i></span>
+                <span class="vault-row-title">
+                  <span class="vault-token">&lt;command-message&gt;</span>asimov-plan<span class="vault-token">&lt;/command-message&gt;</span>
+                </span>
+                <span class="vault-row-time">10h</span>
+                <span class="vault-row-actions">
+                  <button class="vault-action vault-action--resume" title="Resume"><i class="codicon codicon-debug-start"></i></button>
+                </span>
+              </li>
+
+              <li class="vault-group-header vault-group-header--folder" role="presentation">
+                <i class="codicon codicon-chevron-down" aria-hidden="true"></i>
+                <i class="codicon codicon-folder"></i>
+                bootstrap-agent
+                <span class="vault-group-count">· 4</span>
+              </li>
+              <li class="vault-row" role="option" tabindex="0">
+                <span class="vault-badge vault-badge--claude"><i class="codicon codicon-sparkle"></i></span>
+                <span class="vault-row-title">@skills/export-pdf — xuất @bidding/security-approaches.md</span>
+                <span class="vault-row-time">9h</span>
+                <span class="vault-row-actions">
+                  <button class="vault-action vault-action--resume" title="Resume"><i class="codicon codicon-debug-start"></i></button>
+                </span>
+              </li>
+              <li class="vault-row" role="option" tabindex="0">
+                <span class="vault-badge vault-badge--codex"><i class="codicon codicon-circuit-board"></i></span>
+                <span class="vault-row-title">Refactor websocket binary frame handling and add backpressure</span>
+                <span class="vault-row-time">1d</span>
+                <span class="vault-row-actions">
+                  <button class="vault-action vault-action--resume" title="Resume"><i class="codicon codicon-debug-start"></i></button>
+                </span>
+              </li>
+              <li class="vault-row" role="option" tabindex="0">
+                <span class="vault-badge vault-badge--claude"><i class="codicon codicon-sparkle"></i></span>
+                <span class="vault-row-title">
+                  <span class="vault-token">&lt;local-command-caveat&gt;</span> Caveat: the messages below were generated…
+                </span>
+                <span class="vault-row-time">1w</span>
+                <span class="vault-row-actions">
+                  <button class="vault-action vault-action--resume" title="Resume"><i class="codicon codicon-debug-start"></i></button>
+                </span>
+              </li>
+
+              <li class="vault-group-header vault-group-header--folder" role="presentation">
+                <i class="codicon codicon-chevron-down" aria-hidden="true"></i>
+                <i class="codicon codicon-folder"></i>
+                CLIProxyAPI
+                <span class="vault-group-count">· 2</span>
+              </li>
+              <li class="vault-row" role="option" tabindex="0">
+                <span class="vault-badge vault-badge--codex"><i class="codicon codicon-circuit-board"></i></span>
+                <span class="vault-row-title">Calculate simple sum (@general subagent)</span>
+                <span class="vault-row-time">1w</span>
+                <span class="vault-row-actions">
+                  <button class="vault-action vault-action--resume" title="Resume"><i class="codicon codicon-debug-start"></i></button>
+                </span>
+              </li>
+
+            </ul>
+          </div>
+        </aside>
+      </div>
+    </div>
+
+  </div>
+</div>
+</body>
+</html>

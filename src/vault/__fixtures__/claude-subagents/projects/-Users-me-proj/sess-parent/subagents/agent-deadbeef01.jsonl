@@ -1,0 +1,2 @@
+{"type":"user","isSidechain":true,"agentId":"deadbeef01","sessionId":"sess-parent","timestamp":"2026-04-29T02:02:00.000Z","message":{"role":"user","content":[{"type":"text","text":"You are reviewing the refactor of scripts/ toward a cleaner layout."}]}}
+{"type":"assistant","isSidechain":true,"agentId":"deadbeef01","sessionId":"sess-parent","timestamp":"2026-04-29T02:03:00.000Z","message":{"role":"assistant","content":[{"type":"thinking","thinking":"checking the diff"},{"type":"text","text":"Looks good — ship it."}]}}

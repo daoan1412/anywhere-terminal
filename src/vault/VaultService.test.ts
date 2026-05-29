@@ -51,7 +51,7 @@ describe("VaultService.list: aggregation", () => {
     });
     const svc = new VaultService({ readers, canForkOpenCodeFn: async () => false });
     const { unreadable } = await svc.list();
-    expect(unreadable).toBe(3);
+    expect(unreadable.count).toBe(3);
   });
 
   it("a reader that throws contributes 0 entries + 1 unreadable, others survive", async () => {
@@ -64,7 +64,7 @@ describe("VaultService.list: aggregation", () => {
     const svc = new VaultService({ readers, canForkOpenCodeFn: async () => false });
     const { entries, unreadable } = await svc.list();
     expect(entries.map((e) => e.id)).toEqual(["codex:x1"]);
-    expect(unreadable).toBe(1);
+    expect(unreadable.count).toBe(1);
   });
 
   it("a reader that throws synchronously does not abort aggregation", async () => {
@@ -77,7 +77,7 @@ describe("VaultService.list: aggregation", () => {
     const svc = new VaultService({ readers, canForkOpenCodeFn: async () => false });
     const { entries, unreadable } = await svc.list();
     expect(entries.map((e) => e.id)).toEqual(["codex:x1"]);
-    expect(unreadable).toBe(1);
+    expect(unreadable.count).toBe(1);
   });
 });
 

@@ -35,6 +35,9 @@ describe("readOpenCodeSessions", () => {
     expect(sql).toContain("FROM session s");
     expect(sql).toContain('data LIKE \'%"role":"assistant"%\'');
     expect(sql).toContain("ORDER BY s.time_updated DESC");
+    // Subagent / workflow children (parent_id set) are folded into their parent's
+    // preview, not listed as standalone sessions.
+    expect(sql).toContain("parent_id");
   });
 
   it("maps id/title/cwd/modified and derives provider/model + agent", async () => {
@@ -57,6 +60,38 @@ describe("readOpenCodeSessions", () => {
     expect(unreadable).toBe(0);
     expect(entries[1].flags.model).toBeUndefined();
     expect(entries[1].flags.agent).toBeUndefined();
+  });
+
+  it("falls back to the first user message when the title is OpenCode's 'New session' placeholder (#5)", async () => {
+    const rows = [
+      {
+        id: "s3",
+        title: "New session - 2026-05-18T14:16:07.713Z",
+        directory: "/x",
+        time_updated: 9000,
+        last_assistant: null,
+        first_user_part: JSON.stringify({ type: "text", text: "help me refactor the parser" }),
+      },
+    ];
+    const fn = stubSqlite({ status: "ok", rows });
+    const { entries } = await readOpenCodeSessions({ dataDir: "/x/oc", readSqliteFn: fn });
+    expect(entries[0].title).toBe("help me refactor the parser");
+  });
+
+  it("keeps a real title even when a first user message is available (#5)", async () => {
+    const rows = [
+      {
+        id: "s4",
+        title: "Refactor the JSONL parser",
+        directory: "/x",
+        time_updated: 9000,
+        last_assistant: null,
+        first_user_part: JSON.stringify({ type: "text", text: "the raw first prompt" }),
+      },
+    ];
+    const fn = stubSqlite({ status: "ok", rows });
+    const { entries } = await readOpenCodeSessions({ dataDir: "/x/oc", readSqliteFn: fn });
+    expect(entries[0].title).toBe("Refactor the JSONL parser");
   });
 
   it("skips and counts rows without an id", async () => {

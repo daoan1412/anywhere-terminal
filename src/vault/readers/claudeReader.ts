@@ -15,7 +15,12 @@ import * as os from "node:os";
 import * as path from "node:path";
 import * as readline from "node:readline";
 import { boundedPreview } from "../preview";
-import type { VaultSessionEntry } from "../types";
+import type { VaultSessionDetail, VaultSessionEntry } from "../types";
+import { type ClaudeChildStub, classifyClaudeStyleEvents, cleanPromptText } from "./detail";
+
+/** Separates a parent session id from a subagent file stem in an entry id:
+ *  `claude:<parentSessionId>:subagent:<agent-stem>`. */
+const SUBAGENT_MARKER = ":subagent:";
 
 export interface ClaudeReaderOptions {
   /** `$CLAUDE_CONFIG_DIR` override; defaults to the env var. */
@@ -39,13 +44,66 @@ interface ClaudeFileFields {
   parsedAnyLine: boolean;
 }
 
+/** Bytes read from the file tail when hunting for the latest `ai-title`. */
+const AI_TITLE_TAIL_BYTES = 64 * 1024;
+
+/**
+ * Claude's UI title is an `{type:"ai-title", aiTitle}` record that Claude
+ * regenerates and re-appends near the end of the session as it evolves — the
+ * LATEST one wins. Those records sit scattered to EOF (a 86MB file is common),
+ * so the forward metadata scan never reaches them. Read only the last
+ * `AI_TITLE_TAIL_BYTES` (the freshest title reliably lands at/near EOF) and
+ * return the last `aiTitle` found there — bounded regardless of file size.
+ */
+async function readLatestAiTitle(filePath: string): Promise<string | undefined> {
+  let handle: fs.FileHandle | undefined;
+  try {
+    handle = await fs.open(filePath, "r");
+    const { size } = await handle.stat();
+    if (size === 0) {
+      return undefined;
+    }
+    const start = Math.max(0, size - AI_TITLE_TAIL_BYTES);
+    const length = size - start;
+    const buf = Buffer.alloc(length);
+    await handle.read(buf, 0, length, start);
+    const lines = buf.toString("utf8").split("\n");
+    if (start > 0) {
+      lines.shift(); // first line is likely truncated mid-record — drop it
+    }
+    let title: string | undefined;
+    for (const line of lines) {
+      const trimmed = line.trim();
+      if (!trimmed) {
+        continue;
+      }
+      try {
+        const obj = JSON.parse(trimmed);
+        if (obj && typeof obj === "object" && (obj as { type?: unknown }).type === "ai-title") {
+          const value = (obj as { aiTitle?: unknown }).aiTitle;
+          if (typeof value === "string" && value.trim()) {
+            title = value.trim(); // keep walking — the last record is the freshest
+          }
+        }
+      } catch {
+        // skip a partial/corrupt line, keep scanning (D8)
+      }
+    }
+    return title;
+  } catch {
+    return undefined; // unreadable tail → fall back to the first-prompt title
+  } finally {
+    await handle?.close();
+  }
+}
+
 function extractUserText(message: unknown): string | undefined {
   if (typeof message !== "object" || message === null) {
     return undefined;
   }
   const content = (message as { content?: unknown }).content;
   if (typeof content === "string") {
-    return content.trim() || undefined;
+    return cleanPromptText(content);
   }
   if (Array.isArray(content)) {
     const text = content
@@ -54,7 +112,7 @@ function extractUserText(message: unknown): string | undefined {
       .map((b) => b.text as string)
       .join(" ")
       .trim();
-    return text || undefined;
+    return text ? cleanPromptText(text) : undefined;
   }
   return undefined;
 }
@@ -102,7 +160,7 @@ async function parseClaudeFile(filePath: string): Promise<ClaudeFileFields | nul
       if (summary === undefined && obj.type === "summary" && typeof obj.summary === "string") {
         summary = obj.summary;
       }
-      if (!haveUser && obj.type === "user") {
+      if (!haveUser && obj.type === "user" && obj.isMeta !== true && obj.isSidechain !== true) {
         const text = extractUserText(obj.message);
         if (text) {
           fields.title = text;
@@ -152,11 +210,278 @@ async function listJsonlFiles(dir: string): Promise<string[]> {
   }
 }
 
-export async function readClaudeSessions(options: ClaudeReaderOptions = {}): Promise<ReaderResult> {
+/** Resolve the store root + projects dir (shared by list + detail paths). */
+function claudeRoots(options: ClaudeReaderOptions): { configDir?: string; projectsDir: string } {
   const configDir = options.configDir ?? process.env.CLAUDE_CONFIG_DIR;
   const home = options.home ?? os.homedir();
   const root = configDir ? configDir : path.join(home, ".claude");
-  const projectsDir = path.join(root, "projects");
+  return { configDir, projectsDir: path.join(root, "projects") };
+}
+
+/** Session ids are filename stems — reject anything that could escape the dir. */
+function isSafeSessionId(id: string): boolean {
+  return /^[A-Za-z0-9._-]+$/.test(id) && !id.includes("..");
+}
+
+/**
+ * Locate the unique session file by id with a metadata-only directory scan
+ * (each `<projects>/<dir>/<sessionId>.jsonl`) — no transcript content is read.
+ * The candidate is containment-checked under the projects dir before being
+ * returned, and the host never trusts a webview-supplied path (D3).
+ */
+export async function resolveClaudeSessionPath(
+  sessionId: string,
+  options: ClaudeReaderOptions = {},
+): Promise<string | null> {
+  if (!isSafeSessionId(sessionId)) {
+    return null;
+  }
+  const { projectsDir } = claudeRoots(options);
+  let projectDirs: string[];
+  try {
+    const entries = await fs.readdir(projectsDir, { withFileTypes: true });
+    projectDirs = entries.filter((e) => e.isDirectory()).map((e) => e.name);
+  } catch {
+    return null;
+  }
+  for (const dir of projectDirs) {
+    const candidate = path.join(projectsDir, dir, `${sessionId}.jsonl`);
+    const rel = path.relative(projectsDir, candidate);
+    if (rel.startsWith("..") || path.isAbsolute(rel)) {
+      continue; // outside the store root — never read it
+    }
+    try {
+      const stat = await fs.stat(candidate);
+      if (stat.isFile()) {
+        return candidate;
+      }
+    } catch {
+      // not in this project dir — keep scanning
+    }
+  }
+  return null;
+}
+
+/** Read every parseable record from a session jsonl (skip-malformed, D8). */
+async function streamClaudeRecords(filePath: string): Promise<Record<string, unknown>[] | null> {
+  const records: Record<string, unknown>[] = [];
+  let stream: ReturnType<typeof createReadStream> | undefined;
+  let rl: readline.Interface | undefined;
+  try {
+    stream = createReadStream(filePath, { encoding: "utf8" });
+    rl = readline.createInterface({ input: stream, crlfDelay: Number.POSITIVE_INFINITY });
+    for await (const line of rl) {
+      const trimmed = line.trim();
+      if (!trimmed) {
+        continue;
+      }
+      try {
+        const parsed = JSON.parse(trimmed);
+        if (parsed && typeof parsed === "object") {
+          records.push(parsed as Record<string, unknown>);
+        }
+      } catch {
+        // skip a single corrupt line, keep reading (D8)
+      }
+    }
+  } catch {
+    return null; // stream/open failure → unreadable
+  } finally {
+    rl?.close();
+    stream?.destroy();
+  }
+  return records;
+}
+
+/**
+ * On-demand bounded detail for a Claude session: resolve the file by id, stream
+ * + classify its mixed-event records. Returns null when the session can't be
+ * located or read.
+ */
+export async function readClaudeDetail(
+  sessionId: string,
+  options: ClaudeReaderOptions = {},
+  limit?: number,
+): Promise<VaultSessionDetail | null> {
+  // Subagent fetch: `<parentSessionId>:subagent:<stem>` resolves a transcript in
+  // the parent's `subagents/` dir. Its records are all `isSidechain` (that IS the
+  // conversation here), so classify with `includeSidechain`.
+  const markerAt = sessionId.indexOf(SUBAGENT_MARKER);
+  if (markerAt >= 0) {
+    const parentId = sessionId.slice(0, markerAt);
+    const stem = sessionId.slice(markerAt + SUBAGENT_MARKER.length);
+    const filePath = await resolveClaudeSubagentPath(parentId, stem, options);
+    if (!filePath) {
+      return null;
+    }
+    const records = await streamClaudeRecords(filePath);
+    if (records === null) {
+      return null;
+    }
+    return {
+      entryId: `claude:${sessionId}`,
+      ...classifyClaudeStyleEvents(records, { limit, includeSidechain: true }),
+    };
+  }
+
+  const filePath = await resolveClaudeSessionPath(sessionId, options);
+  if (!filePath) {
+    return null;
+  }
+  const records = await streamClaudeRecords(filePath);
+  if (records === null) {
+    return null;
+  }
+  const childStubs = await listClaudeSubagentStubs(sessionId, options);
+  return { entryId: `claude:${sessionId}`, ...classifyClaudeStyleEvents(records, { limit, childStubs }) };
+}
+
+/**
+ * Resolve a subagent transcript at `<projects>/<dir>/<parentId>/subagents/<stem>.jsonl`.
+ * Both id parts are filename-safe (no traversal) and the resolved path is
+ * containment-checked under the projects dir — the host never trusts the
+ * webview-supplied composite id (D3).
+ */
+export async function resolveClaudeSubagentPath(
+  parentId: string,
+  stem: string,
+  options: ClaudeReaderOptions = {},
+): Promise<string | null> {
+  if (!isSafeSessionId(parentId) || !isSafeSessionId(stem)) {
+    return null;
+  }
+  const { projectsDir } = claudeRoots(options);
+  let projectDirs: string[];
+  try {
+    const entries = await fs.readdir(projectsDir, { withFileTypes: true });
+    projectDirs = entries.filter((e) => e.isDirectory()).map((e) => e.name);
+  } catch {
+    return null;
+  }
+  for (const dir of projectDirs) {
+    const candidate = path.join(projectsDir, dir, parentId, "subagents", `${stem}.jsonl`);
+    const rel = path.relative(projectsDir, candidate);
+    if (rel.startsWith("..") || path.isAbsolute(rel)) {
+      continue;
+    }
+    try {
+      if ((await fs.stat(candidate)).isFile()) {
+        return candidate;
+      }
+    } catch {
+      // not under this project dir — keep scanning
+    }
+  }
+  return null;
+}
+
+/**
+ * Discover a parent session's subagents: `<projects>/<dir>/<parentId>/subagents/`
+ * holds `<stem>.jsonl` transcripts + `<stem>.meta.json` (`{agentType, description}`).
+ * Returns a lazy stub per subagent (entryId + meta + first prompt) — fail-safe to
+ * `[]` (a missing dir / unreadable meta just yields no nesting).
+ */
+async function listClaudeSubagentStubs(parentId: string, options: ClaudeReaderOptions): Promise<ClaudeChildStub[]> {
+  if (!isSafeSessionId(parentId)) {
+    return [];
+  }
+  const { projectsDir } = claudeRoots(options);
+  let projectDirs: string[];
+  try {
+    const entries = await fs.readdir(projectsDir, { withFileTypes: true });
+    projectDirs = entries.filter((e) => e.isDirectory()).map((e) => e.name);
+  } catch {
+    return [];
+  }
+  for (const dir of projectDirs) {
+    const subagentsDir = path.join(projectsDir, dir, parentId, "subagents");
+    const rel = path.relative(projectsDir, subagentsDir);
+    if (rel.startsWith("..") || path.isAbsolute(rel)) {
+      continue;
+    }
+    let files: string[];
+    try {
+      files = await fs.readdir(subagentsDir);
+    } catch {
+      continue; // no subagents dir under this project — try the next
+    }
+    const stems = files.filter((f) => f.endsWith(".jsonl")).map((f) => f.slice(0, -".jsonl".length));
+    const stubs: ClaudeChildStub[] = [];
+    for (const stem of stems) {
+      if (!isSafeSessionId(stem)) {
+        continue;
+      }
+      const meta = await readSubagentMeta(path.join(subagentsDir, `${stem}.meta.json`));
+      const first = await readFirstUserRecord(path.join(subagentsDir, `${stem}.jsonl`));
+      stubs.push({
+        entryId: `claude:${parentId}${SUBAGENT_MARKER}${stem}`,
+        agentType: meta?.agentType,
+        description: meta?.description,
+        firstMessage: first?.text,
+        timestamp: first?.timestamp,
+      });
+    }
+    return stubs;
+  }
+  return [];
+}
+
+/** Read a subagent's `{agentType, description}` meta sidecar (best-effort). */
+async function readSubagentMeta(metaPath: string): Promise<{ agentType?: string; description?: string } | null> {
+  try {
+    const raw = await fs.readFile(metaPath, "utf8");
+    const obj = JSON.parse(raw) as Record<string, unknown>;
+    if (!obj || typeof obj !== "object") {
+      return null;
+    }
+    return {
+      agentType: typeof obj.agentType === "string" ? obj.agentType : undefined,
+      description: typeof obj.description === "string" ? obj.description : undefined,
+    };
+  } catch {
+    return null;
+  }
+}
+
+/** Cheaply read a transcript's first user message text + timestamp (head only). */
+async function readFirstUserRecord(filePath: string): Promise<{ text: string; timestamp: number } | null> {
+  let stream: ReturnType<typeof createReadStream> | undefined;
+  let rl: readline.Interface | undefined;
+  try {
+    stream = createReadStream(filePath, { encoding: "utf8" });
+    rl = readline.createInterface({ input: stream, crlfDelay: Number.POSITIVE_INFINITY });
+    for await (const line of rl) {
+      const trimmed = line.trim();
+      if (!trimmed) {
+        continue;
+      }
+      let obj: Record<string, unknown>;
+      try {
+        obj = JSON.parse(trimmed) as Record<string, unknown>;
+      } catch {
+        continue;
+      }
+      if (obj.type !== "user") {
+        continue;
+      }
+      const text = extractUserText(obj.message);
+      if (text) {
+        const t = obj.timestamp;
+        const ts = typeof t === "string" ? Date.parse(t) : typeof t === "number" ? t : Number.NaN;
+        return { text, timestamp: Number.isNaN(ts) ? 0 : ts };
+      }
+    }
+    return null;
+  } catch {
+    return null;
+  } finally {
+    rl?.close();
+    stream?.destroy();
+  }
+}
+
+export async function readClaudeSessions(options: ClaudeReaderOptions = {}): Promise<ReaderResult> {
+  const { configDir, projectsDir } = claudeRoots(options);
 
   let projectDirs: string[];
   try {
@@ -181,11 +506,13 @@ export async function readClaudeSessions(options: ClaudeReaderOptions = {}): Pro
           unreadable++;
           continue;
         }
+        // Prefer Claude's own regenerated title; fall back to the first prompt.
+        const aiTitle = await readLatestAiTitle(filePath);
         entries.push({
           id: `claude:${sessionId}`,
           agent: "claude",
           sessionId,
-          title: boundedPreview(fields.title ?? ""),
+          title: boundedPreview(aiTitle ?? fields.title ?? ""),
           cwd: fields.cwd ?? decodeProjectDir(projectDir),
           modified: stat.mtimeMs,
           flags: {
@@ -194,6 +521,9 @@ export async function readClaudeSessions(options: ClaudeReaderOptions = {}): Pro
             configDir,
           },
           canFork: false, // resolved by VaultService (task 2_5)
+          // File-backed → the webview shows file-targeting context-menu items;
+          // the host re-derives this path by id, never trusting it (D9).
+          sessionPath: filePath,
         });
       } catch {
         unreadable++;
