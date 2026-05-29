@@ -4,6 +4,17 @@ All notable changes to **AnyWhere Terminal** are documented in this file.
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.16.0] — 2026-05-29
+
+### Added
+
+- **AI Coding Vault** — a collapsible panel stacked above the file tree that lists your recent local AI-CLI sessions (Claude Code, Codex, OpenCode) and lets you **resume or fork** any of them in a new terminal. Sessions are read live from each tool's own store on every open — metadata only (a bounded, never-persisted title preview; nothing is cached or sent off the machine). Includes client-side search and a **"This folder only"** filter scoped to the focused terminal's folder. Fork is offered only where supported (OpenCode ≥ 1.14.50). Open it from the file-tree header button or the `AI Vault: Open` command.
+- **Cross-platform session reading (Windows, Linux, macOS).** Store locations resolve per-OS from the home directory plus each tool's env overrides (`CLAUDE_CONFIG_DIR`, `CODEX_HOME` / `CODEX_SQLITE_HOME`, `XDG_DATA_HOME`). When the `sqlite3` CLI is missing (typically Windows), reads fall back to the built-in `node:sqlite` engine — no native dependency. A missing store or missing tooling degrades to an empty list, never an error.
+
+### Changed
+
+- **Smoother sidebar collapse.** The AI Vault and file tree now collapse/expand with a VS-Code-style pixel animation (matching the Outline/Timeline panes), so toggling one section no longer makes the other bounce. In left/right docks each section folds into a thin vertical strip with aligned, correctly-pointing chevrons.
+
 ## [0.15.0] — 2026-05-28
 
 ### Added
