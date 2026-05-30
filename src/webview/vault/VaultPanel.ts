@@ -55,6 +55,8 @@ const ICON_RECENT =
   '<svg viewBox="0 0 16 16" width="12" height="12" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M8 4.5v3.7l2.4 1.4"/><path d="M2.6 8a5.4 5.4 0 1 1 1.6 3.8"/><path d="M2.4 12v-2.3h2.3"/></svg>';
 const ICON_AGENT =
   '<svg viewBox="0 0 16 16" width="12" height="12" fill="none" stroke="currentColor" stroke-width="1.2" stroke-linejoin="round" aria-hidden="true"><circle cx="5.5" cy="5" r="2"/><circle cx="11" cy="6" r="1.6"/><path d="M1.8 13c0-2 1.6-3.3 3.7-3.3S9.2 11 9.2 13"/><path d="M9.6 13c0-1.5 1.1-2.6 2.6-2.6 1.4 0 2 0.9 2 2.2"/></svg>';
+const ICON_REFRESH =
+  '<svg viewBox="0 0 16 16" width="13" height="13" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M13.3 7a5.3 5.3 0 1 0-.3 3"/><path d="M13.5 3v3h-3"/></svg>';
 const ICON_CHEVRON_DOWN =
   '<svg viewBox="0 0 16 16" width="13" height="13" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 6l4 4 4-4"/></svg>';
 const ICON_NAV_PREV =
@@ -376,6 +378,10 @@ export class VaultPanel {
   private readonly searchInput: HTMLInputElement;
   private readonly searchBarEl: HTMLElement;
   private readonly searchBtnEl: HTMLButtonElement;
+  private readonly refreshBtnEl: HTMLButtonElement;
+  /** Safety timer that clears the refresh spinner if no fresh response arrives
+   *  (e.g. the host hit an error and only logged it). */
+  private refreshTimer: ReturnType<typeof setTimeout> | null = null;
   private readonly folderToggleEl: HTMLLabelElement;
   private readonly folderCheckboxEl: HTMLInputElement;
   private readonly segmentedEl: HTMLElement;
@@ -543,7 +549,24 @@ export class VaultPanel {
     });
     this.searchBtnEl = searchBtn;
 
-    header.append(mainRow, searchBar, searchBtn);
+    // Manual refresh — re-reads the agents' stores now. Covers the case the
+    // auto-refresh-on-reveal (main.ts onViewShow) misses: the vault is open AND
+    // visible while an agent writes in a terminal in the same view (no viewShow,
+    // no cwd change). stopPropagation so the click doesn't toggle the collapse.
+    const refreshBtn = document.createElement("button");
+    refreshBtn.type = "button";
+    refreshBtn.className = "vault-header__refresh-btn";
+    refreshBtn.innerHTML = ICON_REFRESH;
+    refreshBtn.title = "Refresh sessions";
+    refreshBtn.setAttribute("aria-label", "Refresh sessions");
+    refreshBtn.addEventListener("click", (ev) => {
+      ev.stopPropagation();
+      this.setRefreshing(true);
+      this.requestRefresh();
+    });
+    this.refreshBtnEl = refreshBtn;
+
+    header.append(mainRow, searchBar, refreshBtn, searchBtn);
 
     // Toolbar: grouping segmented control (left) + "This folder only" (right).
     const toolbar = document.createElement("div");
@@ -787,13 +810,40 @@ export class VaultPanel {
   }
 
   /**
+   * Toggle the manual-refresh spinner. Spinning is purely a click affordance for
+   * the header refresh button (other refresh triggers — expand, viewShow, cwd
+   * change — don't spin). A safety timer clears it if no fresh response ever
+   * arrives (the host hit an error and only logged it, leaving the cache shown).
+   */
+  private setRefreshing(on: boolean): void {
+    if (this.refreshTimer !== null) {
+      clearTimeout(this.refreshTimer);
+      this.refreshTimer = null;
+    }
+    this.refreshBtnEl.classList.toggle("is-refreshing", on);
+    this.refreshBtnEl.setAttribute("aria-busy", on ? "true" : "false");
+    if (on) {
+      this.refreshTimer = setTimeout(() => {
+        this.refreshTimer = null;
+        this.refreshBtnEl.classList.remove("is-refreshing");
+        this.refreshBtnEl.setAttribute("aria-busy", "false");
+      }, 4000);
+    }
+  }
+
+  /**
    * Render the aggregated result; preserves the current search query. `this.entries`
    * is ALWAYS updated (so client-side search/filter never operate on stale data),
    * but the DOM re-render is skipped when the entries are equivalent to what is
    * already painted (cache-vault-load D6) — the common case for the cache→fresh
    * refresh — so an open preview, scroll position, and selection are undisturbed.
    */
-  render(result: VaultListResult): void {
+  render(result: VaultListResult, fromCache = false): void {
+    // The authoritative (non-cache) response completes a manual refresh — stop the
+    // spinner here, BEFORE the no-op guard, so it clears even when nothing changed.
+    if (!fromCache) {
+      this.setRefreshing(false);
+    }
     this.entries = result.entries;
     // Keep the open preview's entry reference live even when the DOM re-render is
     // skipped below — preview re-render paths (e.g. "show more steps") read

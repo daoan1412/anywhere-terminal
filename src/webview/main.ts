@@ -629,7 +629,7 @@ const routeMessage = createMessageRouter({
     handleScrollbackDump(msg);
   },
   onVaultSessionsResponse(msg) {
-    vaultPanel?.render(msg.result);
+    vaultPanel?.render(msg.result, msg.fromCache ?? false);
   },
   onVaultSessionDetailResponse(msg) {
     vaultPanel?.handleSessionDetailResponse(msg);

@@ -141,6 +141,40 @@
   outline-offset: -1px;
 }
 
+/* Manual refresh button — mirrors the search button; sits just left of it. */
+.vault-header__refresh-btn {
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 20px;
+  height: 20px;
+  padding: 0;
+  border: none;
+  border-radius: 3px;
+  background: none;
+  color: var(--vscode-icon-foreground, var(--vscode-foreground));
+  opacity: 0.7;
+  cursor: pointer;
+}
+.vault-header__refresh-btn:hover {
+  opacity: 1;
+  background: var(--vscode-toolbar-hoverBackground, var(--vscode-list-hoverBackground));
+}
+.vault-header__refresh-btn:focus-visible {
+  outline: 1px solid var(--vscode-focusBorder);
+  outline-offset: -1px;
+}
+/* Spin the icon while a manual refresh is in flight. */
+.vault-header__refresh-btn.is-refreshing svg {
+  animation: vault-refresh-spin 0.8s linear infinite;
+}
+@keyframes vault-refresh-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
 /* ── Search (inline in the header, shown only while searching) ───────────── */
 .vault-search-icon {
   position: absolute;

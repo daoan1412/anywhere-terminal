@@ -1257,3 +1257,46 @@ describe("VaultPanel 'This folder only' filter", () => {
     expect(panel.isFolderOnly()).toBe(false);
   });
 });
+
+describe("VaultPanel refresh button", () => {
+  function refreshCount(posted: Array<{ type: string }>): number {
+    return posted.filter((m) => m.type === "requestVaultSessions").length;
+  }
+
+  it("posts a refresh on click WITHOUT toggling collapse, spins, and the fresh response clears it", () => {
+    const host = createHost();
+    const posted: Array<{ type: string }> = [];
+    const panel = new VaultPanel({
+      host,
+      postMessage: (m) => posted.push(m as { type: string }),
+      getInitialCollapsed: () => false,
+    });
+    const btn = host.querySelector<HTMLButtonElement>(".vault-header__refresh-btn");
+    expect(btn).not.toBeNull();
+
+    const before = refreshCount(posted);
+    btn?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    // Exactly one refresh request, and the click did NOT collapse the section.
+    expect(refreshCount(posted) - before).toBe(1);
+    expect(panel.isCollapsed()).toBe(false);
+    expect(btn?.classList.contains("is-refreshing")).toBe(true);
+
+    // The authoritative (non-cache) response completes the refresh → spin stops.
+    panel.render(result([entry()]), false);
+    expect(btn?.classList.contains("is-refreshing")).toBe(false);
+  });
+
+  it("keeps spinning on the instant cache echo, stops only on the fresh response", () => {
+    const host = createHost();
+    const panel = new VaultPanel({ host, postMessage: () => {}, getInitialCollapsed: () => false });
+    const btn = host.querySelector<HTMLButtonElement>(".vault-header__refresh-btn");
+    btn?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    expect(btn?.classList.contains("is-refreshing")).toBe(true);
+
+    panel.render(result([entry()]), true); // cached echo must NOT stop the spinner
+    expect(btn?.classList.contains("is-refreshing")).toBe(true);
+
+    panel.render(result([entry()]), false); // fresh response stops it (also clears the timer)
+    expect(btn?.classList.contains("is-refreshing")).toBe(false);
+  });
+});
