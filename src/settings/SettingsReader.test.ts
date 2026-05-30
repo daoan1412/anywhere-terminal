@@ -34,6 +34,7 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+  vi.unstubAllEnvs();
   vi.restoreAllMocks();
 });
 
@@ -170,14 +171,13 @@ describe("readTerminalSettings — other settings", () => {
 describe("readTerminalSettings — shell resolution", () => {
   it("uses custom shell when configured", () => {
     __setConfigValues({ "anywhereTerminal.shell.macOS": "/usr/local/bin/fish" });
-    const settings = readTerminalSettings();
+    const settings = readTerminalSettings("darwin");
     expect(settings.shell).toBe("/usr/local/bin/fish");
   });
 
   it("auto-detects shell when custom shell is empty", () => {
     __setConfigValues({ "anywhereTerminal.shell.macOS": "" });
-    const settings = readTerminalSettings();
-    // Should detect from $SHELL or fallback chain
+    const settings = readTerminalSettings("darwin");
     expect(settings.shell).toBeTruthy();
   });
 
@@ -186,7 +186,7 @@ describe("readTerminalSettings — shell resolution", () => {
       "anywhereTerminal.shell.macOS": "/usr/local/bin/fish",
       "anywhereTerminal.shell.args": ["-l", "--init-command", "echo hi"],
     });
-    const settings = readTerminalSettings();
+    const settings = readTerminalSettings("darwin");
     expect(settings.shellArgs).toEqual(["-l", "--init-command", "echo hi"]);
   });
 
@@ -195,9 +195,50 @@ describe("readTerminalSettings — shell resolution", () => {
       "anywhereTerminal.shell.macOS": "",
       "anywhereTerminal.shell.args": [],
     });
-    const settings = readTerminalSettings();
-    // Should use detected shell's default args
+    const settings = readTerminalSettings("darwin");
     expect(settings.shellArgs).toBeDefined();
+  });
+});
+
+// ─── Per-platform Shell Key ─────────────────────────────────────────
+
+describe("readTerminalSettings — per-platform shell key", () => {
+  it("reads shell.windows on win32 and ignores shell.macOS", () => {
+    __setConfigValues({
+      "anywhereTerminal.shell.windows": "C:\\Program Files\\PowerShell\\7\\pwsh.exe",
+      "anywhereTerminal.shell.macOS": "/bin/zsh",
+    });
+    const settings = readTerminalSettings("win32");
+    expect(settings.shell).toBe("C:\\Program Files\\PowerShell\\7\\pwsh.exe");
+  });
+
+  it("reads shell.linux on linux", () => {
+    __setConfigValues({ "anywhereTerminal.shell.linux": "/usr/bin/fish" });
+    const settings = readTerminalSettings("linux");
+    expect(settings.shell).toBe("/usr/bin/fish");
+  });
+
+  it("reads shell.macOS on darwin", () => {
+    __setConfigValues({ "anywhereTerminal.shell.macOS": "/opt/homebrew/bin/fish" });
+    const settings = readTerminalSettings("darwin");
+    expect(settings.shell).toBe("/opt/homebrew/bin/fish");
+  });
+
+  it("uses shell.linux for other POSIX platforms", () => {
+    __setConfigValues({
+      "anywhereTerminal.shell.linux": "/usr/local/bin/fish",
+      "anywhereTerminal.shell.macOS": "/bin/zsh",
+    });
+    const settings = readTerminalSettings("freebsd");
+    expect(settings.shell).toBe("/usr/local/bin/fish");
+  });
+
+  it("auto-detects to cmd.exe on win32 when shell.windows is empty (no %ComSpec% in env)", () => {
+    vi.stubEnv("ComSpec", "");
+    vi.stubEnv("COMSPEC", "");
+    __setConfigValues({ "anywhereTerminal.shell.windows": "" });
+    const settings = readTerminalSettings("win32");
+    expect(settings.shell).toBe("cmd.exe");
   });
 });
 

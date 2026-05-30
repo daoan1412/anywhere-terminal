@@ -57,7 +57,19 @@
           "type": "string",
           "default": "",
           "scope": "machine",
-          "description": "Custom shell path for macOS. Leave empty to auto-detect (uses $SHELL → /bin/zsh → /bin/bash → /bin/sh)."
+          "description": "Custom shell path for macOS. Leave empty to auto-detect (VS Code's resolved default shell, then $SHELL → /bin/zsh → /bin/bash → /bin/sh)."
+        },
+        "anywhereTerminal.shell.linux": {
+          "type": "string",
+          "default": "",
+          "scope": "machine",
+          "description": "Custom shell path for Linux. Leave empty to auto-detect (VS Code's resolved default shell, then $SHELL → /bin/bash → /bin/sh)."
+        },
+        "anywhereTerminal.shell.windows": {
+          "type": "string",
+          "default": "",
+          "scope": "machine",
+          "description": "Custom shell path for Windows. Leave empty to auto-detect (VS Code's resolved default shell, then %ComSpec% → cmd.exe)."
         },
         "anywhereTerminal.shell.args": {
           "type": "array",

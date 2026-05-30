@@ -5,7 +5,7 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import * as vscode from "vscode";
-import { PtyLoadError, ShellNotFoundError } from "../types/errors";
+import { PtyLoadError } from "../types/errors";
 
 // ─── node-pty Type Definitions ──────────────────────────────────────
 // Minimal type interface for node-pty to avoid requiring the native package as a dev dependency.
@@ -62,11 +62,17 @@ let cachedNodePty: NodePtyModule | undefined;
 /** Candidate paths for node-pty within VS Code's installation, tried in order. */
 const NODE_PTY_CANDIDATE_PATHS = ["node_modules.asar/node-pty", "node_modules/node-pty"] as const;
 
-/** Shell fallback chain for macOS. */
-const SHELL_FALLBACK_CHAIN = ["/bin/zsh", "/bin/bash", "/bin/sh"] as const;
+/**
+ * Per-platform POSIX shell fallback chains. The final entry is the guaranteed
+ * last-resort (`/bin/sh` always exists on POSIX systems).
+ */
+const SHELL_FALLBACK_CHAINS: Record<"darwin" | "linux", readonly string[]> = {
+  darwin: ["/bin/zsh", "/bin/bash", "/bin/sh"],
+  linux: ["/bin/bash", "/bin/sh"],
+};
 
-/** Shells that support the --login flag. /bin/sh does NOT reliably support --login. */
-const LOGIN_SHELLS = new Set(["/bin/zsh", "/bin/bash"]);
+/** Windows last-resort shell when `%ComSpec%` is unset. */
+const WINDOWS_DEFAULT_SHELL = "cmd.exe";
 
 // ─── Public API ─────────────────────────────────────────────────────
 
@@ -107,32 +113,74 @@ export function loadNodePty(): NodePtyModule {
 }
 
 /**
- * Detect the user's preferred shell and arguments on macOS.
- * Priority: $SHELL → /bin/zsh → /bin/bash → /bin/sh
+ * Detect the user's preferred shell and arguments, platform-aware.
  *
- * @throws {ShellNotFoundError} if no valid shell is found (extremely unlikely on macOS)
+ * Resolution order (first validated candidate wins):
+ *   1. `vscodeShell` — VS Code's resolved default (honors `terminal.integrated.defaultProfile`
+ *      and the remote extension host); skipped when empty.
+ *   2. Platform env hint — `$SHELL` on POSIX, `%ComSpec%` on Windows.
+ *   3. Platform fallback chain (POSIX only).
+ *
+ * When nothing validates, a last-resort default is returned unconditionally —
+ * POSIX `/bin/sh`, Windows `%ComSpec%` else `cmd.exe` — so detection never throws
+ * on supported platforms.
+ *
+ * `platform`/`env`/`vscodeShell` are injectable for cross-platform unit testing.
  */
-export function detectShell(): { shell: string; args: string[] } {
-  const attemptedShells: string[] = [];
+export function detectShell(
+  platform: NodeJS.Platform = process.platform,
+  env: NodeJS.ProcessEnv = process.env,
+  vscodeShell: string | undefined = vscode.env.shell,
+): { shell: string; args: string[] } {
+  const candidates: string[] = [];
 
-  // 1. Try $SHELL environment variable
-  const envShell = process.env.SHELL;
-  if (envShell) {
-    attemptedShells.push(envShell);
-    if (validateShell(envShell)) {
-      return { shell: envShell, args: getShellArgs(envShell) };
+  // 1. VS Code's already-resolved shell
+  const vscodeShellCandidate = firstNonEmpty(vscodeShell);
+  if (vscodeShellCandidate) {
+    candidates.push(vscodeShellCandidate);
+  }
+
+  if (platform === "win32") {
+    // 2. %ComSpec% (path to cmd.exe)
+    const comspec = firstNonEmpty(env.ComSpec, env.COMSPEC);
+    if (comspec) {
+      candidates.push(comspec);
+    }
+  } else {
+    // 2. $SHELL, then 3. POSIX fallback chain
+    const envShell = firstNonEmpty(env.SHELL);
+    if (envShell) {
+      candidates.push(envShell);
+    }
+    candidates.push(...getPosixChain(platform));
+  }
+
+  for (const candidate of candidates) {
+    if (validateShell(candidate, platform)) {
+      return { shell: candidate, args: getShellArgs(candidate) };
     }
   }
 
-  // 2. Try fallback chain
-  for (const shell of SHELL_FALLBACK_CHAIN) {
-    attemptedShells.push(shell);
-    if (validateShell(shell)) {
-      return { shell, args: getShellArgs(shell) };
+  // Last resort — returned unconditionally (not validated, not thrown).
+  const chain = getPosixChain(platform);
+  const fallback =
+    platform === "win32" ? (firstNonEmpty(env.ComSpec, env.COMSPEC) ?? WINDOWS_DEFAULT_SHELL) : chain[chain.length - 1];
+  return { shell: fallback, args: getShellArgs(fallback) };
+}
+
+function firstNonEmpty(...values: Array<string | undefined>): string | undefined {
+  for (const value of values) {
+    const trimmed = value?.trim();
+    if (trimmed) {
+      return trimmed;
     }
   }
+  return undefined;
+}
 
-  throw new ShellNotFoundError(attemptedShells);
+/** POSIX fallback chain for a platform, defaulting to the Linux chain for non-darwin/linux unices. */
+function getPosixChain(platform: NodeJS.Platform): readonly string[] {
+  return SHELL_FALLBACK_CHAINS[platform as "darwin" | "linux"] ?? SHELL_FALLBACK_CHAINS.linux;
 }
 
 /**
@@ -184,27 +232,37 @@ export function resolveWorkingDirectory(): string {
 }
 
 /**
- * Validate that a shell executable exists and is executable.
+ * Validate that a shell path points to a usable executable.
+ *
+ * POSIX: file exists, is a file, and has an execute bit.
+ * Windows: file exists and is a file — Node does not expose reliable Unix
+ * execute bits for Windows executables, so an execute-bit check would wrongly
+ * reject valid `.exe` shells.
  */
-export function validateShell(shellPath: string): boolean {
+export function validateShell(shellPath: string, platform: NodeJS.Platform = process.platform): boolean {
   try {
     const stat = fs.statSync(shellPath);
-    // Check: file exists, is a file (not directory), and is executable (any execute bit)
-    return stat.isFile() && (stat.mode & 0o111) !== 0;
+    if (!stat.isFile()) {
+      return false;
+    }
+    if (platform === "win32") {
+      return true;
+    }
+    return (stat.mode & 0o111) !== 0;
   } catch {
     return false;
   }
 }
 
 /**
- * Get default arguments for a shell.
- * Login shell (--login) is used for shells that support it (zsh, bash).
- * /bin/sh does NOT reliably support --login.
+ * Get default arguments for a shell, based on its basename.
+ * Only login shells (zsh, bash) receive `--login`; sh and Windows shells
+ * (cmd.exe, powershell.exe, pwsh.exe) receive none.
  */
 function getShellArgs(shellPath: string): string[] {
-  // Check the basename to handle paths like /usr/local/bin/zsh
-  const basename = path.basename(shellPath);
-  if (LOGIN_SHELLS.has(shellPath) || basename === "zsh" || basename === "bash") {
+  const basename = path.posix.basename(shellPath.replace(/\\/g, "/")).toLowerCase();
+  const shellName = basename.endsWith(".exe") ? basename.slice(0, -4) : basename;
+  if (shellName === "zsh" || shellName === "bash") {
     return ["--login"];
   }
   return [];

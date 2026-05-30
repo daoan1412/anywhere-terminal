@@ -2,7 +2,7 @@
 import os from "node:os";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { __resetAll, __setAppRoot, __setExtension, __setWorkspaceFolders } from "../test/__mocks__/vscode";
-import { PtyLoadError, ShellNotFoundError } from "../types/errors";
+import { PtyLoadError } from "../types/errors";
 import {
   _resetCache,
   buildEnvironment,
@@ -42,13 +42,13 @@ afterEach(() => {
 // ─── validateShell ──────────────────────────────────────────────────
 
 describe("validateShell", () => {
-  it("returns true for an existing executable file", () => {
+  it("returns true for an existing executable file (posix)", () => {
     mockedStatSync.mockReturnValue({
       isFile: () => true,
       mode: 0o755,
     } as unknown as fs.Stats);
 
-    expect(validateShell("/bin/zsh")).toBe(true);
+    expect(validateShell("/bin/zsh", "darwin")).toBe(true);
   });
 
   it("returns false for a non-existent path", () => {
@@ -56,7 +56,7 @@ describe("validateShell", () => {
       throw new Error("ENOENT");
     });
 
-    expect(validateShell("/nonexistent/shell")).toBe(false);
+    expect(validateShell("/nonexistent/shell", "darwin")).toBe(false);
   });
 
   it("returns false for a directory", () => {
@@ -65,16 +65,34 @@ describe("validateShell", () => {
       mode: 0o755,
     } as unknown as fs.Stats);
 
-    expect(validateShell("/usr/bin")).toBe(false);
+    expect(validateShell("/usr/bin", "darwin")).toBe(false);
   });
 
-  it("returns false for a file without execute permission", () => {
+  it("returns false for a posix file without execute permission", () => {
     mockedStatSync.mockReturnValue({
       isFile: () => true,
       mode: 0o644,
     } as unknown as fs.Stats);
 
-    expect(validateShell("/bin/noexec")).toBe(false);
+    expect(validateShell("/bin/noexec", "darwin")).toBe(false);
+  });
+
+  it("returns true on Windows for an existing file without an execute bit", () => {
+    mockedStatSync.mockReturnValue({
+      isFile: () => true,
+      mode: 0o666,
+    } as unknown as fs.Stats);
+
+    expect(validateShell("C:\\Windows\\System32\\cmd.exe", "win32")).toBe(true);
+  });
+
+  it("returns false on Windows for a directory", () => {
+    mockedStatSync.mockReturnValue({
+      isFile: () => false,
+      mode: 0o666,
+    } as unknown as fs.Stats);
+
+    expect(validateShell("C:\\Windows\\System32", "win32")).toBe(false);
   });
 });
 
@@ -91,97 +109,113 @@ describe("detectShell", () => {
     });
   }
 
-  it("returns $SHELL when valid", () => {
-    const origShell = process.env.SHELL;
-    process.env.SHELL = "/bin/zsh";
+  // ─── macOS ───
+  it("returns $SHELL when valid (macOS)", () => {
     mockShellExists(new Set(["/bin/zsh"]));
-
-    try {
-      const result = detectShell();
-      expect(result.shell).toBe("/bin/zsh");
-      expect(result.args).toEqual(["--login"]);
-    } finally {
-      if (origShell !== undefined) {
-        process.env.SHELL = origShell;
-      } else {
-        delete process.env.SHELL;
-      }
-    }
+    const result = detectShell("darwin", { SHELL: "/bin/zsh" }, "");
+    expect(result.shell).toBe("/bin/zsh");
+    expect(result.args).toEqual(["--login"]);
   });
 
-  /** Helper to safely restore process.env.SHELL after test */
-  function restoreShell(origShell: string | undefined) {
-    if (origShell !== undefined) {
-      process.env.SHELL = origShell;
-    } else {
-      delete process.env.SHELL;
-    }
-  }
-
-  it("falls back to /bin/bash when $SHELL is unset and /bin/zsh is missing", () => {
-    const origShell = process.env.SHELL;
-    delete process.env.SHELL;
+  it("falls back to /bin/bash when $SHELL is unset and /bin/zsh is missing (macOS)", () => {
     mockShellExists(new Set(["/bin/bash"]));
-
-    try {
-      const result = detectShell();
-      expect(result.shell).toBe("/bin/bash");
-      expect(result.args).toEqual(["--login"]);
-    } finally {
-      restoreShell(origShell);
-    }
+    const result = detectShell("darwin", {}, "");
+    expect(result.shell).toBe("/bin/bash");
+    expect(result.args).toEqual(["--login"]);
   });
 
-  it("falls back to /bin/sh with no --login arg", () => {
-    const origShell = process.env.SHELL;
-    delete process.env.SHELL;
+  it("falls back to /bin/sh with no --login arg (macOS)", () => {
     mockShellExists(new Set(["/bin/sh"]));
-
-    try {
-      const result = detectShell();
-      expect(result.shell).toBe("/bin/sh");
-      expect(result.args).toEqual([]);
-    } finally {
-      restoreShell(origShell);
-    }
-  });
-
-  it("throws ShellNotFoundError when no valid shell exists", () => {
-    const origShell = process.env.SHELL;
-    delete process.env.SHELL;
-    mockShellExists(new Set());
-
-    try {
-      expect(() => detectShell()).toThrow(ShellNotFoundError);
-    } finally {
-      restoreShell(origShell);
-    }
-  });
-
-  it("includes all attempted shells in ShellNotFoundError", () => {
-    const origShell = process.env.SHELL;
-    delete process.env.SHELL;
-    mockShellExists(new Set());
-
-    try {
-      expect(() => detectShell()).toThrow(/\/bin\/zsh.*\/bin\/bash.*\/bin\/sh/);
-    } finally {
-      restoreShell(origShell);
-    }
+    const result = detectShell("darwin", {}, "");
+    expect(result.shell).toBe("/bin/sh");
+    expect(result.args).toEqual([]);
   });
 
   it("returns --login for /usr/local/bin/bash (basename check)", () => {
-    const origShell = process.env.SHELL;
-    process.env.SHELL = "/usr/local/bin/bash";
     mockShellExists(new Set(["/usr/local/bin/bash"]));
+    const result = detectShell("darwin", { SHELL: "/usr/local/bin/bash" }, "");
+    expect(result.shell).toBe("/usr/local/bin/bash");
+    expect(result.args).toEqual(["--login"]);
+  });
 
-    try {
-      const result = detectShell();
-      expect(result.shell).toBe("/usr/local/bin/bash");
-      expect(result.args).toEqual(["--login"]);
-    } finally {
-      restoreShell(origShell);
-    }
+  it("returns /bin/sh unconditionally when no shell validates (macOS) — does not throw", () => {
+    mockShellExists(new Set());
+    const result = detectShell("darwin", {}, "");
+    expect(result.shell).toBe("/bin/sh");
+    expect(result.args).toEqual([]);
+  });
+
+  // ─── vscode.env.shell priority ───
+  it("prefers vscode.env.shell when it validates", () => {
+    mockShellExists(new Set(["/opt/homebrew/bin/fish", "/bin/zsh"]));
+    const result = detectShell("darwin", { SHELL: "/bin/zsh" }, "/opt/homebrew/bin/fish");
+    expect(result.shell).toBe("/opt/homebrew/bin/fish");
+    expect(result.args).toEqual([]);
+  });
+
+  it("ignores empty vscode.env.shell and falls through to $SHELL", () => {
+    mockShellExists(new Set(["/bin/zsh"]));
+    const result = detectShell("darwin", { SHELL: "/bin/zsh" }, "");
+    expect(result.shell).toBe("/bin/zsh");
+  });
+
+  it("ignores whitespace-only vscode.env.shell and falls through to $SHELL", () => {
+    mockShellExists(new Set(["/bin/zsh"]));
+    const result = detectShell("darwin", { SHELL: "/bin/zsh" }, "   ");
+    expect(result.shell).toBe("/bin/zsh");
+  });
+
+  // ─── Linux ───
+  it("uses the linux chain ($SHELL → /bin/bash → /bin/sh)", () => {
+    mockShellExists(new Set(["/bin/bash"]));
+    const result = detectShell("linux", {}, "");
+    expect(result.shell).toBe("/bin/bash");
+    expect(result.args).toEqual(["--login"]);
+  });
+
+  // ─── Windows ───
+  it("resolves %ComSpec% on Windows without throwing", () => {
+    mockShellExists(new Set(["C:\\Windows\\System32\\cmd.exe"]));
+    const result = detectShell("win32", { ComSpec: "C:\\Windows\\System32\\cmd.exe" }, "");
+    expect(result.shell).toBe("C:\\Windows\\System32\\cmd.exe");
+    expect(result.args).toEqual([]);
+  });
+
+  it("trims %ComSpec% before validating and returning it", () => {
+    mockShellExists(new Set(["C:\\Windows\\System32\\cmd.exe"]));
+    const result = detectShell("win32", { ComSpec: "  C:\\Windows\\System32\\cmd.exe  " }, "");
+    expect(result.shell).toBe("C:\\Windows\\System32\\cmd.exe");
+    expect(result.args).toEqual([]);
+  });
+
+  it("returns cmd.exe as the unconditional Windows fallback when %ComSpec% is empty", () => {
+    mockShellExists(new Set());
+    const result = detectShell("win32", { ComSpec: "   ", COMSPEC: "" }, "");
+    expect(result.shell).toBe("cmd.exe");
+    expect(result.args).toEqual([]);
+  });
+
+  it("returns cmd.exe as the unconditional Windows fallback when nothing validates", () => {
+    mockShellExists(new Set());
+    const result = detectShell("win32", {}, "");
+    expect(result.shell).toBe("cmd.exe");
+    expect(result.args).toEqual([]);
+  });
+
+  it("prefers vscode.env.shell (pwsh) over %ComSpec% on Windows", () => {
+    const pwsh = "C:\\Program Files\\PowerShell\\7\\pwsh.exe";
+    mockShellExists(new Set([pwsh, "C:\\Windows\\System32\\cmd.exe"]));
+    const result = detectShell("win32", { ComSpec: "C:\\Windows\\System32\\cmd.exe" }, pwsh);
+    expect(result.shell).toBe(pwsh);
+    expect(result.args).toEqual([]);
+  });
+
+  it("returns --login for Windows bash.exe paths", () => {
+    const bash = "C:\\Program Files\\Git\\bin\\bash.exe";
+    mockShellExists(new Set([bash]));
+    const result = detectShell("win32", {}, bash);
+    expect(result.shell).toBe(bash);
+    expect(result.args).toEqual(["--login"]);
   });
 });
 
