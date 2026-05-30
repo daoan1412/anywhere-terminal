@@ -1,5 +1,7 @@
 // src/vault/readers/claudeReader.test.ts — Unit tests over captured fixtures.
 
+import * as fsp from "node:fs/promises";
+import * as os from "node:os";
 import * as path from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
@@ -124,5 +126,80 @@ describe("readClaudeDetail subagent nesting (new <sessionId>/subagents layout)",
     expect(
       await readClaudeDetail("sess-parent:subagent:../../escape", { configDir: SUBAGENT_FIXTURE_ROOT }),
     ).toBeNull();
+  });
+});
+
+describe("readClaudeSessions incremental", () => {
+  // Build a throwaway store with one project dir + one session file we can mutate.
+  async function makeStore(): Promise<{ configDir: string; file: string; cleanup: () => Promise<void> }> {
+    const root = await fsp.mkdtemp(path.join(os.tmpdir(), "vault-claude-inc-"));
+    const projDir = path.join(root, "projects", "-Users-me-proj");
+    await fsp.mkdir(projDir, { recursive: true });
+    const file = path.join(projDir, "sess-1.jsonl");
+    await fsp.writeFile(
+      file,
+      [
+        JSON.stringify({ type: "user", cwd: "/Users/me/proj", message: { content: "ORIGINAL prompt title" } }),
+        JSON.stringify({ type: "assistant", message: { model: "claude-opus-4-8" } }),
+      ].join("\n"),
+    );
+    return { configDir: root, file, cleanup: () => fsp.rm(root, { recursive: true, force: true }) };
+  }
+
+  it("reuses the cached entry without re-reading the body when (mtime,size) is unchanged", async () => {
+    const { configDir, cleanup } = await makeStore();
+    try {
+      const first = await readClaudeSessions({ configDir });
+      expect(first.entries).toHaveLength(1);
+      expect(first.cache.kind).toBe("files");
+
+      // Poison the cached entry's title: if the reader re-reads the body, it would
+      // overwrite this with "ORIGINAL prompt title". Reuse must preserve it.
+      const poisoned = structuredClone(first.cache);
+      if (poisoned.kind === "files") {
+        for (const k of Object.keys(poisoned.files)) {
+          poisoned.files[k].entry = { ...poisoned.files[k].entry, title: "CACHED_TITLE" };
+        }
+      }
+      const second = await readClaudeSessions({ configDir }, poisoned);
+      expect(second.entries[0].title).toBe("CACHED_TITLE");
+    } finally {
+      await cleanup();
+    }
+  });
+
+  it("re-reads a file whose mtime changed", async () => {
+    const { configDir, file, cleanup } = await makeStore();
+    try {
+      const first = await readClaudeSessions({ configDir });
+      const poisoned = structuredClone(first.cache);
+      if (poisoned.kind === "files") {
+        for (const k of Object.keys(poisoned.files)) {
+          poisoned.files[k].entry = { ...poisoned.files[k].entry, title: "CACHED_TITLE" };
+        }
+      }
+      // Bump mtime forward → stamp mismatch → rebuild from the (unchanged) body.
+      const future = new Date(Date.now() + 60_000);
+      await fsp.utimes(file, future, future);
+      const second = await readClaudeSessions({ configDir }, poisoned);
+      expect(second.entries[0].title).toBe("ORIGINAL prompt title");
+    } finally {
+      await cleanup();
+    }
+  });
+
+  it("drops a cached entry whose file no longer exists", async () => {
+    const { configDir, file, cleanup } = await makeStore();
+    try {
+      const first = await readClaudeSessions({ configDir });
+      await fsp.rm(file);
+      const second = await readClaudeSessions({ configDir }, first.cache);
+      expect(second.entries).toHaveLength(0);
+      if (second.cache.kind === "files") {
+        expect(Object.keys(second.cache.files)).toHaveLength(0);
+      }
+    } finally {
+      await cleanup();
+    }
   });
 });

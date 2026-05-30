@@ -888,6 +888,13 @@ export interface RevealInFileTreeMessage {
 export interface VaultSessionsResponseMessage {
   type: "vaultSessionsResponse";
   result: VaultListResult;
+  /**
+   * True for the instant response served from the persisted cache, false (or
+   * absent) for the authoritative response that follows the source-of-truth
+   * refresh (cache-vault-load D1). The webview renders both; a no-op guard makes
+   * the second invisible when nothing changed.
+   */
+  fromCache?: boolean;
 }
 
 interface VaultSessionDetailResponseBase {

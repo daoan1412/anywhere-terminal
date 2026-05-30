@@ -3,14 +3,21 @@
 // See: specs/agent-session-index/spec.md (Aggregate and sort; Defensive parsing),
 //      specs/vault-session-launch/spec.md (Fork when supported), design.md D2,D8.
 
+import {
+  type ListReader,
+  type ReaderListCache,
+  type ReaderResultWithState,
+  VAULT_CACHE_VERSION,
+  type VaultListCacheFileV1,
+} from "./cacheTypes";
 import { canForkOpenCode } from "./forkSupport";
-import type { ReaderResult } from "./readers/claudeReader";
 import { readClaudeDetail, readClaudeEntry, readClaudeSessions } from "./readers/claudeReader";
 import { readCodexDetail, readCodexEntry, readCodexSessions } from "./readers/codexReader";
 import { clampDetailLimit } from "./readers/detail";
 import { readOpenCodeDetail, readOpenCodeEntry, readOpenCodeSessions } from "./readers/opencodeReader";
 import { getAgentDefinition, VAULT_AGENT_IDS, type VaultAgentId } from "./registry";
 import { parseEntryId, type VaultListResult, type VaultSessionDetail, type VaultSessionEntry } from "./types";
+import type { VaultCacheStore } from "./VaultCacheStore";
 
 // Agent identity is a single source of truth in `registry.ts`: `VaultAgentId`
 // is derived from `VAULT_AGENT_IDS`, and the keyed reader records below are
@@ -26,7 +33,9 @@ function isVaultAgentId(value: string): value is VaultAgentId {
   return (VAULT_AGENT_IDS as readonly string[]).includes(value);
 }
 
-export type VaultReaders = Record<VaultAgentId, () => Promise<ReaderResult>>;
+/** Per-agent incremental list readers: given the prior per-agent cache, return
+ *  the current entries + the freshness state to persist (cache-vault-load D3). */
+export type VaultReaders = Record<VaultAgentId, ListReader>;
 
 /** Per-agent on-demand detail readers (resolve a single session by id). The
  *  optional `limit` bounds the returned timeline (most-recent kept) so the
@@ -46,12 +55,20 @@ export interface VaultServiceDeps {
   entryReaders?: VaultEntryReaders;
   /** Injectable opencode fork probe; defaults to the real version probe. */
   canForkOpenCodeFn?: (minVersion: string) => Promise<boolean>;
+  /**
+   * Persistent list cache (cache-vault-load D2). When provided, `listCached()`
+   * serves the last list instantly and `refresh()` reads incrementally + persists.
+   * When omitted, the service is stateless (full read every `list()`, as before).
+   */
+  cacheStore?: VaultCacheStore;
 }
 
+// Readers stay option-first for back-compat; adapt them to the prev-only ListReader
+// shape the service drives (cache-vault-load Interfaces).
 const defaultReaders = {
-  claude: () => readClaudeSessions(),
-  codex: () => readCodexSessions(),
-  opencode: () => readOpenCodeSessions(),
+  claude: (prev) => readClaudeSessions({}, prev),
+  codex: (prev) => readCodexSessions({}, prev),
+  opencode: (prev) => readOpenCodeSessions({}, prev),
 } satisfies VaultReaders;
 
 const defaultDetailReaders = {
@@ -71,24 +88,49 @@ export class VaultService {
   private readonly detailReaders: VaultDetailReaders;
   private readonly entryReaders: VaultEntryReaders;
   private readonly canForkOpenCodeFn: (minVersion: string) => Promise<boolean>;
+  private readonly cacheStore?: VaultCacheStore;
+
+  /** In-memory copy of the persisted cache, lazily loaded from `cacheStore`. */
+  private mem: VaultListCacheFileV1 | null = null;
+  private memLoaded = false;
+  /** Single-flight guard so concurrent opens (sidebar + panel) share one refresh. */
+  private inflightRefresh: Promise<VaultListResult> | null = null;
 
   constructor(deps: VaultServiceDeps = {}) {
     this.readers = deps.readers ?? defaultReaders;
     this.detailReaders = deps.detailReaders ?? defaultDetailReaders;
     this.entryReaders = deps.entryReaders ?? defaultEntryReaders;
     this.canForkOpenCodeFn = deps.canForkOpenCodeFn ?? ((min) => canForkOpenCode(min));
+    this.cacheStore = deps.cacheStore;
   }
 
-  async list(): Promise<VaultListResult> {
-    const results = await Promise.allSettled(VAULT_AGENT_IDS.map((id) => invokeReader(() => this.readers[id]())));
+  /**
+   * Read every agent store and aggregate into one recency-sorted, fork-resolved
+   * list. When `prev` is supplied, each reader reads INCREMENTALLY against its
+   * prior per-agent cache (cache-vault-load D3). Returns both the public result
+   * and the cache document to persist. A whole reader failing is surfaced as
+   * unreadable (not dropped); the failed agent contributes no entries and its
+   * stale cache is discarded so the next refresh re-reads it from scratch.
+   */
+  private async readAll(prev: VaultListCacheFileV1 | null): Promise<{
+    result: VaultListResult;
+    doc: VaultListCacheFileV1;
+  }> {
+    const prevAgents = prev?.agents ?? {};
+    const settled = await Promise.allSettled(
+      VAULT_AGENT_IDS.map((id) => invokeReader(() => this.readers[id](prevAgents[id]))),
+    );
 
     const entries: VaultSessionEntry[] = [];
     let unreadable = 0;
     const reasons: string[] = [];
-    results.forEach((r, i) => {
-      const label = agentLabel(VAULT_AGENT_IDS[i]);
+    const agents: Partial<Record<VaultAgentId, ReaderListCache>> = {};
+    settled.forEach((r, i) => {
+      const id = VAULT_AGENT_IDS[i];
+      const label = agentLabel(id);
       if (r.status === "fulfilled") {
         entries.push(...r.value.entries);
+        agents[id] = r.value.cache;
         if (r.value.unreadable > 0) {
           unreadable += r.value.unreadable;
           reasons.push(
@@ -96,7 +138,8 @@ export class VaultService {
           );
         }
       } else {
-        // A whole reader failing is surfaced, not silently dropped.
+        // A whole reader failing is surfaced, not silently dropped. Its cache is
+        // omitted so the next refresh full-reads it (no stale-entry resurrection).
         unreadable += 1;
         reasons.push(`${label}: reader failed`);
       }
@@ -119,7 +162,74 @@ export class VaultService {
     }
 
     entries.sort((a, b) => b.modified - a.modified);
-    return { entries, unreadable: { count: unreadable, reasons: dedupe(reasons) } };
+    const result: VaultListResult = { entries, unreadable: { count: unreadable, reasons: dedupe(reasons) } };
+    const doc: VaultListCacheFileV1 = {
+      version: VAULT_CACHE_VERSION,
+      savedAt: Date.now(),
+      agents,
+      entries,
+      unreadable: result.unreadable,
+    };
+    return { result, doc };
+  }
+
+  /** Full, non-persisted read of every store (no cache). Backs `resolveVaultEntry`
+   *  and callers that want source-of-truth truth without touching the cache. */
+  async list(): Promise<VaultListResult> {
+    const { result } = await this.readAll(null);
+    return result;
+  }
+
+  /**
+   * The last persisted list, served synchronously for an instant render on open
+   * (cache-vault-load D1). Lazily loads the cache from disk on first call. Returns
+   * null when there is no cache store or no valid cached document.
+   */
+  listCached(): VaultListResult | null {
+    this.ensureMemLoaded();
+    return this.mem ? { entries: this.mem.entries, unreadable: this.mem.unreadable } : null;
+  }
+
+  /**
+   * Re-read the stores incrementally (only changed sources), persist the result,
+   * and return the fresh list (cache-vault-load D1/D2). Single-flight: concurrent
+   * callers share one in-flight read. The cache write is AWAITED before the
+   * promise resolves so a later refresh can never persist ahead of an earlier one
+   * and overwrite it with stale data; a write failure is logged, not thrown.
+   */
+  async refresh(): Promise<VaultListResult> {
+    if (this.inflightRefresh) {
+      return this.inflightRefresh;
+    }
+    const run = (async (): Promise<VaultListResult> => {
+      this.ensureMemLoaded();
+      const { result, doc } = await this.readAll(this.mem);
+      this.mem = doc;
+      this.memLoaded = true;
+      if (this.cacheStore) {
+        try {
+          await this.cacheStore.save(doc);
+        } catch (err) {
+          console.error("[AnyWhere Terminal] Failed to persist vault cache:", err);
+        }
+      }
+      return result;
+    })();
+    this.inflightRefresh = run;
+    try {
+      return await run;
+    } finally {
+      this.inflightRefresh = null;
+    }
+  }
+
+  /** Load the persisted cache into memory once (no-op without a cache store). */
+  private ensureMemLoaded(): void {
+    if (this.memLoaded) {
+      return;
+    }
+    this.mem = this.cacheStore?.load() ?? null;
+    this.memLoaded = true;
   }
 
   /**
@@ -173,7 +283,10 @@ function dedupe(items: string[]): string[] {
   return [...new Set(items)];
 }
 
-function invokeReader(read: () => Promise<ReaderResult>): Promise<ReaderResult> {
+// Defer reader invocation to a microtask so a reader that throws SYNCHRONOUSLY
+// still rejects its promise (and is caught by allSettled) rather than aborting
+// the whole aggregation.
+function invokeReader(read: () => Promise<ReaderResultWithState>): Promise<ReaderResultWithState> {
   return Promise.resolve().then(read);
 }
 

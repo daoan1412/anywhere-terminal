@@ -1,16 +1,21 @@
 // src/vault/VaultService.detail.test.ts — getDetail dispatch + unreadable reasons (redesign-vault-panel-ui 2_5).
 
 import { describe, expect, it, vi } from "vitest";
-import type { ReaderResult } from "./readers/claudeReader";
+import type { ReaderResultWithState } from "./cacheTypes";
 import type { VaultSessionDetail } from "./types";
 import { type VaultDetailReaders, type VaultReaders, VaultService } from "./VaultService";
+
+/** A reader result with the (empty) cache state the incremental contract requires. */
+function readerResult(entries: ReaderResultWithState["entries"], unreadable = 0): ReaderResultWithState {
+  return { entries, unreadable, cache: { kind: "store", sources: {}, entries, unreadable } };
+}
 
 function detail(entryId: string): VaultSessionDetail {
   return { entryId, recentActivity: [], timeline: [], stats: { messageCount: 0, toolCount: 0, subagentCount: 0 } };
 }
 
 function emptyReaders(over: Partial<VaultReaders> = {}): VaultReaders {
-  const empty = async (): Promise<ReaderResult> => ({ entries: [], unreadable: 0 });
+  const empty = async (): Promise<ReaderResultWithState> => readerResult([]);
   return { claude: empty, codex: empty, opencode: empty, ...over };
 }
 
@@ -75,8 +80,8 @@ describe("VaultService.getDetail", () => {
 describe("VaultService.list: unreadable.reasons", () => {
   it("aggregates per-source skip reasons with the count", async () => {
     const readers = emptyReaders({
-      claude: async () => ({ entries: [], unreadable: 2 }),
-      codex: async () => ({ entries: [], unreadable: 1 }),
+      claude: async () => readerResult([], 2),
+      codex: async () => readerResult([], 1),
     });
     const svc = new VaultService({ readers, canForkOpenCodeFn: async () => false });
     const { unreadable } = await svc.list();

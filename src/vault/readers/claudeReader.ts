@@ -14,6 +14,7 @@ import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import * as readline from "node:readline";
+import type { ReaderListCache, ReaderResultWithState } from "../cacheTypes";
 import { boundedPreview } from "../preview";
 import { formatEntryId, type VaultSessionDetail, type VaultSessionEntry } from "../types";
 import {
@@ -529,15 +530,32 @@ async function buildClaudeEntry(
   };
 }
 
-export async function readClaudeSessions(options: ClaudeReaderOptions = {}): Promise<ReaderResult> {
+/**
+ * List Claude sessions, incrementally (cache-vault-load D3). When `prev` carries
+ * a per-file cache, each session file is `stat`-ed and — if its `(mtimeMs, size)`
+ * is unchanged — its entry is reused WITHOUT re-reading the body (skipping the
+ * metadata stream and the 64 KB ai-title tail read, the dominant cost). Files
+ * absent from disk drop out of the returned cache, so deletions reconcile. The
+ * returned `cache.files` is keyed by current paths only.
+ *
+ * Stays option-first for back-compat; `prev` is an optional second argument.
+ */
+export async function readClaudeSessions(
+  options: ClaudeReaderOptions = {},
+  prev?: ReaderListCache,
+): Promise<ReaderResultWithState> {
   const { configDir, projectsDir } = claudeRoots(options);
+  const prevFiles = prev?.kind === "files" ? prev.files : undefined;
+  const files: Record<string, { stamp: { mtimeMs: number; size: number }; entry: VaultSessionEntry }> = {};
 
   let projectDirs: string[];
   try {
     const entries = await fs.readdir(projectsDir, { withFileTypes: true });
     projectDirs = entries.filter((e) => e.isDirectory()).map((e) => e.name);
   } catch {
-    return { entries: [], unreadable: 0 }; // no store → zero entries, not an error
+    // No store → zero entries (not an error), and an empty cache so the next
+    // refresh re-discovers the dir if the user starts using the agent.
+    return { entries: [], unreadable: 0, cache: { kind: "files", files } };
   }
 
   const entries: VaultSessionEntry[] = [];
@@ -545,12 +563,22 @@ export async function readClaudeSessions(options: ClaudeReaderOptions = {}): Pro
 
   for (const projectDir of projectDirs) {
     const dirPath = path.join(projectsDir, projectDir);
-    const files = await listJsonlFiles(dirPath);
-    for (const filePath of files) {
+    const jsonlFiles = await listJsonlFiles(dirPath);
+    for (const filePath of jsonlFiles) {
       const sessionId = path.basename(filePath, ".jsonl");
       try {
+        const stat = await fs.stat(filePath);
+        const stamp = { mtimeMs: stat.mtimeMs, size: stat.size };
+        const cached = prevFiles?.[filePath];
+        if (cached && cached.stamp.mtimeMs === stamp.mtimeMs && cached.stamp.size === stamp.size) {
+          // Unchanged file — reuse the cached entry, no body read.
+          files[filePath] = cached;
+          entries.push(cached.entry);
+          continue;
+        }
         const entry = await buildClaudeEntry(filePath, sessionId, configDir);
         if (entry) {
+          files[filePath] = { stamp, entry };
           entries.push(entry);
         } else {
           unreadable++;
@@ -561,7 +589,7 @@ export async function readClaudeSessions(options: ClaudeReaderOptions = {}): Pro
     }
   }
 
-  return { entries, unreadable };
+  return { entries, unreadable, cache: { kind: "files", files } };
 }
 
 /**

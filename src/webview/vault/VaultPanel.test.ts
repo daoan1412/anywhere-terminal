@@ -4,9 +4,18 @@
 // header-click toggle, and the session-count badge. The vault is now a
 // collapsible section stacked above the file tree (no panel exclusivity).
 
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it } from "vitest";
 import type { VaultListResult, VaultSessionEntry } from "../../vault/types";
 import { VaultPanel } from "./VaultPanel";
+
+afterEach(() => {
+  // Each createHost() appends a host to document.body and tests never remove it.
+  // Close any preview still open (its document-level Esc/pointerdown listeners
+  // would otherwise outlive the test), then clear the body so accumulated hosts +
+  // stale overlays can't pollute later tests under full-suite scheduling.
+  document.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape" }));
+  document.body.replaceChildren();
+});
 
 function createHost(): HTMLElement {
   const host = document.createElement("div");
@@ -991,6 +1000,43 @@ describe("VaultPanel 'This folder only' filter", () => {
     panel.toggleFolderOnly();
     panel.toggleFolderOnly();
     expect(persisted).toEqual([false, true]);
+  });
+
+  it("no-op render guard: an identical refresh response does NOT rebuild the rows", () => {
+    const host = createHost();
+    const panel = new VaultPanel({ host, postMessage: () => {} });
+    // Pin `modified` so the two payloads are value-identical (entry() defaults it
+    // to Date.now(), which would otherwise drift between the two builds).
+    panel.render(result([entry({ id: "a", modified: 1 }), entry({ id: "b", modified: 2 })]));
+    const firstRow = host.querySelector(".vault-row");
+    // The cache→fresh no-op case: same entries → preserve the existing DOM nodes
+    // (so an open preview / scroll survives).
+    panel.render(result([entry({ id: "a", modified: 1 }), entry({ id: "b", modified: 2 })]));
+    expect(host.querySelector(".vault-row")).toBe(firstRow);
+  });
+
+  it("no-op render guard: a changed entry DOES rebuild", () => {
+    const host = createHost();
+    const panel = new VaultPanel({ host, postMessage: () => {} });
+    panel.render(result([entry({ id: "a", modified: 1, title: "old" })]));
+    const firstRow = host.querySelector(".vault-row");
+    panel.render(result([entry({ id: "a", modified: 1, title: "new" })]));
+    expect(host.querySelector(".vault-row")).not.toBe(firstRow);
+  });
+
+  it("no-op render guard: a local UI render updates the key so a later identical host response no-ops", () => {
+    const host = createHost();
+    const panel = new VaultPanel({ host, postMessage: () => {}, getContextCwd: () => "/work" });
+    const data = result([entry({ id: "a", cwd: "/work" }), entry({ id: "b", cwd: "/other" })]);
+    panel.render(data);
+    // Local UI change (folder filter) renders directly; DOM now scoped to 1 row.
+    panel.toggleFolderOnly();
+    expect(host.querySelectorAll(".vault-row")).toHaveLength(1);
+    const scopedRow = host.querySelector(".vault-row");
+    // An identical host refresh must not rebuild — the guard tracks the DOM, not
+    // just the last host response (avoids churn that would disturb scroll/preview).
+    panel.render(data);
+    expect(host.querySelector(".vault-row")).toBe(scopedRow);
   });
 
   it("exposes the filter state via isFolderOnly (gates the host cwd re-probe)", () => {

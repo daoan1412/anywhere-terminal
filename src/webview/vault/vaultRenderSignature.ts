@@ -1,0 +1,32 @@
+// src/webview/vault/vaultRenderSignature.ts — Stable signature over a vault list
+// for the no-op render guard (cache-vault-load D6).
+//
+// The signature covers EVERY field the row, the folder filter, and the row actions
+// read — not just id/modified/title — so a change the UI would reflect (e.g. a
+// `canFork` flip after an agent version change, or a `cwd` change that affects the
+// "This folder only" filter) never gets masked by the guard. It is order-sensitive:
+// a reorder changes the signature (the list renders in array order).
+
+import type { VaultSessionEntry } from "../../vault/types";
+
+// Field/record separators (low control chars) that won't appear in titles, paths,
+// or ids, so distinct field layouts can't collide into the same signature.
+const FIELD_SEP = String.fromCharCode(1);
+const ROW_SEP = String.fromCharCode(2);
+
+export function entriesSignature(entries: readonly VaultSessionEntry[]): string {
+  return entries
+    .map((e) =>
+      [
+        e.id,
+        e.agent,
+        e.title,
+        e.cwd,
+        String(e.modified),
+        e.canFork ? "1" : "0",
+        e.sessionPath ?? "",
+        JSON.stringify(e.flags ?? {}),
+      ].join(FIELD_SEP),
+    )
+    .join(ROW_SEP);
+}

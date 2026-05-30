@@ -12,8 +12,10 @@ import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import * as readline from "node:readline";
+import type { ReaderListCache, ReaderResultWithState } from "../cacheTypes";
 import { boundedPreview } from "../preview";
 import { readSqlite } from "../sqlite";
+import { sameStamps, stampStoreFiles } from "../storeStamp";
 import {
   formatEntryId,
   type VaultActivityStep,
@@ -220,18 +222,40 @@ function codexDirs(options: CodexReaderOptions): { dbPath: string; sessionsDir: 
   return { dbPath: path.join(sqliteDir, "state_5.sqlite"), sessionsDir: path.join(codexDir, "sessions") };
 }
 
-export async function readCodexSessions(options: CodexReaderOptions = {}): Promise<ReaderResult> {
+export async function readCodexSessions(
+  options: CodexReaderOptions = {},
+  prev?: ReaderListCache,
+): Promise<ReaderResultWithState> {
   const { dbPath, sessionsDir } = codexDirs(options);
   const readSqliteFn = options.readSqliteFn ?? readSqlite;
+
+  // Cheap freshness check: when the DB (+ -wal) is byte-for-byte unchanged since
+  // the cache was written, reuse the cached entries and skip the snapshot clone +
+  // query entirely (cache-vault-load D3). Guarded on a non-empty stamp set so an
+  // absent DB falls through to the query → fallback path rather than "reusing" {}.
+  const sources = await stampStoreFiles([dbPath, `${dbPath}-wal`]);
+  if (prev?.kind === "store" && Object.keys(sources).length > 0 && sameStamps(prev.sources, sources)) {
+    const u = prev.unreadable ?? 0;
+    return {
+      entries: prev.entries,
+      unreadable: u,
+      cache: { kind: "store", sources, entries: prev.entries, unreadable: u },
+    };
+  }
 
   const result = await readSqliteFn(dbPath, CODEX_THREADS_SQL);
 
   if (result.status === "no-db" || result.status === "no-sqlite3") {
-    return readCodexJsonlFallback(sessionsDir);
+    // Degraded JSONL scan: no cheap DB stamp, so cache empty `sources` → the next
+    // refresh always re-reads (correct for the fallback's freshness semantics).
+    const fb = await readCodexJsonlFallback(sessionsDir);
+    return { ...fb, cache: { kind: "store", sources: {}, entries: fb.entries, unreadable: fb.unreadable } };
   }
   if (result.status === "query-error") {
-    // Surface, don't mask with the fallback (spec: query-error → unreadable).
-    return { entries: [], unreadable: 1 };
+    // Surface, don't mask with the fallback (spec: query-error → unreadable). Cache
+    // EMPTY sources so the error is NOT reused as an empty success on the next
+    // refresh — it is retried until the query succeeds (oracle review).
+    return { entries: [], unreadable: 1, cache: { kind: "store", sources: {}, entries: [], unreadable: 1 } };
   }
 
   // status === "ok"
@@ -245,7 +269,7 @@ export async function readCodexSessions(options: CodexReaderOptions = {}): Promi
       unreadable++;
     }
   }
-  return { entries, unreadable };
+  return { entries, unreadable, cache: { kind: "store", sources, entries, unreadable } };
 }
 
 /**

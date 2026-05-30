@@ -1,5 +1,6 @@
 // src/vault/readers/codexReader.test.ts — Unit tests for the Codex reader.
 
+import * as fsp from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -173,5 +174,74 @@ describe("readCodexSessions: home resolution", () => {
     const fn = stubSqlite({ status: "ok", rows: [] });
     await readCodexSessions({ readSqliteFn: fn });
     expect(fn.mock.calls[0][0]).toBe(path.join("/codex/db", "state_5.sqlite"));
+  });
+});
+
+describe("readCodexSessions: incremental store stamp", () => {
+  const dirs: string[] = [];
+  const origSqliteHome = process.env.CODEX_SQLITE_HOME;
+
+  afterEach(async () => {
+    if (origSqliteHome === undefined) {
+      delete process.env.CODEX_SQLITE_HOME;
+    } else {
+      process.env.CODEX_SQLITE_HOME = origSqliteHome;
+    }
+    for (const d of dirs.splice(0)) {
+      await fsp.rm(d, { recursive: true, force: true });
+    }
+  });
+
+  async function makeDb(): Promise<string> {
+    delete process.env.CODEX_SQLITE_HOME; // ensure dbPath resolves under codexDir
+    const dir = await fsp.mkdtemp(path.join(os.tmpdir(), "vault-codex-inc-"));
+    dirs.push(dir);
+    await fsp.writeFile(path.join(dir, "state_5.sqlite"), "dummy-db-bytes");
+    return dir;
+  }
+
+  it("reuses cached entries without querying when the store is unchanged", async () => {
+    const dir = await makeDb();
+    const fn = stubSqlite({ status: "ok", rows: SAMPLE_ROWS });
+    const first = await readCodexSessions({ codexDir: dir, readSqliteFn: fn }, undefined);
+    expect(fn).toHaveBeenCalledTimes(1);
+    expect(first.entries).toHaveLength(2);
+    expect(first.cache.kind).toBe("store");
+
+    const second = await readCodexSessions({ codexDir: dir, readSqliteFn: fn }, first.cache);
+    expect(fn).toHaveBeenCalledTimes(1); // unchanged store → no re-query
+    expect(second.entries).toHaveLength(2);
+  });
+
+  it("re-queries when the db mtime changes", async () => {
+    const dir = await makeDb();
+    const fn = stubSqlite({ status: "ok", rows: SAMPLE_ROWS });
+    const first = await readCodexSessions({ codexDir: dir, readSqliteFn: fn }, undefined);
+    const future = new Date(Date.now() + 60_000);
+    await fsp.utimes(path.join(dir, "state_5.sqlite"), future, future);
+    await readCodexSessions({ codexDir: dir, readSqliteFn: fn }, first.cache);
+    expect(fn).toHaveBeenCalledTimes(2);
+  });
+
+  it("preserves the unreadable count on reuse (no silent reset to 0)", async () => {
+    const dir = await makeDb();
+    const rows = [SAMPLE_ROWS[0], { cwd: "/no-id" }]; // 2nd row lacks id → unreadable
+    const fn = stubSqlite({ status: "ok", rows });
+    const first = await readCodexSessions({ codexDir: dir, readSqliteFn: fn }, undefined);
+    expect(first.unreadable).toBe(1);
+    const second = await readCodexSessions({ codexDir: dir, readSqliteFn: fn }, first.cache);
+    expect(fn).toHaveBeenCalledTimes(1); // reused
+    expect(second.unreadable).toBe(1); // carried, not reset
+  });
+
+  it("retries a query-error instead of reusing it as an empty success", async () => {
+    const dir = await makeDb();
+    const fn = stubSqlite({ status: "query-error", rows: [], error: "boom" });
+    const first = await readCodexSessions({ codexDir: dir, readSqliteFn: fn }, undefined);
+    expect(first.unreadable).toBe(1);
+    // Empty sources cached → next refresh must re-query (not reuse the error as ok).
+    const second = await readCodexSessions({ codexDir: dir, readSqliteFn: fn }, first.cache);
+    expect(fn).toHaveBeenCalledTimes(2);
+    expect(second.unreadable).toBe(1);
   });
 });

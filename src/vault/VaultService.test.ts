@@ -1,9 +1,15 @@
 // src/vault/VaultService.test.ts — Unit tests for aggregation + fork resolution.
 
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import {
+  type ReaderListCache,
+  type ReaderResultWithState,
+  VAULT_CACHE_VERSION,
+  type VaultListCacheFileV1,
+} from "./cacheTypes";
 import { __resetForkSupportCache, canForkOpenCode, gte, parseFirstSemver } from "./forkSupport";
-import type { ReaderResult } from "./readers/claudeReader";
 import type { VaultSessionEntry } from "./types";
+import type { VaultCacheStore } from "./VaultCacheStore";
 import { type VaultEntryReaders, type VaultReaders, VaultService } from "./VaultService";
 
 function entry(agent: string, sessionId: string, modified: number): VaultSessionEntry {
@@ -19,8 +25,8 @@ function entry(agent: string, sessionId: string, modified: number): VaultSession
   };
 }
 
-function result(entries: VaultSessionEntry[], unreadable = 0): ReaderResult {
-  return { entries, unreadable };
+function result(entries: VaultSessionEntry[], unreadable = 0): ReaderResultWithState {
+  return { entries, unreadable, cache: { kind: "store", sources: {}, entries, unreadable } };
 }
 
 function makeReaders(overrides: Partial<VaultReaders> = {}): VaultReaders {
@@ -192,6 +198,117 @@ describe("VaultService.getEntry: single-entry resolve", () => {
     });
     const e = await svc.getEntry("opencode:o1");
     expect(e?.canFork).toBe(false);
+  });
+});
+
+describe("VaultService cache: listCached + refresh", () => {
+  function makeCacheStore(initial: VaultListCacheFileV1 | null = null) {
+    let stored = initial;
+    const store = {
+      load: vi.fn(() => stored),
+      save: vi.fn(async (doc: VaultListCacheFileV1) => {
+        stored = doc;
+      }),
+    };
+    return {
+      store,
+      get current() {
+        return stored;
+      },
+    };
+  }
+
+  function cacheDoc(entries: VaultSessionEntry[]): VaultListCacheFileV1 {
+    return {
+      version: VAULT_CACHE_VERSION,
+      savedAt: 1,
+      agents: {},
+      entries,
+      unreadable: { count: 0, reasons: [] },
+    };
+  }
+
+  it("listCached returns null without a cache store", () => {
+    const svc = new VaultService({ readers: makeReaders(), canForkOpenCodeFn: async () => false });
+    expect(svc.listCached()).toBeNull();
+  });
+
+  it("listCached serves the persisted list (loaded once)", () => {
+    const { store } = makeCacheStore(cacheDoc([entry("claude", "c1", 7)]));
+    const svc = new VaultService({
+      readers: makeReaders(),
+      canForkOpenCodeFn: async () => false,
+      cacheStore: store as unknown as VaultCacheStore,
+    });
+    expect(svc.listCached()?.entries.map((e) => e.id)).toEqual(["claude:c1"]);
+    svc.listCached();
+    expect(store.load).toHaveBeenCalledTimes(1); // lazy-loaded once, then memoized
+  });
+
+  it("refresh persists the merged+sorted doc and returns it", async () => {
+    const { store, current } = makeCacheStore(null);
+    const readers = makeReaders({
+      claude: async () => result([entry("claude", "c1", 100)]),
+      codex: async () => result([entry("codex", "x1", 300)]),
+    });
+    const svc = new VaultService({
+      readers,
+      canForkOpenCodeFn: async () => false,
+      cacheStore: store as unknown as VaultCacheStore,
+    });
+    const { entries } = await svc.refresh();
+    expect(entries.map((e) => e.id)).toEqual(["codex:x1", "claude:c1"]);
+    expect(store.save).toHaveBeenCalledTimes(1);
+    // After refresh, listCached serves the freshly persisted list.
+    expect(svc.listCached()?.entries.map((e) => e.id)).toEqual(["codex:x1", "claude:c1"]);
+    void current;
+  });
+
+  it("a second refresh feeds each reader its prior per-agent cache (incremental)", async () => {
+    const claude = vi.fn(async (_prev?: ReaderListCache) => result([entry("claude", "c1", 1)]));
+    const { store } = makeCacheStore(null);
+    const svc = new VaultService({
+      readers: makeReaders({ claude }),
+      canForkOpenCodeFn: async () => false,
+      cacheStore: store as unknown as VaultCacheStore,
+    });
+    await svc.refresh();
+    await svc.refresh();
+    // First call: no prior cache (undefined). Second: the cache the reader returned
+    // last time, carried back as `prev` (canFork already resolved on the entry).
+    expect(claude.mock.calls[0][0]).toBeUndefined();
+    const prev = claude.mock.calls[1][0];
+    expect(prev?.kind).toBe("store");
+    expect(prev?.kind === "store" && prev.entries.map((e) => e.id)).toEqual(["claude:c1"]);
+  });
+
+  it("single-flight: concurrent refresh calls share one read + one save", async () => {
+    const claude = vi.fn(async () => result([entry("claude", "c1", 1)]));
+    const { store } = makeCacheStore(null);
+    const svc = new VaultService({
+      readers: makeReaders({ claude }),
+      canForkOpenCodeFn: async () => false,
+      cacheStore: store as unknown as VaultCacheStore,
+    });
+    await Promise.all([svc.refresh(), svc.refresh()]);
+    expect(claude).toHaveBeenCalledTimes(1);
+    expect(store.save).toHaveBeenCalledTimes(1);
+  });
+
+  it("a save failure does not fail the refresh (fresh list still returned)", async () => {
+    const store = {
+      load: vi.fn(() => null),
+      save: vi.fn(async () => {
+        throw new Error("disk full");
+      }),
+    };
+    const svc = new VaultService({
+      readers: makeReaders({ claude: async () => result([entry("claude", "c1", 1)]) }),
+      canForkOpenCodeFn: async () => false,
+      cacheStore: store as unknown as VaultCacheStore,
+    });
+    const { entries } = await svc.refresh();
+    expect(entries.map((e) => e.id)).toEqual(["claude:c1"]);
   });
 });
 
