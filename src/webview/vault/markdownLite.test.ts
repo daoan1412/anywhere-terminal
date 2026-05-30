@@ -82,4 +82,14 @@ describe("renderMarkdownLite", () => {
     const host = render("```\npartial code\nno closing fence");
     expect(host.querySelector("pre.md-pre code")?.textContent).toBe("partial code\nno closing fence");
   });
+
+  it("does NOT merge a marker-type switch into one list (R5): `- ` then `1. ` → ul + ol", () => {
+    const host = render("- bullet a\n- bullet b\n1. step one\n2. step two");
+    const lists = host.querySelectorAll(".md-list");
+    expect(lists).toHaveLength(2);
+    expect(lists[0].tagName.toLowerCase()).toBe("ul");
+    expect(lists[0].querySelectorAll("li")).toHaveLength(2);
+    expect(lists[1].tagName.toLowerCase()).toBe("ol");
+    expect(Array.from(lists[1].querySelectorAll("li")).map((li) => li.textContent)).toEqual(["step one", "step two"]);
+  });
 });

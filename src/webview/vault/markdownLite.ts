@@ -157,6 +157,12 @@ export function renderMarkdownLite(text: string): DocumentFragment {
         if (!item) {
           break;
         }
+        // A marker-type switch (`- ` ↔ `1. `) ends this list so the next item
+        // starts a fresh ol/ul — otherwise numbered steps render as bullets (or
+        // vice versa), a common shape in AI transcripts.
+        if (/\d/.test(item[2]) !== ordered) {
+          break;
+        }
         const li = document.createElement("li");
         appendInline(li, item[3]);
         list.appendChild(li);

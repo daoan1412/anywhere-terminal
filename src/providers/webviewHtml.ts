@@ -41,17 +41,20 @@ export function getTerminalHtml(
 ): string {
   const nonce = crypto.randomBytes(16).toString("hex");
 
-  // Convert file paths to webview-safe URIs. The script URI carries a `?v=<mtime>`
-  // cache-buster keyed to the bundle's modification time: a webview caches the
+  // Convert file paths to webview-safe URIs. The script URI carries a
+  // `?v=<mtime>-<size>` cache-buster keyed to the bundle: a webview caches the
   // resource by URL, so a plain "Reload Window" can keep serving a stale
   // `webview.js` after a rebuild — the failure mode that hid the new render code
   // live (DevTools showed 0 rendered nodes against a bundle that renders them).
-  // Keying the query to mtimeMs forces a fresh fetch only when the bundle actually
-  // changes, and still caches when it has not (nest-workflow-team-sessions D11).
+  // mtimeMs alone misses rebuilds from a bundler that preserves the artifact
+  // timestamp (R5), so the byte size is folded in: the version changes whenever
+  // the file is re-emitted OR its length changes, and still caches when neither
+  // does (nest-workflow-team-sessions D11).
   const scriptPath = vscode.Uri.joinPath(extensionUri, "media", "webview.js");
   let scriptVersion: string;
   try {
-    scriptVersion = String(fs.statSync(scriptPath.fsPath).mtimeMs);
+    const stat = fs.statSync(scriptPath.fsPath);
+    scriptVersion = `${stat.mtimeMs}-${stat.size}`;
   } catch {
     scriptVersion = nonce; // bundle unreadable → always-fresh rather than risk staleness
   }

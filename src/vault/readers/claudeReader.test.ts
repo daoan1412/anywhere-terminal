@@ -302,6 +302,16 @@ describe("inbound teammate-message rendering (D16)", () => {
     expect(leaked).toBe(false);
   });
 
+  it("R5: surfaces a summary-only inbound message (empty body) using its summary, never drops it", async () => {
+    // reviewer-b's reply is `<teammate-message … summary="build passed"></teammate-message>`
+    // — an empty body. Before the fix the empty body unwrapped to nothing and the
+    // record vanished from the timeline; now it falls back to the summary text.
+    const detail = await readClaudeDetail("leader", { configDir: TEAM_FIXTURE_ROOT });
+    const tms = (detail?.timeline ?? []).filter((i) => i.kind === "teammateMessage");
+    const b = tms.find((i) => i.kind === "teammateMessage" && i.agentName === "reviewer-b");
+    expect(b?.kind === "teammateMessage" && b.text).toBe("build passed");
+  });
+
   it("renders an incoming request inside a member transcript as a teammateMessage from the leader", async () => {
     // member-a's first record is `<teammate-message teammate_id="team-lead">review this</teammate-message>`.
     const detail = await readClaudeDetail("member-a", { configDir: TEAM_FIXTURE_ROOT });

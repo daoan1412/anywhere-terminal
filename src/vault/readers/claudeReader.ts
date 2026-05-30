@@ -168,7 +168,13 @@ function teammateMessageHook(
   if (!tag) {
     return null;
   }
-  return { agentName: tag.teammateId, from: tag.from, ...(tag.color ? { color: tag.color } : {}), body: tag.body };
+  // Fall back to the tag's `summary` when the body is empty (a notification-style
+  // `<teammate-message summary="…"></teammate-message>`): without this the empty
+  // body unwraps to nothing and the record is dropped from BOTH the teammate path
+  // and the plain-message path — a silent omission of a real on-disk message (R5).
+  // Mirrors collectMemberTurns' `body || summary` preview.
+  const body = tag.body || tag.summary || "";
+  return { agentName: tag.teammateId, from: tag.from, ...(tag.color ? { color: tag.color } : {}), body };
 }
 
 /** A teammate-message turn boundary on a parsed record, or null. A boundary is a
@@ -621,7 +627,10 @@ async function readClaudeTeamSegment(
   if (!filePath) {
     return null;
   }
-  const slice: Record<string, unknown>[] = [];
+  // A single turn (a long-running member's whole response between two boundaries)
+  // can span most of the file, so the collected window is head+tail bounded like
+  // any detail read (R5) — never the full remainder materialized at once.
+  const buffer = createBoundedRecordBuffer();
   let boundaryCount = 0;
   let collecting = false;
   let found = false;
@@ -655,7 +664,7 @@ async function readClaudeTeamSegment(
         boundaryCount++;
       }
       if (collecting) {
-        slice.push(rec);
+        buffer.push(rec);
       }
     }
   } catch {
@@ -667,12 +676,13 @@ async function readClaudeTeamSegment(
   if (!found) {
     return null; // turn out of range
   }
-  const detail = classifyClaudeStyleEvents(slice, {
+  const { records, truncated } = buffer.result();
+  const detail = classifyClaudeStyleEvents(records, {
     limit,
     includeSidechain: true,
     teammateMessage: teammateMessageHook,
   });
-  return finalizeDetail(formatEntryId("claude", formatTeamTurnSessionId(memberId, turn)), detail, false);
+  return finalizeDetail(formatEntryId("claude", formatTeamTurnSessionId(memberId, turn)), detail, truncated);
 }
 
 /** A flat subagent leaf: its records are all `isSidechain` (that IS the
@@ -1170,6 +1180,13 @@ async function collectMemberTurns(filePath: string): Promise<MemberTurn[]> {
           timestamp: coerceTimestamp(rec.timestamp) ?? 0,
         });
         idx++;
+        // Keep only the most-recent window in memory (R5). `idx` keeps counting,
+        // so each retained turn's true boundary ordinal — the `:turn:<n>` id used
+        // to re-open it — is unchanged; only old, beyond-the-cap turns are dropped
+        // (they would not survive the leader timeline's final tail bound anyway).
+        if (turns.length > MAX_TIMELINE_ITEMS) {
+          turns.shift();
+        }
       }
     }
   } catch {
@@ -1223,6 +1240,16 @@ async function buildTeamThread(
         });
       }
     }
+  }
+  // Globally bound the thread before it is merged into the leader timeline (R5):
+  // each member is already tail-capped, but a many-member team could still sum to
+  // a large array. Keep the most-recent window by timestamp — exactly the slice
+  // the caller's final tail bound would retain anyway.
+  if (items.length > MAX_TIMELINE_ITEMS) {
+    items.sort(
+      (a, b) => ((a as { timestamp?: number }).timestamp ?? 0) - ((b as { timestamp?: number }).timestamp ?? 0),
+    );
+    return items.slice(items.length - MAX_TIMELINE_ITEMS);
   }
   return items;
 }

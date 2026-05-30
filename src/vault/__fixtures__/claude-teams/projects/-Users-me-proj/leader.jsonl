@@ -2,3 +2,4 @@
 {"type":"assistant","message":{"role":"assistant","model":"claude-opus-4-8","content":[{"type":"text","text":"ok"}]},"timestamp":"2026-05-01T00:01:00.000Z"}
 {"type":"system","teamName":"review-team","timestamp":"2026-05-01T00:01:30.000Z"}
 {"type":"user","isSidechain":false,"message":{"role":"user","content":"<teammate-message teammate_id=\"reviewer-a\" color=\"blue\" summary=\"review done\">found 2 issues in the auth path</teammate-message>"},"cwd":"/Users/me/proj","timestamp":"2026-05-01T00:06:00.000Z"}
+{"type":"user","isSidechain":false,"message":{"role":"user","content":"<teammate-message teammate_id=\"reviewer-b\" color=\"green\" summary=\"build passed\"></teammate-message>"},"cwd":"/Users/me/proj","timestamp":"2026-05-01T00:07:00.000Z"}

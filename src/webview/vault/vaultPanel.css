@@ -936,12 +936,15 @@
 .vault-preview-message-thinking .vault-md {
   font-style: italic;
 }
-/* Long thinking is clamped to ~3 lines until expanded. */
+/* Long thinking is clamped to ~3 lines until expanded. A plain max-height +
+   overflow:hidden is used INSTEAD of `-webkit-line-clamp`: the body is a
+   `.vault-md` block container holding block children (md-p / md-pre / md-table),
+   and `-webkit-box` + line-clamp on a block-child container is undefined and can
+   collapse the whole block to height 0 in some webview engines (R5). max-height
+   clamps reliably regardless of child structure; the show-more toggle (not an
+   ellipsis) signals the cut. 3 lines ≈ 4.5em at line-height 1.5. */
 .vault-preview-message-thinking.is-clamped:not(.is-expanded) .vault-md {
-  display: -webkit-box;
-  -webkit-line-clamp: 3;
-  line-clamp: 3;
-  -webkit-box-orient: vertical;
+  max-height: 4.5em;
   overflow: hidden;
 }
 .vault-preview-thinking-toggle {
