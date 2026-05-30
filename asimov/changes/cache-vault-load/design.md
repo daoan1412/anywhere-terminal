@@ -77,6 +77,10 @@ because the title is the expensive-to-derive value and must be cached to display
 matching the codebase's own established posture:
 - File mode `0o600` (owner-only) + dir `0o700` — identical to `SessionStorage`, which already persists raw
   ANSI terminal scrollback (strictly more sensitive — can include echoed credentials) at `0o600` ([W5]).
+  **POSIX only (round-2 F-Win):** on Windows, Node's `mode` argument does NOT set an owner-only ACL — the
+  file inherits the parent `globalStorageUri` (user-profile) ACLs instead. So the at-rest boundary on
+  Windows is "whatever the user profile grants", not an enforced `0o600`. This matches `SessionStorage`'s
+  identical POSIX-only behavior; the claim is not that the mode bit protects the file on Windows.
 - Stored only under the extension's `globalStorageUri`; **never** transmitted off the machine (the existing
   no-egress requirement is preserved verbatim).
 - Only the already-IPC-exposed bounded title + metadata are cached — no message bodies.

@@ -111,6 +111,7 @@ vi.mock("./previewFileLink", () => ({
 
 import type * as vscode from "vscode";
 import { SessionManager } from "../session/SessionManager";
+import type { VaultService } from "../vault/VaultService";
 import { openFileLink } from "./openFileLink";
 import { previewFileLink } from "./previewFileLink";
 import { TerminalViewProvider } from "./TerminalViewProvider";
@@ -667,6 +668,85 @@ describe("TerminalViewProvider: theme bridge", () => {
       (args) => (args[0] as { type?: string }).type === "themeChanged",
     );
     expect(themeCalls).toHaveLength(0);
+
+    sm.dispose();
+  });
+});
+
+// ─── vault fresh-response supersession (review round-2 F4) ──────────
+
+describe("TerminalViewProvider: vault fresh-response supersession (F4)", () => {
+  function freshResult(id: string) {
+    return {
+      entries: [
+        {
+          id: `claude:${id}`,
+          agent: "claude",
+          sessionId: id,
+          title: "t",
+          cwd: "/x",
+          modified: 1,
+          flags: {},
+          canFork: false,
+        },
+      ],
+      unreadable: { count: 0, reasons: [] },
+    };
+  }
+
+  it("does not re-post a superseded fresh list on retry after a newer request arrives", async () => {
+    const sm = new SessionManager();
+    let refreshes = 0;
+    const fakeVault = {
+      listCached: () => null, // no instant-cache post — isolate the fresh path
+      refresh: async () => freshResult(`r${++refreshes}`),
+    } as unknown as VaultService;
+    const provider = new TerminalViewProvider(
+      { fsPath: "/mock/extension" } as vscode.Uri,
+      sm,
+      "sidebar",
+      null, // gitDecorationProvider
+      null, // watcherPool
+      fakeVault,
+    );
+
+    const { webviewView, messageHandlers, postMessageSpy } = createMockWebviewView();
+    provider.resolveWebviewView(webviewView, {} as vscode.WebviewViewResolveContext, {} as vscode.CancellationToken);
+    for (const handler of messageHandlers) {
+      handler({ type: "ready" });
+    }
+
+    postMessageSpy.mockReset();
+    const isFresh = (m: unknown, id: string) => {
+      const x = m as { type?: string; fromCache?: boolean; result?: { entries: Array<{ id: string }> } };
+      return x.type === "vaultSessionsResponse" && x.fromCache === false && x.result?.entries[0]?.id === `claude:${id}`;
+    };
+    let firedSecond = false;
+    postMessageSpy.mockImplementation((msg: unknown) => {
+      // On token-1's FIRST fresh post attempt: fire a newer request (bumps the seq
+      // synchronously), then fail this attempt to push token-1 into its retry window.
+      if (!firedSecond && isFresh(msg, "r1")) {
+        firedSecond = true;
+        for (const handler of messageHandlers) {
+          handler({ type: "requestVaultSessions" });
+        }
+        return Promise.resolve(false);
+      }
+      return Promise.resolve(true);
+    });
+
+    for (const handler of messageHandlers) {
+      handler({ type: "requestVaultSessions" }); // token-1
+    }
+    await new Promise<void>((resolve) => setTimeout(resolve, 250));
+
+    const r1Posts = postMessageSpy.mock.calls.filter(([m]) => isFresh(m, "r1"));
+    const r2Posts = postMessageSpy.mock.calls.filter(([m]) => isFresh(m, "r2"));
+    // token-1's retry is aborted: r1 is posted exactly once (the failed first attempt),
+    // never re-sent after token-2 superseded it.
+    expect(r1Posts).toHaveLength(1);
+    // The newer list still reaches the webview.
+    expect(r2Posts.length).toBeGreaterThanOrEqual(1);
 
     sm.dispose();
   });

@@ -295,6 +295,53 @@ describe("VaultService cache: listCached + refresh", () => {
     expect(store.save).toHaveBeenCalledTimes(1);
   });
 
+  it("F1: a transient reader failure preserves that agent's last-cached entries + cache", async () => {
+    let claudeOk = true;
+    const claude = vi.fn(async (_prev?: ReaderListCache) => {
+      if (!claudeOk) {
+        throw new Error("transient fs error");
+      }
+      return result([entry("claude", "c1", 100)]);
+    });
+    const { store } = makeCacheStore(null);
+    const svc = new VaultService({
+      readers: makeReaders({ claude, codex: async () => result([entry("codex", "x1", 50)]) }),
+      canForkOpenCodeFn: async () => false,
+      cacheStore: store as unknown as VaultCacheStore,
+    });
+    await svc.refresh(); // first read succeeds → claude:c1 cached
+    claudeOk = false;
+    const res = await svc.refresh(); // claude reader now fails transiently
+    // claude:c1 survives from the prior snapshot instead of vanishing; codex still reads fresh.
+    expect(res.entries.map((e) => e.id).sort()).toEqual(["claude:c1", "codex:x1"]);
+    expect(res.unreadable.reasons.some((r) => r.includes("showing last cached"))).toBe(true);
+    // The persisted snapshot keeps the agent so the next open still shows it.
+    expect(
+      svc
+        .listCached()
+        ?.entries.map((e) => e.id)
+        .sort(),
+    ).toEqual(["claude:c1", "codex:x1"]);
+  });
+
+  it("F1: a reader failing on the FIRST read (nothing to carry) just surfaces unreadable", async () => {
+    const { store } = makeCacheStore(null);
+    const svc = new VaultService({
+      readers: makeReaders({
+        claude: async () => {
+          throw new Error("boom");
+        },
+        codex: async () => result([entry("codex", "x1", 50)]),
+      }),
+      canForkOpenCodeFn: async () => false,
+      cacheStore: store as unknown as VaultCacheStore,
+    });
+    const res = await svc.refresh();
+    expect(res.entries.map((e) => e.id)).toEqual(["codex:x1"]);
+    expect(res.unreadable.reasons.some((r) => r.includes("reader failed"))).toBe(true);
+    expect(res.unreadable.reasons.some((r) => r.includes("showing last cached"))).toBe(false);
+  });
+
   it("a save failure does not fail the refresh (fresh list still returned)", async () => {
     const store = {
       load: vi.fn(() => null),

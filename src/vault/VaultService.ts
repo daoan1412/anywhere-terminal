@@ -138,10 +138,26 @@ export class VaultService {
           );
         }
       } else {
-        // A whole reader failing is surfaced, not silently dropped. Its cache is
-        // omitted so the next refresh full-reads it (no stale-entry resurrection).
+        // A whole reader failed (transient I/O, a corrupt store, etc.). Surface it
+        // — but preserve LAST-KNOWN-GOOD for this agent rather than wiping it: carry
+        // the prior per-agent freshness cache (so the next refresh stays incremental)
+        // and the prior persisted entries (so the agent's sessions don't vanish from
+        // the list and we don't overwrite the saved snapshot with a missing-agent
+        // one). A momentary failure now self-corrects on the next successful read
+        // instead of degrading the cache (review round-2 F1). First run / nothing to
+        // carry → the agent is simply absent this cycle.
         unreadable += 1;
-        reasons.push(`${label}: reader failed`);
+        const prevCache = prevAgents[id];
+        const priorEntries = prev?.entries.filter((e) => e.agent === id) ?? [];
+        if (prevCache) {
+          agents[id] = prevCache;
+        }
+        if (priorEntries.length > 0) {
+          entries.push(...priorEntries);
+          reasons.push(`${label}: reader failed — showing last cached`);
+        } else {
+          reasons.push(`${label}: reader failed`);
+        }
       }
     });
 

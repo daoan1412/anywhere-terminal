@@ -350,7 +350,16 @@ export class TerminalViewProvider implements vscode.WebviewViewProvider {
       if (token !== this._vaultRefreshSeq) {
         return; // a newer request owns the list now — drop this stale refresh.
       }
-      void this.safeSendWithRetry(webview, { type: "vaultSessionsResponse", result, fromCache: false });
+      // Re-check supersession before EACH delivery attempt (not just here): a
+      // newer request can arrive during safeSendWithRetry's 50ms retry sleep, and
+      // a late retry of this now-stale list would otherwise overwrite the newer
+      // one in the webview (review round-2 F4).
+      void this.safeSendWithRetry(
+        webview,
+        { type: "vaultSessionsResponse", result, fromCache: false },
+        2,
+        () => token !== this._vaultRefreshSeq,
+      );
     } catch (err) {
       console.error("[AnyWhere Terminal] Failed to list vault sessions:", err);
       // Don't clobber a successfully-rendered cache with an error notice; only
@@ -1034,8 +1043,19 @@ export class TerminalViewProvider implements vscode.WebviewViewProvider {
    * Returns true if the message was delivered, false if all attempts failed.
    * Used for critical messages (init, tabCreated, splitPaneCreated, error).
    */
-  private async safeSendWithRetry(webview: vscode.Webview, message: unknown, maxRetries = 2): Promise<boolean> {
+  private async safeSendWithRetry(
+    webview: vscode.Webview,
+    message: unknown,
+    maxRetries = 2,
+    shouldAbort?: () => boolean,
+  ): Promise<boolean> {
     for (let attempt = 0; attempt <= maxRetries; attempt++) {
+      // Bail before every attempt (including before a retry) when the caller
+      // signals this send is superseded — a late retry must not overwrite newer
+      // data the caller has since posted (review round-2 F4).
+      if (shouldAbort?.()) {
+        return false;
+      }
       try {
         const result = await (webview.postMessage(message) as Thenable<boolean>);
         if (result) {

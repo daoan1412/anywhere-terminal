@@ -155,4 +155,119 @@ describe("VaultCacheStore", () => {
     await store.save(doc());
     expect(harness.writeOrder[0]).not.toBe(harness.writeOrder[1]);
   });
+
+  // F2 (review round-2): a malformed per-agent `agents` cache must void the WHOLE
+  // cache, never reach a reader as `prev` (where `sameStamps`/`Object.keys` would
+  // throw, failing the reader and dropping the agent).
+  describe("F2: agents cache validation", () => {
+    it("rejects a store cache whose sources is null", () => {
+      const bad = { ...doc(), agents: { codex: { kind: "store", sources: null, entries: [], unreadable: 0 } } };
+      harness.files.set(CACHE_FILE, JSON.stringify(bad));
+      expect(store.load()).toBeNull();
+    });
+
+    it("rejects a store cache with a non-finite unreadable", () => {
+      const bad = { ...doc(), agents: { codex: { kind: "store", sources: {}, entries: [], unreadable: "x" } } };
+      harness.files.set(CACHE_FILE, JSON.stringify(bad));
+      expect(store.load()).toBeNull();
+    });
+
+    it("rejects a files cache whose stamp is not numeric", () => {
+      const bad = {
+        ...doc(),
+        agents: {
+          claude: {
+            kind: "files",
+            files: { "/a/b.jsonl": { stamp: { mtimeMs: "x", size: 1 }, entry: doc().entries[0] } },
+          },
+        },
+      };
+      harness.files.set(CACHE_FILE, JSON.stringify(bad));
+      expect(store.load()).toBeNull();
+    });
+
+    it("rejects a files cache whose entry is malformed", () => {
+      const badEntry = { ...doc().entries[0], title: 42 };
+      const bad = {
+        ...doc(),
+        agents: {
+          claude: { kind: "files", files: { "/a/b.jsonl": { stamp: { mtimeMs: 1, size: 2 }, entry: badEntry } } },
+        },
+      };
+      harness.files.set(CACHE_FILE, JSON.stringify(bad));
+      expect(store.load()).toBeNull();
+    });
+
+    it("rejects an unknown reader-cache discriminant", () => {
+      harness.files.set(CACHE_FILE, JSON.stringify({ ...doc(), agents: { claude: { kind: "weird" } } }));
+      expect(store.load()).toBeNull();
+    });
+
+    it("accepts well-formed files + store agent caches (round-trip)", async () => {
+      const good = doc({
+        agents: {
+          claude: {
+            kind: "files",
+            files: { "/a/b.jsonl": { stamp: { mtimeMs: 5, size: 9 }, entry: doc().entries[0] } },
+          },
+          codex: { kind: "store", sources: { "/c/d.db": { mtimeMs: 1, size: 2 } }, entries: [], unreadable: 0 },
+        },
+      });
+      await store.save(good);
+      expect(store.load()).toEqual(good);
+    });
+  });
+
+  // F-Win (review round-2): rename onto list.json retries the transient lock errors
+  // common on Windows (EPERM/EBUSY/EACCES), and a final failure unlinks the spool so
+  // no titles+cwds leak in a temp file until the next activate cleanup.
+  describe("F-Win: rename retry + temp cleanup", () => {
+    function errno(code: string): NodeJS.ErrnoException {
+      const e = new Error(code) as NodeJS.ErrnoException;
+      e.code = code;
+      return e;
+    }
+
+    it("retries a transient EPERM and commits on a later attempt", async () => {
+      const h = makeFakeFs();
+      const realRename = h.fs.promises.rename;
+      let attempts = 0;
+      h.fs.promises.rename = async (from: string, to: string) => {
+        attempts++;
+        if (attempts < 3) {
+          throw errno("EPERM");
+        }
+        return realRename(from, to);
+      };
+      const s = new VaultCacheStore(globalStorageUri, h.fs);
+      await s.save(doc());
+      expect(attempts).toBe(3);
+      expect(h.files.has(CACHE_FILE)).toBe(true);
+      expect([...h.files.keys()].some((k) => k.includes("list.json.tmp."))).toBe(false);
+    });
+
+    it("gives up after max attempts on a persistent lock error and unlinks the temp", async () => {
+      const h = makeFakeFs();
+      h.fs.promises.rename = async () => {
+        throw errno("EBUSY");
+      };
+      const s = new VaultCacheStore(globalStorageUri, h.fs);
+      await expect(s.save(doc())).rejects.toThrow();
+      expect(h.files.has(CACHE_FILE)).toBe(false);
+      expect([...h.files.keys()].some((k) => k.includes("list.json.tmp."))).toBe(false);
+    });
+
+    it("does NOT retry a non-transient error and unlinks the temp", async () => {
+      const h = makeFakeFs();
+      let calls = 0;
+      h.fs.promises.rename = async () => {
+        calls++;
+        throw errno("ENOSPC");
+      };
+      const s = new VaultCacheStore(globalStorageUri, h.fs);
+      await expect(s.save(doc())).rejects.toThrow();
+      expect(calls).toBe(1);
+      expect([...h.files.keys()].some((k) => k.includes("list.json.tmp."))).toBe(false);
+    });
+  });
 });

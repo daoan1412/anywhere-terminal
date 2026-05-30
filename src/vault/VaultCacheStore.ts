@@ -39,10 +39,70 @@ function isValidCachedEntry(e: unknown): e is VaultSessionEntry {
   );
 }
 
-/** Owner-only file mode — the cache holds bounded titles + absolute cwds that
- *  MAY carry sensitive content (design.md D5). Matches SessionStorage [W5]. */
+/** A finite, JSON-real number — guards stamp fields a tampered/torn cache could
+ *  set to null/NaN/string, which would later break freshness math. */
+function isFiniteNumber(v: unknown): v is number {
+  return typeof v === "number" && Number.isFinite(v);
+}
+
+/** A `(mtimeMs,size)` stamp with both fields present and finite. */
+function isValidStamp(s: unknown): boolean {
+  if (!s || typeof s !== "object") {
+    return false;
+  }
+  const v = s as Record<string, unknown>;
+  return isFiniteNumber(v.mtimeMs) && isFiniteNumber(v.size);
+}
+
+/**
+ * Validate one agent's persisted freshness state against the `ReaderListCache`
+ * union. A malformed blob (e.g. `{kind:"store", sources:null}`) must NOT be handed
+ * back to a reader as `prev`: it would throw inside `sameStamps`/`Object.keys`,
+ * failing the whole reader — which then drops that agent from the list (review
+ * round-2 F2). Any failure here voids the ENTIRE cache → full rebuild, matching the
+ * per-entry policy. An empty `agents` object is valid (nothing cached yet).
+ */
+function isValidReaderCache(c: unknown): boolean {
+  if (!c || typeof c !== "object") {
+    return false;
+  }
+  const v = c as Record<string, unknown>;
+  if (v.kind === "files") {
+    if (!v.files || typeof v.files !== "object") {
+      return false;
+    }
+    for (const rec of Object.values(v.files as Record<string, unknown>)) {
+      if (!rec || typeof rec !== "object") {
+        return false;
+      }
+      const r = rec as Record<string, unknown>;
+      if (!isValidStamp(r.stamp) || !isValidCachedEntry(r.entry)) {
+        return false;
+      }
+    }
+    return true;
+  }
+  if (v.kind === "store") {
+    if (!v.sources || typeof v.sources !== "object") {
+      return false;
+    }
+    for (const st of Object.values(v.sources as Record<string, unknown>)) {
+      if (!isValidStamp(st)) {
+        return false;
+      }
+    }
+    return Array.isArray(v.entries) && v.entries.every(isValidCachedEntry) && isFiniteNumber(v.unreadable);
+  }
+  return false; // unknown discriminant
+}
+
+/** Owner-only file mode on POSIX (macOS/Linux). NOTE: on Windows Node's `mode`
+ *  argument does NOT set an owner-only ACL — the file inherits the parent
+ *  (`globalStorageUri`, under the user profile) ACLs instead. The cache holds
+ *  bounded titles + absolute cwds that MAY carry sensitive content (design.md D5);
+ *  this is the SAME POSIX-only mitigation `SessionStorage` already uses [W5]. */
 const CACHE_FILE_MODE = 0o600;
-/** Owner-only directory mode for `<globalStorageUri>/vault-cache/`. */
+/** Owner-only directory mode (POSIX only — see {@link CACHE_FILE_MODE}). */
 const CACHE_DIR_MODE = 0o700;
 
 export class VaultCacheStore {
@@ -80,6 +140,7 @@ export class VaultCacheStore {
         parsed.entries.every(isValidCachedEntry) &&
         parsed.agents &&
         typeof parsed.agents === "object" &&
+        Object.values(parsed.agents).every(isValidReaderCache) &&
         parsed.unreadable &&
         typeof parsed.unreadable === "object" &&
         Array.isArray(parsed.unreadable.reasons)
@@ -106,7 +167,39 @@ export class VaultCacheStore {
     // counter alone would collide between windows and lose a write (oracle review).
     const temp = `${this.cacheFile}.tmp.${process.pid}.${++this.tempCounter}`;
     await this.fs.promises.writeFile(temp, JSON.stringify(doc), { mode: CACHE_FILE_MODE });
-    await this.fs.promises.rename(temp, this.cacheFile);
+    try {
+      await this.renameWithRetry(temp, this.cacheFile);
+    } catch (err) {
+      // Commit failed for good — don't leave the spool file (it holds titles+cwds)
+      // behind until the next activate's cleanup. Best-effort unlink, then rethrow
+      // so VaultService.refresh logs the persist failure (review round-2 F-Win).
+      await this.fs.promises.unlink(temp).catch(() => {});
+      throw err;
+    }
+  }
+
+  /**
+   * `rename` onto the canonical path, retrying briefly on the transient lock errors
+   * that are common on Windows (EPERM/EBUSY/EACCES) when another window, antivirus,
+   * the search indexer, or a backup momentarily holds the destination open. POSIX
+   * rename rarely hits these, so the retry is a no-op cost there. The original error
+   * propagates after the final attempt (review round-2 F-Win).
+   */
+  private async renameWithRetry(from: string, to: string): Promise<void> {
+    const TRANSIENT = new Set(["EPERM", "EBUSY", "EACCES"]);
+    const MAX_ATTEMPTS = 3;
+    for (let attempt = 1; ; attempt++) {
+      try {
+        await this.fs.promises.rename(from, to);
+        return;
+      } catch (err) {
+        const code = (err as NodeJS.ErrnoException)?.code;
+        if (attempt >= MAX_ATTEMPTS || !code || !TRANSIENT.has(code)) {
+          throw err;
+        }
+        await new Promise<void>((resolve) => setTimeout(resolve, 20 * attempt));
+      }
+    }
   }
 
   /**
