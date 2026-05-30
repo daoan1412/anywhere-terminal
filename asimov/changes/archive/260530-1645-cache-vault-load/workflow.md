@@ -41,17 +41,17 @@
   - [x] Code Review — data-security + logic + frontend + oracle (plan + code). See `.reviews/round-1.md`
 - [x] 6. Findings triage: accept/rebut each finding with rationale — see `.reviews/round-1.md`
 - [x] 7. Review Fix Loop — 1 round: 8 findings accepted+fixed, 1 rebutted; re-verified green
-- [ ] 8. Validation
-  - [ ] **Gate: user approved implementation**
-  - [ ] Extract knowledge
+- [x] 8. Validation
+  - [x] **Gate: user approved implementation** — user approved merge to main + archive (2026-05-30). Post-merge round-2 review (data-security/logic/frontend/oracle, Windows-focused) added: 4 findings fixed (F1 last-known-good on reader failure, F2 validate agents cache, F4 retry-abort race, F-Win Windows mode/rename), 2 deferred. See `.reviews/round-2.md`. Follow-ups on main: manual refresh button + reliable header tooltips.
+  - [x] Extract knowledge — memories saved: rtk stale git status, webview jsdom test isolation, asm CLI in worktrees.
 
 ## Archive
 
-- [ ] Deploy Gate _(skip if `asimov/project.md` § Commands → Deploy is N/A)_:
-  - [ ] Run deploy command
-  - [ ] Run smoke test
-- [ ] Apply deltas: `bun run asm change apply`
-- [ ] Archive change: `bun run asm change archive`
+- [-] Deploy Gate — N/A: `asimov/project.md` § Commands has no Deploy command (E2E also N/A).
+  - [-] Run deploy command
+  - [-] Run smoke test
+- [x] Apply deltas: `bun run asm change apply`
+- [x] Archive change: `bun run asm change archive`
 - [ ] Commit all changes
 
 ## Notes
