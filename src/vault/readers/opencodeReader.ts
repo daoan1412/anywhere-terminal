@@ -8,8 +8,10 @@
 
 import * as os from "node:os";
 import * as path from "node:path";
+import type { ReaderListCache, ReaderResultWithState } from "../cacheTypes";
 import { boundedPreview } from "../preview";
 import { readSqlite } from "../sqlite";
+import { sameStamps, stampStoreFiles } from "../storeStamp";
 import {
   formatEntryId,
   type VaultActivityStep,
@@ -17,7 +19,6 @@ import {
   type VaultSessionEntry,
   type VaultTimelineItem,
 } from "../types";
-import type { ReaderResult } from "./claudeReader";
 import { boundActivity, boundTimeline, MAX_MESSAGE_TEXT, truncate, truncateRich } from "./detail";
 
 /** Bound the read so the vault list stays cheap (D2). */
@@ -137,16 +138,35 @@ function resolveOpencodePaths(options: OpenCodeReaderOptions): {
   return { dbPath: path.join(dataDir, "opencode.db"), readSqliteFn: options.readSqliteFn ?? readSqlite };
 }
 
-export async function readOpenCodeSessions(options: OpenCodeReaderOptions = {}): Promise<ReaderResult> {
+export async function readOpenCodeSessions(
+  options: OpenCodeReaderOptions = {},
+  prev?: ReaderListCache,
+): Promise<ReaderResultWithState> {
   const { dbPath, readSqliteFn } = resolveOpencodePaths(options);
+
+  // Skip the snapshot clone + query when the DB (+ -wal) is unchanged since the
+  // cache was written (cache-vault-load D3). Guarded on a non-empty stamp set so
+  // an absent DB falls through to the query (→ zero entries) rather than reusing {}.
+  const sources = await stampStoreFiles([dbPath, `${dbPath}-wal`]);
+  if (prev?.kind === "store" && Object.keys(sources).length > 0 && sameStamps(prev.sources, sources)) {
+    const u = prev.unreadable ?? 0;
+    return {
+      entries: prev.entries,
+      unreadable: u,
+      cache: { kind: "store", sources, entries: prev.entries, unreadable: u },
+    };
+  }
 
   const result = await readSqliteFn(dbPath, OPENCODE_SESSION_SQL);
 
   if (result.status === "query-error") {
-    return { entries: [], unreadable: 1 };
+    // Cache EMPTY sources so a query-error is retried next refresh, not reused as
+    // an empty success (oracle review).
+    return { entries: [], unreadable: 1, cache: { kind: "store", sources: {}, entries: [], unreadable: 1 } };
   }
   if (result.status !== "ok") {
-    return { entries: [], unreadable: 0 }; // no-db / no-sqlite3 → zero entries
+    // no-db / no-sqlite3 → zero entries; empty sources so the next refresh re-reads.
+    return { entries: [], unreadable: 0, cache: { kind: "store", sources: {}, entries: [], unreadable: 0 } };
   }
 
   const entries: VaultSessionEntry[] = [];
@@ -159,7 +179,7 @@ export async function readOpenCodeSessions(options: OpenCodeReaderOptions = {}):
       unreadable++;
     }
   }
-  return { entries, unreadable };
+  return { entries, unreadable, cache: { kind: "store", sources, entries, unreadable } };
 }
 
 /**

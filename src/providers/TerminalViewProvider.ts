@@ -64,6 +64,13 @@ export class TerminalViewProvider implements vscode.WebviewViewProvider {
   private _lastActivePaneSessionId: string | undefined;
 
   /**
+   * Monotonic token for vault-list refreshes. Bumped per `requestVaultSessions`;
+   * a refresh whose token is stale by the time it resolves is dropped so an
+   * out-of-order refresh never overwrites a newer one (cache-vault-load D7).
+   */
+  private _vaultRefreshSeq = 0;
+
+  /**
    * In-flight hover-preview cancellation tokens, keyed by `sessionId`. A new
    * `requestFilePreview` for the same `sessionId` cancels + disposes the
    * prior entry before starting. Cleared on closeTab / requestCloseSplitPane
@@ -315,23 +322,46 @@ export class TerminalViewProvider implements vscode.WebviewViewProvider {
   }
 
   /**
-   * Re-read the AI agents' on-disk session stores and post the aggregated list.
-   * Source files are the source of truth, so the host caches nothing (D2).
+   * Serve the vault list with stale-while-revalidate (cache-vault-load D1): post
+   * the persisted cache immediately (when present) for an instant render, then
+   * refresh the agents' on-disk stores incrementally and post the reconciled
+   * list. The on-disk stores remain the source of truth — the cache is only an
+   * accelerator. A refresh superseded by a newer request is dropped (D7).
    */
   private async handleRequestVaultSessions(webview: vscode.Webview): Promise<void> {
     if (!this.vaultService) {
       return;
     }
+    const token = ++this._vaultRefreshSeq;
+
+    // Phase 1 — instant render from cache (no store scan). Absent on the first
+    // ever open; then the panel paints immediately on every subsequent open.
+    // Best-effort (NOT retried): a retried cache post could land AFTER the fresh
+    // response and make a stale list win. If the webview isn't ready yet, the
+    // authoritative fresh response below still populates it.
+    const cached = this.vaultService.listCached();
+    if (cached) {
+      this.safePostMessage(webview, { type: "vaultSessionsResponse", result: cached, fromCache: true });
+    }
+
+    // Phase 2 — incremental refresh against the on-disk source of truth.
     try {
-      const result = await this.vaultService.list();
-      void this.safeSendWithRetry(webview, { type: "vaultSessionsResponse", result });
+      const result = await this.vaultService.refresh();
+      if (token !== this._vaultRefreshSeq) {
+        return; // a newer request owns the list now — drop this stale refresh.
+      }
+      void this.safeSendWithRetry(webview, { type: "vaultSessionsResponse", result, fromCache: false });
     } catch (err) {
       console.error("[AnyWhere Terminal] Failed to list vault sessions:", err);
-      void this.safeSendWithRetry(webview, {
-        type: "error",
-        message: err instanceof Error ? err.message : "Failed to list AI vault sessions",
-        severity: "error",
-      });
+      // Don't clobber a successfully-rendered cache with an error notice; only
+      // surface the error when there was nothing to show.
+      if (!cached) {
+        void this.safeSendWithRetry(webview, {
+          type: "error",
+          message: err instanceof Error ? err.message : "Failed to list AI vault sessions",
+          severity: "error",
+        });
+      }
     }
   }
 

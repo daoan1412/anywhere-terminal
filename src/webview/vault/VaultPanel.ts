@@ -28,6 +28,7 @@ import type {
 import { getAgentAccent, getAgentDisplayName, getAgentIcon, VAULT_ACCENTS } from "./agentIcons";
 import { type GroupMode, groupEntries } from "./grouping";
 import { renderMarkdownLite } from "./markdownLite";
+import { entriesSignature } from "./vaultRenderSignature";
 
 /** Every message the panel can post — all webview→host vault messages carry entryId only. */
 export type VaultPanelPostMessage = (
@@ -388,6 +389,10 @@ export class VaultPanel {
   private readonly animateCollapse?: (apply: () => void) => void;
 
   private entries: VaultSessionEntry[] = [];
+  /** Signature of the entries last painted to the DOM. A response whose signature
+   *  matches skips the re-render (cache-vault-load D6) so the cache→fresh refresh
+   *  is invisible when nothing changed, preserving an open preview + scroll. */
+  private lastRenderSig: string | null = null;
   private query = "";
   private collapsed = true;
   /** Whether the inline header search is open. Transient — never persisted. */
@@ -663,6 +668,10 @@ export class VaultPanel {
     // on the collapsed→expanded transition so re-collapsing doesn't fetch and
     // an already-open panel isn't re-fetched on a no-op.
     if (!collapsed && wasCollapsed) {
+      // Drop the render-guard key so the first response after re-expand always
+      // paints, rather than being skipped as "unchanged" against a pre-collapse
+      // signature (the list DOM may have been cleared/altered while hidden).
+      this.lastRenderSig = null;
       this.requestRefresh();
     }
   }
@@ -777,10 +786,49 @@ export class VaultPanel {
     this.postMessage({ type: "requestVaultSessions" });
   }
 
-  /** Render the aggregated result; preserves the current search query. */
+  /**
+   * Render the aggregated result; preserves the current search query. `this.entries`
+   * is ALWAYS updated (so client-side search/filter never operate on stale data),
+   * but the DOM re-render is skipped when the entries are equivalent to what is
+   * already painted (cache-vault-load D6) — the common case for the cache→fresh
+   * refresh — so an open preview, scroll position, and selection are undisturbed.
+   */
   render(result: VaultListResult): void {
     this.entries = result.entries;
+    // Keep the open preview's entry reference live even when the DOM re-render is
+    // skipped below — preview re-render paths (e.g. "show more steps") read
+    // `activePreviewEntry` directly, so a skipped render must not leave it stale.
+    if (this.activePreviewEntryId) {
+      const fresh = result.entries.find((e) => e.id === this.activePreviewEntryId);
+      if (fresh) {
+        this.activePreviewEntry = fresh;
+      }
+    }
+    // Guard on the full rendered projection (entries + the live filter state
+    // renderList consumes). renderList() updates lastRenderSig to match what it
+    // actually painted, so a render triggered by a LOCAL UI change (search /
+    // folder toggle / group mode, which call renderList directly) also refreshes
+    // the key — a later unchanged host response then correctly no-ops instead of
+    // rebuilding the DOM and disturbing scroll + the open preview (D6).
+    if (this.currentSignature() === this.lastRenderSig) {
+      return;
+    }
     this.renderList();
+  }
+
+  /** Signature of the full rendered projection: entries + every input renderList
+   *  consumes (search query, folder-only + the live context cwd it re-pulls,
+   *  group mode). Read by the render() no-op guard; stored by renderList() so the
+   *  key always reflects what is actually on screen (cache-vault-load D6). */
+  private currentSignature(): string {
+    const liveCwd = this.getContextCwd ? this.getContextCwd() : this.contextCwd;
+    return JSON.stringify([
+      entriesSignature(this.entries),
+      this.query,
+      this.folderOnly,
+      liveCwd ?? null,
+      this.groupMode,
+    ]);
   }
 
   private matchesQuery(entry: VaultSessionEntry): boolean {
@@ -878,6 +926,11 @@ export class VaultPanel {
       this.activePreviewRow = row;
       row?.setAttribute("aria-selected", "true");
     }
+
+    // Record what we just painted so the render() guard compares host responses
+    // against the ACTUAL DOM projection — including renders triggered by local UI
+    // changes (search/filter/group), which call renderList directly.
+    this.lastRenderSig = this.currentSignature();
   }
 
   /** "Show N more" affordance that expands a group past the per-group cap. */

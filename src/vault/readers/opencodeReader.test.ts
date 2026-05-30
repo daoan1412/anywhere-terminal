@@ -1,5 +1,7 @@
 // src/vault/readers/opencodeReader.test.ts — Unit tests for the OpenCode reader.
 
+import * as fsp from "node:fs/promises";
+import * as os from "node:os";
 import * as path from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { SqliteResult } from "../sqlite";
@@ -162,5 +164,44 @@ describe("readOpenCodeSessions: data-dir resolution", () => {
     const fn = stubSqlite({ status: "ok", rows: [] });
     await readOpenCodeSessions({ home: "/home/u", readSqliteFn: fn });
     expect(fn.mock.calls[0][0]).toBe(path.join("/custom/xdg", "opencode", "opencode.db"));
+  });
+});
+
+describe("readOpenCodeSessions: incremental store stamp", () => {
+  const dirs: string[] = [];
+  afterEach(async () => {
+    for (const d of dirs.splice(0)) {
+      await fsp.rm(d, { recursive: true, force: true });
+    }
+  });
+
+  async function makeDb(): Promise<string> {
+    const dir = await fsp.mkdtemp(path.join(os.tmpdir(), "vault-oc-inc-"));
+    dirs.push(dir);
+    await fsp.writeFile(path.join(dir, "opencode.db"), "dummy-db-bytes");
+    return dir;
+  }
+
+  it("reuses cached entries without querying when the store is unchanged", async () => {
+    const dir = await makeDb();
+    const fn = stubSqlite({ status: "ok", rows: ROWS });
+    const first = await readOpenCodeSessions({ dataDir: dir, readSqliteFn: fn }, undefined);
+    expect(fn).toHaveBeenCalledTimes(1);
+    expect(first.cache.kind).toBe("store");
+    const firstCount = first.entries.length;
+
+    const second = await readOpenCodeSessions({ dataDir: dir, readSqliteFn: fn }, first.cache);
+    expect(fn).toHaveBeenCalledTimes(1); // unchanged store → no re-query
+    expect(second.entries).toHaveLength(firstCount);
+  });
+
+  it("re-queries when the db mtime changes", async () => {
+    const dir = await makeDb();
+    const fn = stubSqlite({ status: "ok", rows: ROWS });
+    const first = await readOpenCodeSessions({ dataDir: dir, readSqliteFn: fn }, undefined);
+    const future = new Date(Date.now() + 60_000);
+    await fsp.utimes(path.join(dir, "opencode.db"), future, future);
+    await readOpenCodeSessions({ dataDir: dir, readSqliteFn: fn }, first.cache);
+    expect(fn).toHaveBeenCalledTimes(2);
   });
 });

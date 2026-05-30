@@ -22,6 +22,7 @@ import {
 } from "./settings/SettingsReader";
 import { PtyLoadError } from "./types/errors";
 import { escapePathForShell } from "./utils/shellEscape";
+import { VaultCacheStore } from "./vault/VaultCacheStore";
 import { VaultLauncher } from "./vault/VaultLauncher";
 import { VaultService } from "./vault/VaultService";
 
@@ -117,9 +118,14 @@ export function activate(context: vscode.ExtensionContext) {
   context.subscriptions.push(fsWatcherPool);
 
   // AI coding vault — reads the user's existing CLI-agent session stores and
-  // resumes/forks them. Stateless; re-reads on each list() (D2). Shared across
-  // the sidebar + panel providers. See: add-ai-coding-vault design.md.
-  const vaultService = new VaultService();
+  // resumes/forks them. Backed by a persistent list cache under globalStorageUri
+  // so the panel displays instantly on open, then refreshes only changed sources
+  // (cache-vault-load D1/D2). The cache is machine-global (agent stores are not
+  // workspace-scoped), so it uses `globalStorageUri`, not the workspace storageUri.
+  // Shared across the sidebar + panel providers.
+  const vaultCacheStore = new VaultCacheStore(context.globalStorageUri, fs);
+  vaultCacheStore.cleanupOrphanTemps(); // reap temp files orphaned by a prior crash
+  const vaultService = new VaultService({ cacheStore: vaultCacheStore });
   const vaultLauncher = new VaultLauncher(vaultService);
 
   // Sidebar view
