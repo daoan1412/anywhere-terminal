@@ -6,6 +6,7 @@
 
 import { afterEach, describe, expect, it } from "vitest";
 import type { VaultListResult, VaultSessionEntry } from "../../vault/types";
+import { resetTooltipForTests } from "../fileTree/Tooltip";
 import { VaultPanel } from "./VaultPanel";
 
 afterEach(() => {
@@ -14,6 +15,7 @@ afterEach(() => {
   // would otherwise outlive the test), then clear the body so accumulated hosts +
   // stale overlays can't pollute later tests under full-suite scheduling.
   document.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape" }));
+  resetTooltipForTests(); // detach the shared tooltip widget + clear its pending timer
   document.body.replaceChildren();
 });
 
@@ -1298,5 +1300,30 @@ describe("VaultPanel refresh button", () => {
 
     panel.render(result([entry()]), false); // fresh response stops it (also clears the timer)
     expect(btn?.classList.contains("is-refreshing")).toBe(false);
+  });
+});
+
+describe("VaultPanel header tooltips", () => {
+  it("attaches custom tooltips to search + refresh: strips native title, sets aria-describedby", () => {
+    const host = createHost();
+    new VaultPanel({ host, postMessage: () => {} });
+    const searchBtn = host.querySelector<HTMLButtonElement>(".vault-header__search-btn");
+    const refreshBtn = host.querySelector<HTMLButtonElement>(".vault-header__refresh-btn");
+    // Native `title` is unreliable in VSCode webviews → stripped in favor of the
+    // shared custom-tooltip widget, referenced via aria-describedby (WCAG).
+    expect(searchBtn?.hasAttribute("title")).toBe(false);
+    expect(refreshBtn?.hasAttribute("title")).toBe(false);
+    expect(searchBtn?.getAttribute("aria-describedby")).toBe("file-tree-tooltip-widget");
+    expect(refreshBtn?.getAttribute("aria-describedby")).toBe("file-tree-tooltip-widget");
+  });
+
+  it("opening search does not re-introduce a native title (dynamic getText drives the hint)", () => {
+    const host = createHost();
+    const panel = new VaultPanel({ host, postMessage: () => {}, getInitialCollapsed: () => false });
+    const searchBtn = host.querySelector<HTMLButtonElement>(".vault-header__search-btn");
+    searchBtn?.dispatchEvent(new MouseEvent("click", { bubbles: true })); // enter search
+    expect(panel.isCollapsed()).toBe(false);
+    expect(searchBtn?.getAttribute("aria-label")).toBe("Close search");
+    expect(searchBtn?.hasAttribute("title")).toBe(false); // no native tooltip resurrected
   });
 });

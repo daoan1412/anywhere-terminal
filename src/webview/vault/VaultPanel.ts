@@ -25,6 +25,7 @@ import type {
   VaultSessionEntry,
   VaultTimelineItem,
 } from "../../vault/types";
+import { attachTooltip } from "../fileTree/Tooltip";
 import { getAgentAccent, getAgentDisplayName, getAgentIcon, VAULT_ACCENTS } from "./agentIcons";
 import { type GroupMode, groupEntries } from "./grouping";
 import { renderMarkdownLite } from "./markdownLite";
@@ -541,7 +542,6 @@ export class VaultPanel {
     searchBtn.type = "button";
     searchBtn.className = "vault-header__search-btn";
     searchBtn.innerHTML = ICON_SEARCH;
-    searchBtn.title = "Search sessions";
     searchBtn.setAttribute("aria-label", "Search sessions");
     searchBtn.addEventListener("click", (ev) => {
       ev.stopPropagation(); // don't toggle the panel collapse
@@ -557,7 +557,6 @@ export class VaultPanel {
     refreshBtn.type = "button";
     refreshBtn.className = "vault-header__refresh-btn";
     refreshBtn.innerHTML = ICON_REFRESH;
-    refreshBtn.title = "Refresh sessions";
     refreshBtn.setAttribute("aria-label", "Refresh sessions");
     refreshBtn.addEventListener("click", (ev) => {
       ev.stopPropagation();
@@ -567,6 +566,16 @@ export class VaultPanel {
     this.refreshBtnEl = refreshBtn;
 
     header.append(mainRow, searchBar, refreshBtn, searchBtn);
+
+    // Reliable hover/focus tooltips — native `title` doesn't render dependably in
+    // VSCode webviews (see fileTree/Tooltip). `getText` for search so the hint
+    // tracks the open/close toggle WITHOUT a `title` attribute that would
+    // reintroduce the native tooltip. No dispose: the panel lives for the webview's
+    // lifetime (unlike FileTreePanel, it is never rebuilt), so listeners aren't leaked.
+    attachTooltip(searchBtn, {
+      getText: () => (this.searchActive ? "Close search" : "Search sessions by title, folder, or agent"),
+    });
+    attachTooltip(refreshBtn, { text: "Refresh — re-read sessions from disk now" });
 
     // Toolbar: grouping segmented control (left) + "This folder only" (right).
     const toolbar = document.createElement("div");
@@ -736,7 +745,6 @@ export class VaultPanel {
     this.headerMainEl.style.display = "none";
     this.searchBarEl.style.display = "flex";
     this.searchBtnEl.innerHTML = ICON_CLOSE;
-    this.searchBtnEl.title = "Close search";
     this.searchBtnEl.setAttribute("aria-label", "Close search");
     this.searchInput.value = "";
     this.searchInput.focus();
@@ -752,7 +760,6 @@ export class VaultPanel {
     this.searchBarEl.style.display = "none";
     this.headerMainEl.style.display = "";
     this.searchBtnEl.innerHTML = ICON_SEARCH;
-    this.searchBtnEl.title = "Search sessions";
     this.searchBtnEl.setAttribute("aria-label", "Search sessions");
     this.searchInput.value = "";
     if (this.query) {
