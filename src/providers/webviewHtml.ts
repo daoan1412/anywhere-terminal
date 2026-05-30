@@ -2,6 +2,7 @@
 // See: docs/design/webview-provider.md#§4
 
 import * as crypto from "node:crypto";
+import * as fs from "node:fs";
 // Vendored VS Code list-widget CSS — see asimov/changes/port-vscode-async-data-tree/design.md D7.
 // These are inlined into the webview's <style> block at HTML-generation time so that
 // `.monaco-list`, `.monaco-scrollable-element`, etc. resolve in the webview without
@@ -40,8 +41,24 @@ export function getTerminalHtml(
 ): string {
   const nonce = crypto.randomBytes(16).toString("hex");
 
-  // Convert file paths to webview-safe URIs
-  const scriptUri = webview.asWebviewUri(vscode.Uri.joinPath(extensionUri, "media", "webview.js"));
+  // Convert file paths to webview-safe URIs. The script URI carries a `?v=<mtime>`
+  // cache-buster keyed to the bundle's modification time: a webview caches the
+  // resource by URL, so a plain "Reload Window" can keep serving a stale
+  // `webview.js` after a rebuild — the failure mode that hid the new render code
+  // live (DevTools showed 0 rendered nodes against a bundle that renders them).
+  // Keying the query to mtimeMs forces a fresh fetch only when the bundle actually
+  // changes, and still caches when it has not (nest-workflow-team-sessions D11).
+  const scriptPath = vscode.Uri.joinPath(extensionUri, "media", "webview.js");
+  let scriptVersion: string;
+  try {
+    scriptVersion = String(fs.statSync(scriptPath.fsPath).mtimeMs);
+  } catch {
+    scriptVersion = nonce; // bundle unreadable → always-fresh rather than risk staleness
+  }
+  // Append the version as a query in string space (not Uri.with) so it composes
+  // regardless of whether asWebviewUri yields a query already.
+  const baseScriptUri = String(webview.asWebviewUri(scriptPath));
+  const scriptUri = `${baseScriptUri}${baseScriptUri.includes("?") ? "&" : "?"}v=${scriptVersion}`;
   const styleUri = webview.asWebviewUri(vscode.Uri.joinPath(extensionUri, "media", "xterm.css"));
 
   return `<!DOCTYPE html>

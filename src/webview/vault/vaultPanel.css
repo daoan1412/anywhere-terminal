@@ -846,6 +846,13 @@
 .vault-preview-message p {
   margin: 0;
 }
+/* Rich message body container (markdown-lite, D17). Declared here — before the
+   higher-specificity `… .is-clamped … .vault-md` clamp rule below — so source
+   order stays ascending-specificity. */
+.vault-md {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
 .vault-preview-message-role {
   display: flex;
   align-items: center;
@@ -876,8 +883,28 @@
 .vault-preview-message-user .vault-preview-message-role {
   color: var(--vault-user-accent);
 }
-.vault-preview-message-user p {
+.vault-preview-message-user p,
+.vault-preview-message-user .vault-md {
   font-weight: 500;
+}
+/* Inline teammate message (nest-workflow-team-sessions D16): an incoming
+   `<teammate-message>` shown in this transcript. The BLOCK keeps the session's
+   default agent accent (`--vault-user-accent`) like any message — only the SENDER
+   NAME is tinted with the teammate's `--turn-color` (D17 feedback): tinting the
+   whole bubble made these inbound chats hard to tell apart from the collapsible,
+   fully-color-keyed teammate-turn NODES. The literal tag never shows (the reader
+   unwraps it to the clean body); no `overflow:hidden`, so it can't flex-collapse. */
+.vault-preview-message-teammate {
+  border-left-color: var(--vault-user-accent);
+  background: color-mix(in srgb, var(--vault-user-accent) 12%, transparent);
+  border-radius: 0 4px 4px 0;
+  padding-right: 8px;
+}
+.vault-preview-message-teammate .vault-preview-message-role {
+  color: var(--turn-color, var(--vscode-foreground));
+  font-weight: 600;
+  text-transform: none;
+  letter-spacing: 0;
 }
 /* AI output (assistant / thinking / tool / subagent) is indented under the
    user turn it answers, so the conversation reads as user → AI → user. */
@@ -905,11 +932,12 @@
   border-left-color: color-mix(in srgb, var(--vscode-foreground) 14%, transparent);
   color: var(--vscode-descriptionForeground);
 }
-.vault-preview-message-thinking p {
+.vault-preview-message-thinking p,
+.vault-preview-message-thinking .vault-md {
   font-style: italic;
 }
 /* Long thinking is clamped to ~3 lines until expanded. */
-.vault-preview-message-thinking.is-clamped:not(.is-expanded) p {
+.vault-preview-message-thinking.is-clamped:not(.is-expanded) .vault-md {
   display: -webkit-box;
   -webkit-line-clamp: 3;
   line-clamp: 3;
@@ -932,6 +960,94 @@
 .vault-preview-thinking-toggle:focus-visible {
   outline: 1px solid var(--vscode-focusBorder);
   outline-offset: 1px;
+}
+
+/* === Rich message body (markdown-lite, nest-workflow-team-sessions D17) ===
+   The transcript renderer emits these block elements (text via textContent only).
+   Goal: readable structure — line breaks, code, tables — that was lost when every
+   message was collapsed to one line. (`.vault-md` base is declared earlier, by the
+   message rules, to keep specificity ascending.) */
+/* Paragraphs keep their interior line breaks (the core "no line breaks" fix). */
+.vault-md .md-p {
+  margin: 0 0 6px;
+  white-space: pre-wrap;
+}
+.vault-md > .md-p:last-child {
+  margin-bottom: 0;
+}
+/* Headings — bold, slightly larger; scaled gently by level. */
+.vault-md .md-h {
+  margin: 6px 0 3px;
+  font-weight: 600;
+  line-height: 1.3;
+}
+.vault-md .md-h1 {
+  font-size: 1.25em;
+}
+.vault-md .md-h2 {
+  font-size: 1.15em;
+}
+.vault-md .md-h3 {
+  font-size: 1.07em;
+}
+/* Lists — standard indent, tight spacing. */
+.vault-md .md-list {
+  margin: 4px 0;
+  padding-left: 20px;
+}
+.vault-md .md-list li {
+  margin: 1px 0;
+}
+/* Fenced code — monospace, boxed, horizontally scrollable (never reflow code). */
+.vault-md .md-pre {
+  margin: 6px 0;
+  padding: 8px 10px;
+  background: color-mix(
+    in srgb,
+    var(--vscode-textPreformat-background, var(--vscode-editor-background)) 70%,
+    transparent
+  );
+  border: 1px solid var(--vscode-widget-border, color-mix(in srgb, var(--vscode-foreground) 14%, transparent));
+  border-radius: 4px;
+  overflow-x: auto;
+}
+.vault-md .md-pre code {
+  font-family: var(--vscode-editor-font-family, ui-monospace, monospace);
+  font-size: 11px;
+  line-height: 1.45;
+  white-space: pre;
+  color: var(--vscode-textPreformat-foreground, var(--vscode-foreground));
+}
+/* Inline code + bold. */
+.vault-md .md-code-inline {
+  padding: 0 4px;
+  border-radius: 3px;
+  background: color-mix(in srgb, var(--vscode-textPreformat-background, var(--vscode-foreground)) 12%, transparent);
+  font-family: var(--vscode-editor-font-family, ui-monospace, monospace);
+  font-size: 0.92em;
+}
+.vault-md strong {
+  font-weight: 600;
+}
+/* Tables — ruled grid so columns line up (the "kẻ bảng" ask). */
+.vault-md .md-table {
+  margin: 6px 0;
+  border-collapse: collapse;
+  font-size: 11px;
+  display: block;
+  max-width: 100%;
+  overflow-x: auto;
+}
+.vault-md .md-table th,
+.vault-md .md-table td {
+  padding: 3px 8px;
+  border: 1px solid var(--vscode-widget-border, color-mix(in srgb, var(--vscode-foreground) 18%, transparent));
+  text-align: left;
+  vertical-align: top;
+}
+.vault-md .md-table th {
+  font-weight: 600;
+  background: color-mix(in srgb, var(--vscode-foreground) 8%, transparent);
 }
 /* "Show N more steps" — indented to align with the AI run it expands. */
 .vault-preview-expand {
@@ -962,6 +1078,9 @@
   border-radius: 4px;
   background: color-mix(in srgb, var(--vscode-editor-background) 60%, transparent);
   overflow: hidden;
+  /* Same flex-column collapse guard as .vault-preview-teammate: an
+     `overflow: hidden` flex item shrinks to 0 height in a packed column. */
+  flex-shrink: 0;
 }
 .vault-preview-subagent-head {
   display: flex;
@@ -1028,6 +1147,104 @@
   color: var(--vscode-descriptionForeground);
   font-size: 11px;
   font-style: italic;
+}
+
+/* Team-member turn (nest-workflow-team-sessions D13): a prominent, color-keyed
+   node threaded into the leader timeline. The accent is driven by an inline
+   --turn-color (sanitized host/webview-side) and is INTENTIONALLY explicit — not
+   a theme border — so it stays visible under any color theme (the first design
+   failed by leaning on theme vars). */
+.vault-preview-teammate {
+  margin: 4px 0 4px 6px;
+  border-left: 3px solid var(--turn-color, #8b949e);
+  border-radius: 3px;
+  background: color-mix(in srgb, var(--turn-color, #8b949e) 12%, transparent);
+  overflow: hidden;
+  /* The preview body is a flex column; an `overflow: hidden` flex item gets
+     `min-height: auto → 0` and is shrunk to ZERO height when the column is
+     packed (the node rendered as a bare colored line — the real cause of the
+     "teammate node invisible" bug). Refuse to shrink so the node keeps its
+     content height and the body scrolls instead. */
+  flex-shrink: 0;
+}
+.vault-preview-teammate-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  width: 100%;
+  padding: 5px 8px;
+  border: 0;
+  background: transparent;
+  color: var(--vscode-foreground);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+.vault-preview-teammate-head:hover {
+  background: color-mix(in srgb, var(--turn-color, #8b949e) 20%, transparent);
+}
+.vault-preview-teammate-head:focus-visible {
+  outline: 1px solid var(--vscode-focusBorder);
+  outline-offset: -1px;
+}
+.vault-preview-teammate-dot {
+  flex: 0 0 auto;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--turn-color, #8b949e);
+}
+.vault-preview-teammate-name {
+  flex: 0 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-weight: 600;
+  font-size: 11px;
+  color: var(--turn-color, var(--vscode-foreground));
+}
+.vault-preview-teammate-dir {
+  flex: 0 1 auto;
+  min-width: 0;
+  max-width: 40%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 10px;
+  opacity: 0.75;
+}
+.vault-preview-teammate-chevron {
+  flex: 0 0 auto;
+  display: inline-flex;
+  margin-left: auto;
+  color: var(--vscode-icon-foreground, var(--vscode-foreground));
+  opacity: 0.7;
+  transform: rotate(-90deg);
+  transition: transform 120ms ease-out;
+}
+.vault-preview-teammate.is-open .vault-preview-teammate-chevron {
+  transform: rotate(0deg);
+}
+.vault-preview-teammate-preview {
+  margin: 0;
+  padding: 0 8px 6px 22px;
+  color: var(--vscode-descriptionForeground);
+  font-size: 11px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.vault-preview-teammate.is-open .vault-preview-teammate-preview {
+  display: none;
+}
+.vault-preview-teammate-body {
+  display: none;
+  padding: 2px 8px 6px;
+  border-top: 1px solid color-mix(in srgb, var(--turn-color, #8b949e) 30%, transparent);
+}
+.vault-preview-teammate.is-open .vault-preview-teammate-body {
+  display: block;
 }
 .vault-preview-diff-add {
   color: oklch(0.72 0.1 145);

@@ -1,0 +1,2 @@
+{"type":"user","isSidechain":true,"message":{"role":"user","content":"audit doc B for consistency"},"timestamp":"2026-05-29T17:02:00.000Z"}
+{"type":"assistant","isSidechain":true,"message":{"role":"assistant","content":[{"type":"text","text":"doc B is consistent"}]},"timestamp":"2026-05-29T17:03:00.000Z"}

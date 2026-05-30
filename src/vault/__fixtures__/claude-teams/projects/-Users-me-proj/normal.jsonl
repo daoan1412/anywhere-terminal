@@ -1,0 +1,2 @@
+{"type":"user","isSidechain":false,"message":{"role":"user","content":"another normal session"},"cwd":"/Users/me/proj","timestamp":"2026-05-01T00:06:00.000Z"}
+{"type":"assistant","message":{"role":"assistant","model":"claude-opus-4-8","content":[{"type":"text","text":"hi"}]},"timestamp":"2026-05-01T00:07:00.000Z"}

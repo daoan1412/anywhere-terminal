@@ -18,7 +18,7 @@ import {
   type VaultTimelineItem,
 } from "../types";
 import type { ReaderResult } from "./claudeReader";
-import { boundActivity, boundTimeline, MAX_MESSAGE_TEXT, truncate } from "./detail";
+import { boundActivity, boundTimeline, MAX_MESSAGE_TEXT, truncate, truncateRich } from "./detail";
 
 /** Bound the read so the vault list stays cheap (D2). */
 const ROW_LIMIT = 500;
@@ -341,7 +341,7 @@ export function mapOpencodeRows(
       latestMessage = { role, text: truncate(text), timestamp: m.timeCreated };
       tl.push({
         ts: m.timeCreated,
-        item: { kind: "message", role, text: truncate(text, MAX_MESSAGE_TEXT), timestamp: m.timeCreated },
+        item: { kind: "message", role, text: truncateRich(text, MAX_MESSAGE_TEXT), timestamp: m.timeCreated },
       });
     }
   }
@@ -376,7 +376,7 @@ export function mapOpencodeRows(
     } else if (type === "reasoning") {
       const t = strField(p.data.text);
       if (t) {
-        tl.push({ ts: p.timeCreated, item: { kind: "thinking", text: truncate(t, MAX_MESSAGE_TEXT) } });
+        tl.push({ ts: p.timeCreated, item: { kind: "thinking", text: truncateRich(t, MAX_MESSAGE_TEXT) } });
       }
     }
   }

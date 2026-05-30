@@ -1,0 +1,4 @@
+{"type":"user","isSidechain":false,"teamName":"review-team","agentName":"reviewer-b","message":{"role":"user","content":"<teammate-message teammate_id=\"team-lead\">also review</teammate-message>"},"cwd":"/Users/me/proj","timestamp":"2026-05-01T00:04:00.000Z"}
+{"type":"assistant","teamName":"review-team","agentName":"reviewer-b","message":{"role":"assistant","model":"claude-opus-4-8","content":[{"type":"text","text":"on it"}]},"timestamp":"2026-05-01T00:05:00.000Z"}
+{"type":"user","isSidechain":false,"teamName":"review-team","agentName":"reviewer-b","message":{"role":"user","content":"<teammate-message teammate_id=\"reviewer-a\">can you check the auth path?</teammate-message>"},"cwd":"/Users/me/proj","timestamp":"2026-05-01T00:05:30.000Z"}
+{"type":"assistant","teamName":"review-team","agentName":"reviewer-b","message":{"role":"assistant","model":"claude-opus-4-8","content":[{"type":"text","text":"sure, checking auth"}]},"timestamp":"2026-05-01T00:05:45.000Z"}

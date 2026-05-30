@@ -179,6 +179,42 @@ export type VaultTimelineItem =
       agent?: string;
       timestamp?: number;
     }
+  /**
+   * One communication turn of a team member, threaded into the leader's timeline
+   * (nest-workflow-team-sessions D13). Unlike a one-shot `subagentSession`, a
+   * teammate recurs once per turn and carries direction + color: `from` is
+   * `"leader"` or a peer member name, `color` drives a highlighted accent, and
+   * `entryId` is the view-only `claude:<memberId>:turn:<n>` segment opened on
+   * click. `preview` is the bounded incoming-message text. Structured-clone-safe
+   * across postMessage; the webview renders it via a dedicated highlighted node.
+   */
+  | {
+      kind: "teammateTurn";
+      entryId: string;
+      agentName: string;
+      color?: string;
+      from: string;
+      preview: string;
+      timestamp: number;
+    }
+  /**
+   * An inline teammate communication appearing in THIS transcript: an incoming
+   * `<teammate-message …>` record (a member's reply delivered to the leader, or
+   * the leader's request shown in a member transcript). Stored on disk as a plain
+   * `user` record, so without this it renders as a raw, mislabeled "USER" bubble
+   * showing the literal tag (nest-workflow-team-sessions D16). Unlike the
+   * collapsible `teammateTurn` node, this carries the FULL body inline (bounded) —
+   * `agentName` is the sender, `from` (`"leader"`/`"peer"`) the direction, `color`
+   * the accent. View-only: no `entryId`, never launchable.
+   */
+  | {
+      kind: "teammateMessage";
+      agentName: string;
+      color?: string;
+      from: string;
+      text: string;
+      timestamp?: number;
+    }
   | VaultActivityStep;
 
 /**

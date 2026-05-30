@@ -1,0 +1,2 @@
+{"type":"user","isSidechain":false,"teamName":"review-team","agentName":"reviewer-a","message":{"role":"user","content":"<teammate-message teammate_id=\"team-lead\">review this</teammate-message>"},"cwd":"/Users/me/proj","timestamp":"2026-05-01T00:02:00.000Z"}
+{"type":"assistant","teamName":"review-team","agentName":"reviewer-a","message":{"role":"assistant","model":"claude-opus-4-8","content":[{"type":"text","text":"reviewing"}]},"timestamp":"2026-05-01T00:03:00.000Z"}

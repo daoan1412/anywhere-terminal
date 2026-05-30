@@ -1,0 +1,2 @@
+{"type":"user","isSidechain":false,"teamName":"wf-review","agentName":"wf-reviewer","message":{"role":"user","content":"<teammate-message teammate_id=\"team-lead\">review the audit</teammate-message>"},"cwd":"/Users/me/wf","timestamp":"2026-05-29T17:12:00.000Z"}
+{"type":"assistant","teamName":"wf-review","agentName":"wf-reviewer","message":{"role":"assistant","model":"claude-opus-4-8","content":[{"type":"text","text":"reviewed the audit"}]},"timestamp":"2026-05-29T17:13:00.000Z"}

@@ -127,6 +127,15 @@ export interface ClaudeChildStub {
   firstMessage?: string;
   /** First-record timestamp (placement fallback for unmatched stubs). */
   timestamp?: number;
+  /**
+   * Render this nested node TITLE-ONLY: use `description` as the title and omit
+   * the `@<agent>` chip (nest-workflow-team-sessions D8). Set for synthetic
+   * workflow/team GROUP nodes and for their synthesized children (workflow
+   * agents, team members), whose `description` already carries the full label —
+   * so they don't inherit the `"subagent"` agent fallback. Unset (false) for real
+   * subagents, which keep their `@<agentType>` prefix.
+   */
+  isGroup?: boolean;
 }
 
 export interface ClassifyOptions {
@@ -137,6 +146,15 @@ export interface ClassifyOptions {
   includeSidechain?: boolean;
   /** Sub-sessions to fold in at their spawning `Agent`/`Task` call. */
   childStubs?: ClaudeChildStub[];
+  /**
+   * Optional team-tag parser (nest-workflow-team-sessions D16). When a `user`
+   * record's RAW text is an incoming `<teammate-message …>`, this returns the
+   * sender + clean body so it is emitted as a `teammateMessage` timeline item
+   * instead of a generic user message bearing the literal tag. Injected by the
+   * Claude reader (which owns `parseTeammateTag`) — keeps this generic classifier
+   * decoupled from the team concept; absent → the old plain-message behavior.
+   */
+  teammateMessage?: (rawText: string) => { agentName: string; from: string; color?: string; body: string } | null;
 }
 
 /** Result of classifying a transcript — `readDetail` adds `entryId`. */
@@ -175,6 +193,25 @@ export function finalizeDetail(
 export function truncate(text: string, max = MAX_DETAIL_TEXT): string {
   const oneLine = text.replace(/\s+/g, " ").trim();
   return oneLine.length > max ? `${oneLine.slice(0, max)}…` : oneLine;
+}
+
+/**
+ * Like {@link truncate} but PRESERVES the message's block structure for the rich
+ * preview renderer (D17): line breaks, code indentation, and table alignment all
+ * survive. Only normalizes line endings, strips per-line trailing whitespace, and
+ * caps runaway blank-line runs — never collapses interior spaces. Length-capped
+ * with an ellipsis like `truncate`. Use for full-transcript message/thinking
+ * bodies; keep `truncate` for compact single-line previews (titles, latest, tool
+ * labels).
+ */
+export function truncateRich(text: string, max = MAX_MESSAGE_TEXT): string {
+  const normalized = text
+    .replace(/\r\n?/g, "\n") // CRLF / CR → LF
+    .replace(/[ \t]+$/gm, "") // drop per-line trailing whitespace
+    .replace(/\n{3,}/g, "\n\n") // cap long blank-line runs
+    .replace(/^\n+/, "")
+    .replace(/\n+$/, "");
+  return normalized.length > max ? `${normalized.slice(0, max)}…` : normalized;
 }
 
 /** Keep only the most-recent `max` steps (the tail). */
@@ -232,11 +269,30 @@ const COMMAND_ARGS_RE = /<command-args>([\s\S]*?)<\/command-args>/;
  * (`<command-name>/foo</command-name><command-args>…`). A bare slash command
  * (`/clear`, `/compact`) carries no prompt, so it's dropped and the next real
  * message wins; a command WITH args surfaces those args (the real intent).
+ *
+ * The wrapper detection is anchored with `startsWith`, NOT a loose `includes`:
+ * a real command record IS the wrapper (it starts with it), whereas a genuine
+ * human prompt that merely *mentions* `<command-message>` / `<command-name>`
+ * (e.g. a meta-prompt about Claude commands, or a pasted transcript) must be
+ * kept verbatim — an `includes` check silently dropped such prompts whole.
  */
 export function cleanPromptText(raw: string): string | undefined {
   const t = raw.trim();
   if (!t) {
     return undefined;
+  }
+  // An incoming team message wraps the real text in `<teammate-message …>BODY
+  // </teammate-message>`. Surface BODY only — the tag is plumbing the human never
+  // typed, so a member's title/first-prompt reads as the instruction, not markup
+  // (D16). ReDoS-safe: anchored `[^>]*` (no backtracking) + indexOf for the close.
+  if (t.startsWith("<teammate-message")) {
+    const open = /^<teammate-message\b[^>]*>/.exec(t);
+    if (open) {
+      const after = t.slice(open[0].length);
+      const closeAt = after.indexOf("</teammate-message>");
+      const body = (closeAt >= 0 ? after.slice(0, closeAt) : after).trim();
+      return body || undefined;
+    }
   }
   if (
     t.startsWith("<local-command-caveat>") ||
@@ -245,7 +301,7 @@ export function cleanPromptText(raw: string): string | undefined {
   ) {
     return undefined; // injected banner / command output — never a prompt
   }
-  if (t.includes("<command-name>") || t.includes("<command-message>")) {
+  if (t.startsWith("<command-name>") || t.startsWith("<command-message>")) {
     const name = COMMAND_NAME_RE.exec(t)?.[1]?.trim() ?? "";
     const args = COMMAND_ARGS_RE.exec(t)?.[1]?.trim() ?? "";
     if (!args) {
@@ -344,6 +400,27 @@ export function classifyClaudeStyleEvents(records: Rec[], opts: ClassifyOptions 
 
     if (type === "user") {
       const raw = extractText(content);
+      // An incoming teammate communication is stored as a `user` record wrapping
+      // a `<teammate-message …>` tag. Surface it as a distinct, color-keyed
+      // teammate message (clean body + sender) rather than a raw "USER" bubble
+      // showing the literal tag (D16). Runs on the RAW text, before the
+      // command-wrapper stripping `cleanPromptText` would mangle the tag.
+      const tm = raw && opts.teammateMessage ? opts.teammateMessage(raw) : null;
+      if (tm?.body) {
+        messageCount++;
+        const ts = parseTimestamp(rec);
+        const text = truncateRich(tm.body, MAX_MESSAGE_TEXT);
+        latestMessage = { role: "user", text: truncate(tm.body), timestamp: ts };
+        timeline.push({
+          kind: "teammateMessage",
+          agentName: tm.agentName,
+          ...(tm.color ? { color: tm.color } : {}),
+          from: tm.from,
+          text,
+          timestamp: ts,
+        });
+        continue;
+      }
       const text = raw ? cleanPromptText(raw) : undefined;
       if (text) {
         messageCount++;
@@ -352,7 +429,7 @@ export function classifyClaudeStyleEvents(records: Rec[], opts: ClassifyOptions 
         }
         const ts = parseTimestamp(rec);
         latestMessage = { role: "user", text: truncate(text), timestamp: ts };
-        timeline.push({ kind: "message", role: "user", text: truncate(text, MAX_MESSAGE_TEXT), timestamp: ts });
+        timeline.push({ kind: "message", role: "user", text: truncateRich(text, MAX_MESSAGE_TEXT), timestamp: ts });
       }
       // A pure tool_result user message has no text → not a message, not
       // first/latest, and never an activity step (tool plumbing, D6).
@@ -377,12 +454,17 @@ export function classifyClaudeStyleEvents(records: Rec[], opts: ClassifyOptions 
         if (block.type === "text" && typeof block.text === "string") {
           const t = (block.text as string).trim();
           if (t) {
-            timeline.push({ kind: "message", role: "assistant", text: truncate(t, MAX_MESSAGE_TEXT), timestamp: ts });
+            timeline.push({
+              kind: "message",
+              role: "assistant",
+              text: truncateRich(t, MAX_MESSAGE_TEXT),
+              timestamp: ts,
+            });
           }
         } else if (block.type === "thinking" && typeof block.thinking === "string") {
           const t = (block.thinking as string).trim();
           if (t) {
-            timeline.push({ kind: "thinking", text: truncate(t, MAX_MESSAGE_TEXT), timestamp: ts });
+            timeline.push({ kind: "thinking", text: truncateRich(t, MAX_MESSAGE_TEXT), timestamp: ts });
           }
         } else if (block.type === "tool_use") {
           const name = str(block.name) ?? "tool";
@@ -426,7 +508,7 @@ export function classifyClaudeStyleEvents(records: Rec[], opts: ClassifyOptions 
         }
       }
     } else if (text) {
-      timeline.push({ kind: "message", role: "assistant", text: truncate(text, MAX_MESSAGE_TEXT), timestamp: ts });
+      timeline.push({ kind: "message", role: "assistant", text: truncateRich(text, MAX_MESSAGE_TEXT), timestamp: ts });
     }
 
     const usage = asObj(msg.usage);
@@ -488,35 +570,48 @@ function timelineTimestamp(item: VaultTimelineItem): number | undefined {
 }
 
 /**
- * Stable linear merge of unmatched child stubs into the already-ordered parent
- * timeline by timestamp. Each timestamped item flushes any pending stub older
- * than it first; leftover stubs append at the end. Items with no timestamp
- * (bare tool/subagent steps) don't trigger placement. Keeps the parent
- * transcript order intact (W6).
+ * Stable linear merge of timestamped `extra` items into an already-ordered
+ * `timeline` by timestamp. Each timestamped base item flushes any pending extra
+ * older than it first; leftover extras append at the end. Base items with no
+ * timestamp (bare tool/subagent steps) don't trigger placement, so the base
+ * transcript order is kept intact (W6). `extra` is sorted by timestamp here, so
+ * callers may pass it unordered.
+ */
+export function mergeTimestampedItems(timeline: VaultTimelineItem[], extra: VaultTimelineItem[]): VaultTimelineItem[] {
+  if (extra.length === 0) {
+    return timeline;
+  }
+  const sorted = [...extra].sort((a, b) => (timelineTimestamp(a) ?? 0) - (timelineTimestamp(b) ?? 0));
+  const merged: VaultTimelineItem[] = [];
+  let i = 0;
+  for (const item of timeline) {
+    const ts = timelineTimestamp(item);
+    while (ts !== undefined && i < sorted.length && (timelineTimestamp(sorted[i]) ?? 0) < ts) {
+      merged.push(sorted[i++]);
+    }
+    merged.push(item);
+  }
+  while (i < sorted.length) {
+    merged.push(sorted[i++]);
+  }
+  return merged;
+}
+
+/**
+ * Merge unmatched child stubs (each → a `subagentSession`) into the parent
+ * timeline by timestamp — a thin wrapper over {@link mergeTimestampedItems}.
  */
 function mergeUnmatchedStubs(timeline: VaultTimelineItem[], stubs: ClaudeChildStub[]): VaultTimelineItem[] {
   if (stubs.length === 0) {
     return timeline;
   }
-  const unmatched = stubs
-    .map((stub) => stubToItem(stub, stub.agentType ?? "subagent", undefined, stub.timestamp))
-    .sort((a, b) => (timelineTimestamp(a) ?? 0) - (timelineTimestamp(b) ?? 0));
-  const merged: VaultTimelineItem[] = [];
-  let stubIndex = 0;
-  for (const item of timeline) {
-    const ts = timelineTimestamp(item);
-    while (ts !== undefined && stubIndex < unmatched.length && (timelineTimestamp(unmatched[stubIndex]) ?? 0) < ts) {
-      merged.push(unmatched[stubIndex++]);
-    }
-    merged.push(item);
-  }
-  while (stubIndex < unmatched.length) {
-    merged.push(unmatched[stubIndex++]);
-  }
-  return merged;
+  const items = stubs.map((stub) => stubToItem(stub, stub.agentType ?? "subagent", undefined, stub.timestamp));
+  return mergeTimestampedItems(timeline, items);
 }
 
-/** Build a `subagentSession` timeline item from a matched stub + spawn call. */
+/** Build a `subagentSession` timeline item from a matched stub + spawn call. A
+ *  group/synthesized node (`stub.isGroup`) renders title-only: its `description`
+ *  is the title and the `@<agent>` chip is omitted (D8). */
 function stubToItem(
   stub: ClaudeChildStub,
   agentType: string,
@@ -524,12 +619,50 @@ function stubToItem(
   ts: number | undefined,
 ): VaultTimelineItem {
   const firstMessage = stub.firstMessage ?? prompt;
+  const agent = stub.isGroup ? undefined : (stub.agentType ?? agentType);
   return {
     kind: "subagentSession",
     entryId: stub.entryId,
     title: stub.description || agentType,
     ...(firstMessage ? { firstMessage: truncate(firstMessage) } : {}),
-    ...(stub.agentType || agentType ? { agent: stub.agentType ?? agentType } : {}),
+    ...(agent ? { agent } : {}),
     ...(ts !== undefined ? { timestamp: ts } : {}),
   };
+}
+
+/**
+ * Assemble a synthetic group detail (nest-workflow-team-sessions D1/D8): a
+ * `VaultSessionDetail` whose `timeline` is one nested `subagentSession` per
+ * `child` stub — used to resolve a workflow / team GROUP id into its members,
+ * which the webview then renders (and lazily expands) through the SAME recursive
+ * path as any nested session. No conversation of its own → empty
+ * `recentActivity`; `subagentCount` is the descendant count for the group label.
+ */
+export function synthesizeGroupDetail(
+  entryId: string,
+  children: ClaudeChildStub[],
+  opts: { firstPrompt?: string; subagentCount: number; limit?: number },
+): VaultSessionDetail {
+  const items: VaultTimelineItem[] = children.map((c) =>
+    stubToItem(c, c.agentType ?? "subagent", undefined, c.timestamp),
+  );
+  // Bound the synthetic timeline like any other detail (review W4) so a group
+  // with very many children can't ship an unbounded payload over IPC. A group is
+  // NON-pageable in the nested renderer (review N2): the cap is MAX_TIMELINE_ITEMS
+  // (400) — far above any realistic workflow (~30) / team (a handful), so it never
+  // truncates in practice — and the group NODE label always states the TRUE total
+  // count, so the rare >cap case is still surfaced (not silently hidden). Nested
+  // load-more would require a webview change, which D1 forbids (host-only change).
+  const bounded = boundTimeline(items, opts.limit ?? MAX_TIMELINE_ITEMS);
+  return finalizeDetail(
+    entryId,
+    {
+      ...(opts.firstPrompt ? { firstPrompt: truncate(opts.firstPrompt) } : {}),
+      recentActivity: [],
+      timeline: bounded.timeline,
+      ...(bounded.truncated ? { truncated: true } : {}),
+      stats: { messageCount: 0, toolCount: 0, subagentCount: opts.subagentCount },
+    },
+    false,
+  );
 }

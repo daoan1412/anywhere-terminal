@@ -524,14 +524,174 @@ describe("VaultPanel session preview (redesign 5_2)", () => {
       entryId: "claude:a",
       detail: detail({ timeline: [{ kind: "message", role: "user", text: "go", timestamp: 1 }, ...tools] }),
     });
-    // The run of 7 tool steps is capped at 5 + a "Show 2 more steps" button.
-    expect(host.querySelectorAll(".vault-preview-message-tool")).toHaveLength(5);
+    // The run of 7 tool steps is capped at 3 + a "Show 4 more steps" button (D10).
+    expect(host.querySelectorAll(".vault-preview-message-tool")).toHaveLength(3);
     const more = host.querySelector<HTMLButtonElement>(".vault-preview-expand");
-    expect(more?.textContent).toBe("Show 2 more steps");
+    expect(more?.textContent).toBe("Show 4 more steps");
     more?.click();
     // Expanded in place: all 7 shown, button gone (no jump-to-top re-render artifact).
     expect(host.querySelectorAll(".vault-preview-message-tool")).toHaveLength(7);
     expect(host.querySelector(".vault-preview-expand")).toBeNull();
+  });
+
+  it("renders a nested sub-session node directly mid-run, never behind the step cap (D10)", () => {
+    const host = createHost();
+    const panel = new VaultPanel({ host, postMessage: () => {}, getInitialCollapsed: () => false });
+    panel.render(result([entry({ id: "claude:a" })]));
+    host.querySelector<HTMLElement>(".vault-row")?.click();
+    // A team GROUP node buried after 6 tool steps inside ONE run (no intervening
+    // user message). Pre-D10 the whole run capped at 5 → the group (run index 6)
+    // was sliced off and never entered the DOM. Now it breaks the run.
+    const toolsBefore = Array.from(
+      { length: 6 },
+      (_, i) => ({ kind: "tool", tool: "Read", detail: `/before${i}.ts` }) as const,
+    );
+    const toolsAfter = Array.from(
+      { length: 6 },
+      (_, i) => ({ kind: "tool", tool: "Read", detail: `/after${i}.ts` }) as const,
+    );
+    panel.handleSessionDetailResponse({
+      type: "vaultSessionDetailResponse",
+      entryId: "claude:a",
+      detail: detail({
+        timeline: [
+          { kind: "message", role: "user", text: "go", timestamp: 1 },
+          ...toolsBefore,
+          { kind: "subagentSession", entryId: "claude:a:team:arco", title: "Team: arco · 4 members" },
+          ...toolsAfter,
+        ],
+      }),
+    });
+    // The group node is in the DOM (visible), not hidden behind a "Show N more".
+    const group = host.querySelector(".vault-preview-subagent-title");
+    expect(group?.textContent).toBe("Team: arco · 4 members");
+    // It broke the run into two still-independently-capped halves (6 → 3 + "Show 3 more").
+    expect(host.querySelectorAll(".vault-preview-expand")).toHaveLength(2);
+  });
+
+  it("renders a teammateTurn as a highlighted node that breaks the run and opens its segment (D13)", () => {
+    const host = createHost();
+    const posted: { type: string; entryId?: string }[] = [];
+    const panel = new VaultPanel({ host, postMessage: (m) => posted.push(m), getInitialCollapsed: () => false });
+    panel.render(result([entry({ id: "claude:a" })]));
+    host.querySelector<HTMLElement>(".vault-row")?.click();
+    const before = Array.from({ length: 4 }, (_, i) => ({ kind: "tool", tool: "Read", detail: `/b${i}.ts` }) as const);
+    const after = Array.from({ length: 4 }, (_, i) => ({ kind: "tool", tool: "Read", detail: `/a${i}.ts` }) as const);
+    panel.handleSessionDetailResponse({
+      type: "vaultSessionDetailResponse",
+      entryId: "claude:a",
+      detail: detail({
+        timeline: [
+          { kind: "message", role: "user", text: "go", timestamp: 1 },
+          ...before,
+          {
+            kind: "teammateTurn",
+            entryId: "claude:m:turn:0",
+            agentName: "usdg",
+            color: "blue",
+            from: "leader",
+            preview: "do the USDg estimate",
+            timestamp: 2,
+          },
+          ...after,
+        ],
+      }),
+    });
+    // The teammate node is visible (not swept into a capped run) and highlighted.
+    const node = host.querySelector<HTMLElement>(".vault-preview-teammate");
+    expect(node).not.toBeNull();
+    expect(host.querySelector(".vault-preview-teammate-name")?.textContent).toBe("@usdg");
+    expect(host.querySelector(".vault-preview-teammate-dir")?.textContent).toBe("⟵ leader");
+    expect(host.querySelector(".vault-preview-teammate-preview")?.textContent).toBe("do the USDg estimate");
+    // Color sanitized to a concrete CSS value (NOT a theme var that can vanish).
+    expect(node?.style.getPropertyValue("--turn-color")).toBe("#4aa3ff");
+    // It broke the surrounding 4+4 tool run into two independently-capped halves.
+    expect(host.querySelectorAll(".vault-preview-expand")).toHaveLength(2);
+    // Clicking lazily fetches THIS turn's segment by its view-only :turn: id.
+    host.querySelector<HTMLButtonElement>(".vault-preview-teammate-head")?.click();
+    expect(node?.classList.contains("is-open")).toBe(true);
+    expect(posted).toContainEqual({ type: "requestVaultSessionDetail", entryId: "claude:m:turn:0" });
+  });
+
+  it("renders a peer-DM teammateTurn with the peer name as direction + neutral fallback color", () => {
+    const host = createHost();
+    const panel = new VaultPanel({ host, postMessage: () => {}, getInitialCollapsed: () => false });
+    panel.render(result([entry({ id: "claude:a" })]));
+    host.querySelector<HTMLElement>(".vault-row")?.click();
+    panel.handleSessionDetailResponse({
+      type: "vaultSessionDetailResponse",
+      entryId: "claude:a",
+      detail: detail({
+        timeline: [
+          {
+            kind: "teammateTurn",
+            entryId: "claude:m:turn:1",
+            agentName: "reviewer-b",
+            from: "reviewer-a",
+            preview: "check the auth path",
+            timestamp: 3,
+          },
+        ],
+      }),
+    });
+    expect(host.querySelector(".vault-preview-teammate-dir")?.textContent).toBe("⟵ reviewer-a");
+    // No color supplied → neutral fallback, still a concrete value (never a theme var).
+    expect(host.querySelector<HTMLElement>(".vault-preview-teammate")?.style.getPropertyValue("--turn-color")).toBe(
+      "#8b949e",
+    );
+  });
+
+  it("renders an inbound teammateMessage as a color-keyed message (clean body, sender label), not a raw USER bubble (D16)", () => {
+    const host = createHost();
+    const panel = new VaultPanel({ host, postMessage: () => {}, getInitialCollapsed: () => false });
+    panel.render(result([entry({ id: "claude:a" })]));
+    host.querySelector<HTMLElement>(".vault-row")?.click();
+    panel.handleSessionDetailResponse({
+      type: "vaultSessionDetailResponse",
+      entryId: "claude:a",
+      detail: detail({
+        timeline: [
+          {
+            kind: "teammateMessage",
+            agentName: "reviewer-a",
+            color: "blue",
+            from: "peer",
+            text: "found 2 issues in the auth path",
+            timestamp: 6,
+          },
+        ],
+      }),
+    });
+    const node = host.querySelector<HTMLElement>(".vault-preview-message-teammate");
+    expect(node).not.toBeNull();
+    // Sender label (an @teammate), never the generic "User" role.
+    expect(node?.querySelector(".vault-preview-message-role")?.textContent).toContain("@reviewer-a");
+    expect(node?.querySelector(".vault-preview-message-role")?.textContent).not.toContain("User");
+    // Clean body — the literal tag never appears in the DOM.
+    expect(node?.querySelector("p")?.textContent).toBe("found 2 issues in the auth path");
+    expect(host.innerHTML).not.toContain("&lt;teammate-message");
+    expect(host.innerHTML).not.toContain("<teammate-message");
+    // Color sanitized to a concrete value.
+    expect(node?.style.getPropertyValue("--turn-color")).toBe("#4aa3ff");
+  });
+
+  it("a leader-sent teammateMessage shows '⟵ leader' rather than @team-lead", () => {
+    const host = createHost();
+    const panel = new VaultPanel({ host, postMessage: () => {}, getInitialCollapsed: () => false });
+    panel.render(result([entry({ id: "claude:a" })]));
+    host.querySelector<HTMLElement>(".vault-row")?.click();
+    panel.handleSessionDetailResponse({
+      type: "vaultSessionDetailResponse",
+      entryId: "claude:a",
+      detail: detail({
+        timeline: [
+          { kind: "teammateMessage", agentName: "team-lead", from: "leader", text: "review this", timestamp: 2 },
+        ],
+      }),
+    });
+    expect(host.querySelector(".vault-preview-message-teammate .vault-preview-message-role")?.textContent).toContain(
+      "⟵ leader",
+    );
   });
 
   it("renders the full conversation timeline in order, via textContent", () => {
@@ -562,6 +722,29 @@ describe("VaultPanel session preview (redesign 5_2)", () => {
     expect(host.querySelector(".vault-preview-message-tool")?.textContent).toContain("/a.ts");
     expect(host.querySelector(".vault-preview-message-assistant p")?.textContent).toBe("all done");
     expect(host.querySelector(".vault-preview-meta")?.textContent).toContain("1.6k tok");
+  });
+
+  it("renders an assistant message as rich markdown — line breaks, a table, and a code block (D17)", () => {
+    const host = createHost();
+    const panel = new VaultPanel({ host, postMessage: () => {}, getInitialCollapsed: () => false });
+    panel.render(result([entry({ id: "claude:a" })]));
+    host.querySelector<HTMLElement>(".vault-row")?.click();
+    const md =
+      "Summary:\n- point one\n- point two\n\n| Task | Hours |\n| --- | --- |\n| A | 12 |\n\n```ts\nconst x = 1;\n```";
+    panel.handleSessionDetailResponse({
+      type: "vaultSessionDetailResponse",
+      entryId: "claude:a",
+      detail: detail({ timeline: [{ kind: "message", role: "assistant", text: md, timestamp: Date.now() }] }),
+    });
+    const body = host.querySelector(".vault-preview-message-assistant .vault-md");
+    expect(body).not.toBeNull();
+    // Bullet list rendered as a real <ul>.
+    expect(body?.querySelectorAll("ul.md-list li")).toHaveLength(2);
+    // Markdown table rendered as a real grid.
+    expect(Array.from(body?.querySelectorAll("thead th") ?? []).map((th) => th.textContent)).toEqual(["Task", "Hours"]);
+    expect(body?.querySelector("tbody td")?.textContent).toBe("A");
+    // Fenced code preserved verbatim in a <pre><code>.
+    expect(body?.querySelector("pre.md-pre code")?.textContent).toBe("const x = 1;");
   });
 
   it("renders only what the timeline contains (no empty filler)", () => {
@@ -742,7 +925,7 @@ describe("VaultPanel session preview (redesign 5_2)", () => {
     expect(host.querySelector(".vault-preview-body")?.textContent).toContain("older");
   });
 
-  it("caps an AI run at 5 items behind a 'Show N more' that expands in place", () => {
+  it("caps an AI run at 3 items behind a 'Show N more' that expands in place", () => {
     const host = createHost();
     const panel = new VaultPanel({ host, postMessage: () => {}, getInitialCollapsed: () => false });
     panel.render(result([entry({ id: "claude:a" })]));
@@ -753,10 +936,10 @@ describe("VaultPanel session preview (redesign 5_2)", () => {
       entryId: "claude:a",
       detail: detail({ timeline: [{ kind: "message", role: "user", text: "go" }, ...tools] }),
     });
-    // user message + first 5 tools = 6 messages, plus the expand button.
-    expect(host.querySelectorAll(".vault-preview-body .vault-preview-message")).toHaveLength(6);
+    // user message + first 3 tools = 4 messages, plus the expand button.
+    expect(host.querySelectorAll(".vault-preview-body .vault-preview-message")).toHaveLength(4);
     const more = host.querySelector<HTMLButtonElement>(".vault-preview-expand");
-    expect(more?.textContent).toBe("Show 3 more steps");
+    expect(more?.textContent).toBe("Show 5 more steps");
     more?.click();
     expect(host.querySelectorAll(".vault-preview-body .vault-preview-message")).toHaveLength(9);
     expect(host.querySelector(".vault-preview-expand")).toBeNull();
@@ -852,6 +1035,31 @@ describe("VaultPanel session preview (redesign 5_2)", () => {
     expect(host.querySelector(".vault-preview-subagent-body .vault-preview-message")).not.toBeNull();
     head()?.click(); // collapse
     expect(host.querySelector(".vault-preview-subagent")?.classList.contains("is-open")).toBe(false);
+    expect(host.querySelector(".vault-preview-subagent-body .vault-preview-message")).toBeNull();
+  });
+
+  it("collapsing mid-load drops the pending request so a late response can't populate the hidden body (R4)", () => {
+    const host = createHost();
+    const panel = new VaultPanel({ host, postMessage: () => {}, getInitialCollapsed: () => false });
+    panel.render(result([entry({ id: "opencode:a", agent: "opencode" })]));
+    host.querySelector<HTMLElement>(".vault-row")?.click();
+    panel.handleSessionDetailResponse({
+      type: "vaultSessionDetailResponse",
+      entryId: "opencode:a",
+      detail: detail({
+        entryId: "opencode:a",
+        timeline: [{ kind: "subagentSession", entryId: "opencode:ses_kid", title: "Sub" }],
+      }),
+    });
+    const head = () => host.querySelector<HTMLButtonElement>(".vault-preview-subagent-head");
+    head()?.click(); // expand → request in flight (no response yet)
+    head()?.click(); // collapse BEFORE the response arrives
+    // A late nested response must be ignored — the body stays empty, not rehydrated.
+    panel.handleSessionDetailResponse({
+      type: "vaultSessionDetailResponse",
+      entryId: "opencode:ses_kid",
+      detail: detail({ entryId: "opencode:ses_kid", timeline: [{ kind: "message", role: "user", text: "late" }] }),
+    });
     expect(host.querySelector(".vault-preview-subagent-body .vault-preview-message")).toBeNull();
   });
 

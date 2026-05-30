@@ -11,8 +11,10 @@ import {
   MAX_ACTIVITY_STEPS,
   MAX_DETAIL_LIMIT,
   SOURCE_TRUNCATED_REASON,
+  synthesizeGroupDetail,
   toolLabel,
   truncate,
+  truncateRich,
 } from "./detail";
 
 type Rec = Record<string, unknown>;
@@ -53,6 +55,21 @@ describe("truncate", () => {
   it("caps at the max and appends an ellipsis", () => {
     expect(truncate("abcdef", 3)).toBe("abc…");
     expect(truncate("abc", 3)).toBe("abc");
+  });
+});
+
+describe("truncateRich", () => {
+  it("preserves line breaks, code indentation, and table alignment (D17)", () => {
+    const input = "line one\nline two\n\n    indented\n| a | b |";
+    expect(truncateRich(input)).toBe("line one\nline two\n\n    indented\n| a | b |");
+  });
+
+  it("normalizes CRLF, strips per-line trailing space, caps blank-line runs, trims ends", () => {
+    expect(truncateRich("\n\na\r\nb   \n\n\n\nc\n\n")).toBe("a\nb\n\nc");
+  });
+
+  it("caps at max with an ellipsis", () => {
+    expect(truncateRich("abcdef", 3)).toBe("abc…");
   });
 });
 
@@ -102,6 +119,26 @@ describe("cleanPromptText", () => {
       "<command-message>asimov-plan</command-message>\n<command-name>/asimov-plan</command-name>\n<command-args>update the vault UI</command-args>";
     expect(cleanPromptText(raw)).toBe("/asimov-plan update the vault UI");
   });
+
+  it("keeps a real prompt that only MENTIONS a command wrapper mid-text (no false drop)", () => {
+    // Regression: a 1-line meta-prompt referencing `<command-message>` was being
+    // mistaken for a command record and dropped whole. It must survive verbatim.
+    const raw = "help me write a prompt; wrappers like `<command-message>asimov</command-message>` should be stripped";
+    expect(cleanPromptText(raw)).toBe(raw);
+    // Same for an inline `<command-name>` mention.
+    const raw2 = "explain what <command-name>/clear</command-name> does in Claude Code";
+    expect(cleanPromptText(raw2)).toBe(raw2);
+  });
+
+  it("unwraps a teammate-message to its clean body (so titles/prompts lose the tag) (D16)", () => {
+    expect(
+      cleanPromptText('<teammate-message teammate_id="team-lead" color="blue">review the auth path</teammate-message>'),
+    ).toBe("review the auth path");
+    // Unclosed tag (truncated transcript) → still unwraps the visible body.
+    expect(cleanPromptText('<teammate-message teammate_id="x">partial body')).toBe("partial body");
+    // Empty body → nothing to surface.
+    expect(cleanPromptText('<teammate-message teammate_id="x"></teammate-message>')).toBeUndefined();
+  });
 });
 
 describe("classifyClaudeStyleEvents", () => {
@@ -150,6 +187,38 @@ describe("classifyClaudeStyleEvents", () => {
     // Messages: user "start" + 2 assistant turns = 3 (the tool_result user is excluded).
     expect(out.stats.messageCount).toBe(3);
     expect(out.latestMessage).toMatchObject({ role: "assistant", text: "done" });
+  });
+
+  it("emits an incoming teammate-message as a teammateMessage item (clean body), not a raw USER turn (D16)", () => {
+    const raw =
+      '<teammate-message teammate_id="reviewer-a" color="blue" summary="done">found 2 issues</teammate-message>';
+    // The hook (the Claude reader's parseTeammateTag adapter) unwraps the tag.
+    const hook = (text: string) =>
+      text.includes("<teammate-message")
+        ? { agentName: "reviewer-a", from: "peer", color: "blue", body: "found 2 issues" }
+        : null;
+    const out = classifyClaudeStyleEvents([userText(raw)], { teammateMessage: hook });
+    expect(out.timeline).toHaveLength(1);
+    const item = out.timeline[0];
+    expect(item.kind).toBe("teammateMessage");
+    if (item.kind === "teammateMessage") {
+      expect(item.agentName).toBe("reviewer-a");
+      expect(item.from).toBe("peer");
+      expect(item.color).toBe("blue");
+      expect(item.text).toBe("found 2 issues"); // clean body — the literal tag never surfaces
+    }
+    // It still counts as a real message, but never as a first prompt (the leader's
+    // human prompt owns that) or a plain user bubble.
+    expect(out.stats.messageCount).toBe(1);
+    expect(out.firstPrompt).toBeUndefined();
+    expect(out.timeline.some((i) => i.kind === "message")).toBe(false);
+  });
+
+  it("without the teammate hook, leaves a non-team user prompt as a plain message", () => {
+    const out = classifyClaudeStyleEvents([userText("just a normal prompt")]);
+    expect(out.timeline).toEqual([
+      { kind: "message", role: "user", text: "just a normal prompt", timestamp: expect.any(Number) },
+    ]);
   });
 
   it("excludes summary and sidechain records from first/latest selection", () => {
@@ -320,6 +389,75 @@ describe("classifyClaudeStyleEvents", () => {
       "subagent",
       "message",
     ]);
+  });
+
+  it("renders an isGroup stub title-only (no @agent chip) but keeps real subagents prefixed (D8)", () => {
+    const records: Rec[] = [userText("go", { timestamp: 10 })];
+    const out = classifyClaudeStyleEvents(records, {
+      childStubs: [
+        // Group node: description is the full label; no agentType.
+        {
+          entryId: "claude:p:workflow:wf_1",
+          description: "Workflow: audit · 29 agents · completed",
+          isGroup: true,
+          timestamp: 20,
+        },
+        // Real subagent: keeps its @agent chip.
+        { entryId: "claude:p:subagent:agent-x", description: "Sub", agentType: "cf-oracle", timestamp: 30 },
+      ],
+    });
+    const items = out.timeline.filter((i) => i.kind === "subagentSession");
+    const group = items.find((i) => i.kind === "subagentSession" && i.entryId === "claude:p:workflow:wf_1");
+    const real = items.find((i) => i.kind === "subagentSession" && i.entryId === "claude:p:subagent:agent-x");
+    if (group?.kind === "subagentSession") {
+      expect(group.title).toBe("Workflow: audit · 29 agents · completed");
+      expect(group.agent).toBeUndefined(); // no "subagent" fallback leaked
+    }
+    if (real?.kind === "subagentSession") {
+      expect(real.agent).toBe("cf-oracle");
+    }
+  });
+});
+
+describe("synthesizeGroupDetail (nest-workflow-team-sessions 1_2)", () => {
+  it("builds a detail whose timeline is one title-only subagentSession per child", () => {
+    const detail = synthesizeGroupDetail(
+      "claude:p:workflow:wf_1",
+      [
+        { entryId: "claude:p:wfagent:wf_1:agent-a", description: "plan the migration", isGroup: true },
+        { entryId: "claude:p:wfagent:wf_1:agent-b", description: "audit the schema", isGroup: true, timestamp: 5 },
+      ],
+      { firstPrompt: "Audit Ghola design docs", subagentCount: 29 },
+    );
+    expect(detail.entryId).toBe("claude:p:workflow:wf_1");
+    expect(detail.firstPrompt).toBe("Audit Ghola design docs");
+    expect(detail.recentActivity).toEqual([]);
+    expect(detail.stats.subagentCount).toBe(29);
+    expect(detail.timeline.map((i) => i.kind)).toEqual(["subagentSession", "subagentSession"]);
+    const first = detail.timeline[0];
+    if (first.kind === "subagentSession") {
+      expect(first.entryId).toBe("claude:p:wfagent:wf_1:agent-a");
+      expect(first.title).toBe("plan the migration");
+      expect(first.agent).toBeUndefined();
+    }
+  });
+
+  it("handles an empty group (no children)", () => {
+    const detail = synthesizeGroupDetail("claude:p:team:t", [], { subagentCount: 0 });
+    expect(detail.timeline).toEqual([]);
+    expect(detail.stats.subagentCount).toBe(0);
+  });
+
+  it("bounds the timeline to the limit and flags truncated (W4)", () => {
+    const children = Array.from({ length: 5 }, (_, i) => ({
+      entryId: `claude:p:wfagent:wf_1:agent-${i}`,
+      description: `agent ${i}`,
+      isGroup: true,
+    }));
+    const detail = synthesizeGroupDetail("claude:p:workflow:wf_1", children, { subagentCount: 5, limit: 2 });
+    expect(detail.timeline).toHaveLength(2); // most-recent 2 kept
+    expect(detail.truncated).toBe(true);
+    expect(detail.stats.subagentCount).toBe(5); // count reflects the whole group
   });
 });
 

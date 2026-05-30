@@ -29,6 +29,7 @@ import {
   finalizeDetail,
   MAX_MESSAGE_TEXT,
   truncate,
+  truncateRich,
 } from "./detail";
 
 /** Bound the SQLite read so the vault list stays cheap (D2). */
@@ -426,14 +427,14 @@ export function classifyCodexRolloutEvents(
             firstPrompt = truncate(m);
           }
           latestMessage = { role: "user", text: truncate(m), timestamp: ts };
-          timeline.push({ kind: "message", role: "user", text: truncate(m, MAX_MESSAGE_TEXT), timestamp: ts });
+          timeline.push({ kind: "message", role: "user", text: truncateRich(m, MAX_MESSAGE_TEXT), timestamp: ts });
         }
       } else if (ptype === "agent_message") {
         const m = asString(payload.message);
         if (m) {
           messageCount++;
           latestMessage = { role: "assistant", text: truncate(m), timestamp: ts };
-          timeline.push({ kind: "message", role: "assistant", text: truncate(m, MAX_MESSAGE_TEXT), timestamp: ts });
+          timeline.push({ kind: "message", role: "assistant", text: truncateRich(m, MAX_MESSAGE_TEXT), timestamp: ts });
         }
       } else if (ptype === "token_count") {
         const tot = objField(objField(payload.info)?.total_token_usage);
@@ -466,7 +467,7 @@ export function classifyCodexRolloutEvents(
       } else if (ptype === "reasoning") {
         const t = codexReasoningText(payload);
         if (t) {
-          timeline.push({ kind: "thinking", text: truncate(t, MAX_MESSAGE_TEXT), timestamp: ts });
+          timeline.push({ kind: "thinking", text: truncateRich(t, MAX_MESSAGE_TEXT), timestamp: ts });
         }
       }
       // function_call_output / custom_tool_call_output / reasoning / message → skipped
@@ -613,7 +614,7 @@ export async function readCodexDetail(
       recentActivity: [],
       latestMessage: { role: "user", text: truncate(thread.firstUserMessage), timestamp: 0 },
       timeline: [
-        { kind: "message", role: "user", text: truncate(thread.firstUserMessage, MAX_MESSAGE_TEXT), timestamp: 0 },
+        { kind: "message", role: "user", text: truncateRich(thread.firstUserMessage, MAX_MESSAGE_TEXT), timestamp: 0 },
       ],
       // The index-only fallback surfaces exactly the one indexed prompt (s3 — was 0).
       stats: { messageCount: 1, toolCount: 0, subagentCount: 0 },

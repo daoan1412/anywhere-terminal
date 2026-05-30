@@ -1,0 +1,2 @@
+{"type":"user","isSidechain":true,"message":{"role":"user","content":"audit doc A for hallucinations"},"timestamp":"2026-05-29T17:00:00.000Z"}
+{"type":"assistant","isSidechain":true,"message":{"role":"assistant","content":[{"type":"text","text":"found 3 issues in doc A"}]},"timestamp":"2026-05-29T17:01:00.000Z"}

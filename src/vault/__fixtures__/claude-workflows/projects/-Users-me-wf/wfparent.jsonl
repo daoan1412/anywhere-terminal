@@ -1,0 +1,4 @@
+{"type":"user","isSidechain":false,"message":{"role":"user","content":"audit the design docs"},"cwd":"/Users/me/wf","timestamp":"2026-05-29T16:55:00.000Z"}
+{"type":"assistant","message":{"role":"assistant","model":"claude-opus-4-8","content":[{"type":"tool_use","id":"toolu_wf1","name":"Workflow","input":{"script":"export const meta = {}"}}]},"timestamp":"2026-05-29T16:57:00.000Z"}
+{"type":"system","teamName":"wf-review","timestamp":"2026-05-29T17:10:00.000Z"}
+{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"workflow done"}]},"timestamp":"2026-05-29T17:30:00.000Z"}

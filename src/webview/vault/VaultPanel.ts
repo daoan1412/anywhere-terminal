@@ -27,6 +27,7 @@ import type {
 } from "../../vault/types";
 import { getAgentAccent, getAgentDisplayName, getAgentIcon, VAULT_ACCENTS } from "./agentIcons";
 import { type GroupMode, groupEntries } from "./grouping";
+import { renderMarkdownLite } from "./markdownLite";
 
 /** Every message the panel can post — all webview→host vault messages carry entryId only. */
 export type VaultPanelPostMessage = (
@@ -169,8 +170,15 @@ function roleDot(): HTMLElement {
   return dot;
 }
 
-/** One preview message block (role line + text), all via textContent. */
-function previewMessage(kind: string, roleLabel: string, text: string): HTMLElement {
+/**
+ * One preview message block (role line + body). The body is rendered either as
+ * plain `textContent` (compact labels) or, when `rich`, through the safe
+ * markdown-lite renderer (D17) so prose keeps its line breaks, code blocks, and
+ * tables. Both paths put untrusted text into the DOM via textContent ONLY —
+ * `renderMarkdownLite` never uses innerHTML — so the textContent-only safety rule
+ * holds either way.
+ */
+function previewMessage(kind: string, roleLabel: string, text: string, rich = false): HTMLElement {
   const wrap = document.createElement("div");
   wrap.className = `vault-preview-message vault-preview-message-${kind}`;
   const role = document.createElement("div");
@@ -178,10 +186,50 @@ function previewMessage(kind: string, roleLabel: string, text: string): HTMLElem
   const roleText = document.createElement("span");
   roleText.textContent = roleLabel;
   role.append(roleDot(), roleText);
-  const p = document.createElement("p");
-  p.textContent = text;
-  wrap.append(role, p);
+  if (rich) {
+    const body = document.createElement("div");
+    body.className = "vault-md";
+    body.appendChild(renderMarkdownLite(text));
+    wrap.append(role, body);
+  } else {
+    const p = document.createElement("p");
+    p.textContent = text;
+    wrap.append(role, p);
+  }
   return wrap;
+}
+
+/**
+ * Named teammate colors → concrete CSS values, so a teammate node's accent is
+ * always visible under any theme. (The first team design failed by leaning on
+ * theme vars like `--vscode-panel-border` that resolve to near-invisible.) The
+ * `color` field is UNTRUSTED transcript data, so it is sanitized to this palette
+ * or a strict hex literal before ever touching the CSSOM — anything else → a
+ * neutral fallback. Used only as a `--turn-color` custom-property value.
+ */
+const TEAMMATE_COLORS: Record<string, string> = {
+  blue: "#4aa3ff",
+  green: "#3fb950",
+  yellow: "#d8a23a",
+  purple: "#a371f7",
+  cyan: "#39c5cf",
+  orange: "#e0823d",
+  pink: "#f778ba",
+  red: "#f85149",
+  magenta: "#db61a2",
+  gray: "#8b949e",
+  grey: "#8b949e",
+};
+const TEAMMATE_COLOR_FALLBACK = "#8b949e";
+function teammateAccent(color: string | undefined): string {
+  if (!color) {
+    return TEAMMATE_COLOR_FALLBACK;
+  }
+  const mapped = TEAMMATE_COLORS[color.toLowerCase()];
+  if (typeof mapped === "string") {
+    return mapped; // typeof-guard avoids prototype keys (toString/constructor)
+  }
+  return /^#[0-9a-f]{3,8}$/i.test(color) ? color : TEAMMATE_COLOR_FALLBACK;
 }
 
 /** Render one recent-activity step (tool call or subagent invocation). */
@@ -1467,7 +1515,11 @@ export class VaultPanel {
 
     // Full chronological transcript: user messages flush-left; each run of AI
     // output between them (assistant text / thinking / tool calls) is indented
-    // and capped at 5 items behind a "Show N more" expand.
+    // and capped at 3 items behind a "Show N more" expand. Prominent nested nodes
+    // (subagent / workflow GROUP, and color-highlighted `teammateTurn`s) are
+    // first-class: they break the run and ALWAYS render directly — never hidden
+    // behind the step cap, or a node buried mid-run would be invisible
+    // (nest-workflow-team-sessions D10 + D13).
     const timeline = detail.timeline ?? [];
     let i = 0;
     let runIndex = 0;
@@ -1478,10 +1530,18 @@ export class VaultPanel {
         i++;
         continue;
       }
+      if (item.kind === "subagentSession" || item.kind === "teammateTurn" || item.kind === "teammateMessage") {
+        body.appendChild(this.renderTimelineItem(item));
+        i++;
+        continue;
+      }
       const run: VaultTimelineItem[] = [];
       while (i < timeline.length) {
         const it = timeline[i];
         if (it.kind === "message" && it.role === "user") {
+          break;
+        }
+        if (it.kind === "subagentSession" || it.kind === "teammateTurn" || it.kind === "teammateMessage") {
           break;
         }
         run.push(it);
@@ -1524,10 +1584,10 @@ export class VaultPanel {
     if (item.kind === "message") {
       const label = item.role === "assistant" ? "Assistant" : "User";
       const suffix = item.timestamp ? ` · ${formatRelativeTime(item.timestamp)}` : "";
-      return previewMessage(item.role, `${label}${suffix}`, item.text);
+      return previewMessage(item.role, `${label}${suffix}`, item.text, true);
     }
     if (item.kind === "thinking") {
-      const el = previewMessage("thinking", "Thinking", item.text);
+      const el = previewMessage("thinking", "Thinking", item.text, true);
       // Long thinking is clamped to ~3 lines with a per-block show more/less toggle.
       if (item.text.length > THINKING_CLAMP_CHARS) {
         el.classList.add("is-clamped");
@@ -1546,7 +1606,96 @@ export class VaultPanel {
     if (item.kind === "subagentSession") {
       return this.renderSubagentSession(item);
     }
+    if (item.kind === "teammateTurn") {
+      return this.renderTeammateTurn(item);
+    }
+    if (item.kind === "teammateMessage") {
+      return this.renderTeammateMessage(item);
+    }
     return activityStep(item);
+  }
+
+  /**
+   * A team-member communication turn (nest-workflow-team-sessions D13): a
+   * color-highlighted, click-to-open node threaded into the leader's timeline.
+   * The accent (left bar + dot) is driven by a sanitized `--turn-color`; the head
+   * shows `@<member>` + a direction label (`⟵ leader` / `⟵ <peer>`); the preview
+   * is the bounded incoming message. Clicking lazily fetches THIS turn's segment
+   * by its view-only `:turn:` entryId, reusing the nested expand / stale-guard
+   * machinery (populateNested + expandedNested).
+   */
+  private renderTeammateTurn(item: Extract<VaultTimelineItem, { kind: "teammateTurn" }>): HTMLElement {
+    const entryId = item.entryId;
+    const block = document.createElement("div");
+    block.className = "vault-preview-teammate";
+    block.style.setProperty("--turn-color", teammateAccent(item.color));
+
+    const head = document.createElement("button");
+    head.type = "button";
+    head.className = "vault-preview-teammate-head";
+    const dot = document.createElement("span");
+    dot.className = "vault-preview-teammate-dot";
+    dot.setAttribute("aria-hidden", "true");
+    const name = document.createElement("span");
+    name.className = "vault-preview-teammate-name";
+    name.textContent = `@${item.agentName}`;
+    const dir = document.createElement("span");
+    dir.className = "vault-preview-teammate-dir";
+    dir.textContent = item.from === "leader" ? "⟵ leader" : `⟵ ${item.from}`;
+    const chevron = document.createElement("span");
+    chevron.className = "vault-preview-teammate-chevron";
+    chevron.innerHTML = ICON_CHEVRON_DOWN;
+    chevron.setAttribute("aria-hidden", "true");
+    head.append(dot, name, dir, chevron);
+
+    const preview = document.createElement("p");
+    preview.className = "vault-preview-teammate-preview";
+    preview.textContent = item.preview;
+
+    const body = document.createElement("div");
+    body.className = "vault-preview-teammate-body";
+
+    head.addEventListener("click", () => {
+      if (this.expandedNested.has(entryId)) {
+        this.expandedNested.delete(entryId);
+        // Drop any in-flight nested request: collapsing mid-load must not let a
+        // late response populate this now-hidden body (stale-guard, R4 WARN).
+        this.pendingNested.delete(entryId);
+        block.classList.remove("is-open");
+        head.setAttribute("aria-expanded", "false");
+        body.replaceChildren();
+      } else {
+        this.expandedNested.add(entryId);
+        block.classList.add("is-open");
+        head.setAttribute("aria-expanded", "true");
+        this.populateNested(entryId, body);
+      }
+    });
+    head.setAttribute("aria-expanded", this.expandedNested.has(entryId) ? "true" : "false");
+
+    block.append(head, preview, body);
+    if (this.expandedNested.has(entryId)) {
+      block.classList.add("is-open");
+      this.populateNested(entryId, body);
+    }
+    return block;
+  }
+
+  /**
+   * An inline teammate communication (D16): an incoming `<teammate-message>`
+   * record that lives in THIS transcript (a member's reply to the leader, or the
+   * leader's request inside a member transcript). Unlike a `teammateTurn` node it
+   * is NOT collapsible — the full body shows inline — but it carries the same
+   * color-keyed accent + `@<sender>` / `⟵ leader` labeling so it never reads as a
+   * generic "USER" turn. Built on `previewMessage` (no `overflow:hidden`, so no
+   * flex-collapse) with the sanitized `--turn-color` applied.
+   */
+  private renderTeammateMessage(item: Extract<VaultTimelineItem, { kind: "teammateMessage" }>): HTMLElement {
+    const suffix = item.timestamp ? ` · ${formatRelativeTime(item.timestamp)}` : "";
+    const label = item.from === "leader" ? `⟵ leader${suffix}` : `@${item.agentName}${suffix}`;
+    const el = previewMessage("teammate", label, item.text, true);
+    el.style.setProperty("--turn-color", teammateAccent(item.color));
+    return el;
   }
 
   /**
@@ -1584,6 +1733,9 @@ export class VaultPanel {
     head.addEventListener("click", () => {
       if (this.expandedNested.has(entryId)) {
         this.expandedNested.delete(entryId);
+        // Drop any in-flight nested request: collapsing mid-load must not let a
+        // late response populate this now-hidden body (stale-guard, R4 WARN).
+        this.pendingNested.delete(entryId);
         block.classList.remove("is-open");
         head.setAttribute("aria-expanded", "false");
         body.replaceChildren();
@@ -1637,9 +1789,11 @@ export class VaultPanel {
     }
   }
 
-  /** Render one run of AI output, capped at 5 items with a "Show N more" expand. */
+  /** Render one run of AI output, capped at 3 items with a "Show N more" expand
+   *  (nest-workflow-team-sessions D10 — was 5; teammate/nested nodes break runs
+   *  and are never part of one). */
   private renderRun(body: HTMLElement, run: VaultTimelineItem[], idx: number): void {
-    const CAP = 5;
+    const CAP = 3;
     const expanded = this.expandedRuns.has(idx);
     const shown = expanded || run.length <= CAP ? run : run.slice(0, CAP);
     for (const it of shown) {

@@ -1,0 +1,9 @@
+{
+  "runId": "wf_test123",
+  "workflowName": "design-audit",
+  "agentCount": 2,
+  "status": "completed",
+  "startTime": "1780072409110",
+  "timestamp": "2026-05-29T16:57:20.980Z",
+  "summary": "Audit the design docs for consistency"
+}
