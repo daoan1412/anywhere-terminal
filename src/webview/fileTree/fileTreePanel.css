@@ -955,25 +955,5 @@
   transform: rotate(180deg);
 }
 
-/* ============================================================
- * Custom hover tooltip — replaces native title tooltips which
- * render unreliably inside VSCode webviews. Mounted on
- * document.body by Tooltip.ts so panel `overflow: hidden`
- * doesn't clip it.
- * ============================================================ */
-.file-tree-tooltip {
-  position: absolute;
-  pointer-events: none;
-  z-index: 1000;
-  max-width: 240px;
-  padding: 3px 7px;
-  font-size: 12px;
-  line-height: 1.4;
-  border-radius: 3px;
-  white-space: normal;
-  word-break: break-word;
-  background: var(--vscode-editorHoverWidget-background, #252526);
-  color: var(--vscode-editorHoverWidget-foreground, #cccccc);
-  border: 1px solid var(--vscode-editorHoverWidget-border, #454545);
-  box-shadow: 0 2px 8px var(--vscode-widget-shadow, rgba(0, 0, 0, 0.36));
-}
+/* The shared hover-tooltip widget styles moved to ui/tooltip.css
+   (.webview-tooltip) — used by both the file-tree and vault panels. */

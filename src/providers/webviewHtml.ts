@@ -15,11 +15,14 @@ import vendoredScrollbarsCss from "vs/base/browser/ui/scrollbar/media/scrollbars
 import * as vscode from "vscode";
 // Project-specific file-tree panel styles (rows + 4-side layout + theme variables).
 import fileTreePanelCss from "../webview/fileTree/fileTreePanel.css";
+// Shared hover-tooltip widget styles (.webview-tooltip) — file-tree + vault panels.
+import tooltipCss from "../webview/ui/tooltip.css";
 // AI-vault panel styles (flat list + badges + hidden state). See add-ai-coding-vault D10/D11.
 import vaultPanelCss from "../webview/vault/vaultPanel.css";
 
 const VENDORED_LIST_CSS = [vendoredAriaCss, vendoredDndCss, vendoredListCss, vendoredScrollbarsCss].join("\n\n");
 const FILE_TREE_CSS = fileTreePanelCss;
+const TOOLTIP_CSS = tooltipCss;
 const VAULT_CSS = vaultPanelCss;
 
 /**
@@ -83,6 +86,10 @@ export function getTerminalHtml(
     /* === File-tree panel styles === */
     ${FILE_TREE_CSS}
     /* === End file-tree panel styles === */
+
+    /* === Shared hover-tooltip widget === */
+    ${TOOLTIP_CSS}
+    /* === End shared hover-tooltip widget === */
 
     /* === AI-vault panel styles === */
     ${VAULT_CSS}

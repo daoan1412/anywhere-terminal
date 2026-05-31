@@ -4,6 +4,14 @@ All notable changes to **AnyWhere Terminal** are documented in this file.
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.16.1] — 2026-05-31
+
+### Changed
+
+- **Fast, reliable hover tooltips in the AI Vault preview.** Its header buttons now use the same shared, body-mounted tooltip as the file tree instead of the native `title` attribute — which renders with long, OS-dependent delays inside VS Code webviews and is clipped by a panel's `overflow`. Tooltips appear immediately and can extend past the panel edge.
+- **Collapsible vault groups and thinking blocks.** In Agent / Folder grouping each group header collapses (click or keyboard) to hide its rows; assistant "thinking" in the session preview now shows a one-line gist with a chevron to expand the full text.
+- **Accessibility.** Sub-agent, team-member, and workflow/team group nodes in the session preview now expose proper screen-reader labels.
+
 ## [0.16.0] — 2026-05-29
 
 ### Added

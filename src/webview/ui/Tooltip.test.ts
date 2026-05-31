@@ -12,7 +12,7 @@ function makeTarget(title: string): HTMLButtonElement {
 }
 
 function widget(): HTMLDivElement | null {
-  return document.body.querySelector<HTMLDivElement>(".file-tree-tooltip");
+  return document.body.querySelector<HTMLDivElement>(".webview-tooltip");
 }
 
 describe("attachTooltip", () => {
@@ -126,7 +126,7 @@ describe("attachTooltip", () => {
   it("attaches aria-describedby to target on attach and removes it on dispose (WCAG 1.4.13 / F3)", () => {
     const btn = makeTarget("Search");
     const dispose = attachTooltip(btn);
-    expect(btn.getAttribute("aria-describedby")).toBe("file-tree-tooltip-widget");
+    expect(btn.getAttribute("aria-describedby")).toBe("webview-tooltip-widget");
     dispose();
     expect(btn.hasAttribute("aria-describedby")).toBe(false);
   });

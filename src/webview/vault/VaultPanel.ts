@@ -25,7 +25,7 @@ import type {
   VaultSessionEntry,
   VaultTimelineItem,
 } from "../../vault/types";
-import { attachTooltip } from "../fileTree/Tooltip";
+import { attachTooltip } from "../ui/Tooltip";
 import type { VaultPreviewGeometry } from "../state/WebviewState";
 import { getAgentAccent, getAgentDisplayName, getAgentIcon, VAULT_ACCENTS } from "./agentIcons";
 import { type GroupMode, groupEntries } from "./grouping";
@@ -89,8 +89,10 @@ const ICON_RESTORE =
 /** Rows shown per group before a "Show more" affordance keeps the list scannable. */
 const MAX_VISIBLE_PER_GROUP = 10;
 
-/** Thinking text longer than this (~3 lines) is clamped behind a "Show more" toggle. */
-const THINKING_CLAMP_CHARS = 180;
+/** Reasoning longer than this (or multi-line) collapses to a single-line gist
+ *  with a chevron — reasoning is low-signal at a glance, so the preview keeps it
+ *  to one clean line until the user expands it. */
+const THINKING_INLINE_MAX = 90;
 
 /** Timeline items requested on the first open, and the step added per load-more. */
 const PREVIEW_LIMIT_DEFAULT = 400;
@@ -206,6 +208,69 @@ function previewMessage(kind: string, roleLabel: string, text: string, rich = fa
     p.textContent = text;
     wrap.append(role, p);
   }
+  return wrap;
+}
+
+/** First non-empty line of reasoning, stripped of markdown noise — used as the
+ *  one-line gist shown while a thinking block is collapsed. */
+function thinkingGist(text: string): string {
+  const firstLine = text
+    .split("\n")
+    .map((l) => l.trim())
+    .find((l) => l.length > 0);
+  return (firstLine ?? text.trim()).replace(/^[#>\-*\s]+/, "").replace(/[*_`]/g, "").trim();
+}
+
+/**
+ * A reasoning block. Short reasoning renders inline. Long / multi-line reasoning
+ * collapses to a single-line gist (`● THINKING  <gist…>  ⌄`) that expands to the
+ * full markdown on click — reasoning is low-signal at a glance, and a 1-line
+ * ellipsis is reliable where a multi-line clamp on the `.vault-md` block is not
+ * (R5: `-webkit-line-clamp` can collapse block-child containers to height 0).
+ */
+function thinkingBlock(text: string): HTMLElement {
+  const collapsible = text.trim().length > THINKING_INLINE_MAX || text.includes("\n");
+  if (!collapsible) {
+    return previewMessage("thinking", "Thinking", text, true);
+  }
+
+  const wrap = document.createElement("div");
+  wrap.className = "vault-preview-message vault-preview-message-thinking is-collapsible";
+
+  // The head IS the toggle: role chip + one-line gist + chevron, all on one row.
+  const head = document.createElement("button");
+  head.type = "button";
+  head.className = "vault-preview-thinking-head";
+  head.title = "Show the full reasoning";
+  head.setAttribute("aria-expanded", "false");
+
+  const role = document.createElement("span");
+  role.className = "vault-preview-message-role";
+  const label = document.createElement("span");
+  label.textContent = "Thinking";
+  role.append(roleDot(), label);
+
+  const gist = document.createElement("span");
+  gist.className = "vault-preview-thinking-gist";
+  gist.textContent = thinkingGist(text);
+
+  const chevron = document.createElement("span");
+  chevron.className = "vault-preview-thinking-chevron";
+  chevron.innerHTML = ICON_CHEVRON_DOWN;
+  chevron.setAttribute("aria-hidden", "true");
+  head.append(role, gist, chevron);
+
+  const body = document.createElement("div");
+  body.className = "vault-md vault-preview-thinking-body";
+  body.appendChild(renderMarkdownLite(text));
+
+  head.addEventListener("click", () => {
+    const expanded = wrap.classList.toggle("is-expanded");
+    head.setAttribute("aria-expanded", expanded ? "true" : "false");
+    head.title = expanded ? "Collapse the reasoning" : "Show the full reasoning";
+  });
+
+  wrap.append(head, body);
   return wrap;
 }
 
@@ -427,8 +492,9 @@ export class VaultPanel {
   private folderOnly = false;
   /** Grouping mode for the list (client-side, persisted). */
   private groupMode: GroupMode = "recent";
-  /** Folder-group keys (cwd) the user has collapsed (Folder mode). */
-  private readonly collapsedFolders = new Set<string>();
+  /** Collapsed group keys (`<mode>:<key>`) — Agent and Folder groups both
+   *  collapse; mode-prefixed so an agent id can't clash with a folder cwd. */
+  private readonly collapsedGroups = new Set<string>();
   /** Group keys the user has expanded past the per-group row cap ("Show more"). */
   private readonly expandedGroups = new Set<string>();
   /** Active terminal pane's cwd; the folder filter scopes to this. */
@@ -456,8 +522,14 @@ export class VaultPanel {
   private previewGeometry: { top: number; left: number; width: number; height: number } | null = null;
   /** The detail currently shown — kept so "show more" can re-render in place. */
   private activePreviewDetail: VaultSessionDetail | null = null;
-  /** Indices of AI-runs the user expanded past the per-run cap (reset per open). */
-  private readonly expandedRuns = new Set<number>();
+  /** Keys (`<prefix>#<runIndex>`) of AI-runs the user expanded past the per-run
+   *  cap. Prefixed by container ("root" or a nested entryId) so a nested run's
+   *  expansion never collides with a root run. Reset per open. */
+  private readonly expandedRuns = new Set<string>();
+  /** Dispose fns for the custom tooltips on the preview header's icon buttons.
+   *  The header is rebuilt on every preview render, so these are torn down and
+   *  re-attached each build (and on close) to avoid leaking listeners. */
+  private readonly previewTooltipDisposers: Array<() => void> = [];
   /** Timeline-item limit for the open preview (grows when older msgs are loaded). */
   private previewLimit = PREVIEW_LIMIT_DEFAULT;
   /** True while a load-more request is in flight (debounces the scroll trigger). */
@@ -1012,12 +1084,12 @@ export class VaultPanel {
     // Recent → flat list (no group headers). Agent/Folder → grouped headers.
     for (const group of groupEntries(visible, this.groupMode)) {
       if (group.mode !== "recent") {
-        const collapsed = group.mode === "folder" && this.collapsedFolders.has(group.key);
+        const collapsed = this.collapsedGroups.has(`${group.mode}:${group.key}`);
         this.listEl.appendChild(
           this.renderGroupHeader(group.mode, group.key, group.label, group.entries.length, collapsed),
         );
         if (collapsed) {
-          continue; // folder group collapsed → skip its rows
+          continue; // group collapsed → skip its rows
         }
       }
       // Cap each group at MAX_VISIBLE_PER_GROUP rows; the rest hide behind a
@@ -1078,7 +1150,16 @@ export class VaultPanel {
   ): HTMLElement {
     const header = document.createElement("div");
     header.className = "vault-group-header";
-    header.setAttribute("role", "presentation");
+    if (collapsed) {
+      header.classList.add("is-collapsed");
+    }
+    // Both Agent and Folder groups collapse: a leading chevron rotates with the
+    // state and the whole header toggles it (the row cap "Show more" is separate).
+    const chevron = document.createElement("span");
+    chevron.className = "vault-group-chevron";
+    chevron.innerHTML = ICON_CHEVRON_DOWN;
+    chevron.setAttribute("aria-hidden", "true");
+    header.appendChild(chevron);
     if (mode === "agent") {
       // The agent's real brand icon (key is the agent id). SVG comes ONLY from
       // the closed agent-icon map (never session data) → safe innerHTML (D1).
@@ -1093,19 +1174,11 @@ export class VaultPanel {
       }
       header.appendChild(badge);
     } else {
-      // Folder mode: collapsible chevron + folder icon.
       header.classList.add("vault-group-header--folder");
-      if (collapsed) {
-        header.classList.add("is-collapsed");
-      }
-      const chevron = document.createElement("span");
-      chevron.className = "vault-group-chevron";
-      chevron.innerHTML = ICON_CHEVRON_DOWN;
       const folderIcon = document.createElement("span");
       folderIcon.className = "vault-group-icon";
       folderIcon.innerHTML = ICON_FOLDER;
-      header.append(chevron, folderIcon);
-      header.addEventListener("click", () => this.toggleFolderGroup(key));
+      header.appendChild(folderIcon);
     }
     const labelEl = document.createElement("span");
     labelEl.className = "vault-group-label";
@@ -1114,14 +1187,27 @@ export class VaultPanel {
     countEl.className = "vault-group-count";
     countEl.textContent = `· ${count}`;
     header.append(labelEl, countEl);
+    // Interactive toggle: clickable + keyboard-operable, state announced.
+    header.setAttribute("role", "button");
+    header.tabIndex = 0;
+    header.setAttribute("aria-expanded", collapsed ? "false" : "true");
+    header.title = collapsed ? `Expand ${label}` : `Collapse ${label}`;
+    header.addEventListener("click", () => this.toggleGroup(mode, key));
+    header.addEventListener("keydown", (e) => {
+      if (e.key === "Enter" || e.key === " ") {
+        e.preventDefault();
+        this.toggleGroup(mode, key);
+      }
+    });
     return header;
   }
 
-  private toggleFolderGroup(key: string): void {
-    if (this.collapsedFolders.has(key)) {
-      this.collapsedFolders.delete(key);
+  private toggleGroup(mode: GroupMode, key: string): void {
+    const groupKey = `${mode}:${key}`;
+    if (this.collapsedGroups.has(groupKey)) {
+      this.collapsedGroups.delete(groupKey);
     } else {
-      this.collapsedFolders.add(key);
+      this.collapsedGroups.add(groupKey);
     }
     this.renderList();
   }
@@ -1376,7 +1462,17 @@ export class VaultPanel {
     this.activePreviewRow = null;
     this.previewScrollToTopPending = false;
     this.resetPreviewScrollNavState();
+    this.disposePreviewTooltips();
     this.detachPreviewCloseListeners();
+  }
+
+  /** Tear down the preview header's custom tooltips (called before each header
+   *  rebuild and on close) so their listeners + shared-widget refs don't leak. */
+  private disposePreviewTooltips(): void {
+    for (const dispose of this.previewTooltipDisposers) {
+      dispose();
+    }
+    this.previewTooltipDisposers.length = 0;
   }
 
   /** Toggle the preview between its floating size and a full-viewport overlay. */
@@ -1390,15 +1486,15 @@ export class VaultPanel {
     if (this.previewMaximized) {
       this.clearPreviewInlineGeometry(); // let the maximized rule (full viewport) win
       if (btn) {
+        // No `.title` here — the custom tooltip (getText) tracks the label; setting
+        // `.title` would reintroduce the slow native tooltip alongside it.
         btn.innerHTML = ICON_RESTORE;
-        btn.title = "Restore size";
         btn.setAttribute("aria-label", "Restore size");
         btn.setAttribute("aria-pressed", "true");
       }
     } else {
       if (btn) {
         btn.innerHTML = ICON_MAXIMIZE;
-        btn.title = "Expand to full size";
         btn.setAttribute("aria-label", "Expand to full size");
         btn.setAttribute("aria-pressed", "false");
       }
@@ -1661,8 +1757,12 @@ export class VaultPanel {
     if (this.previewMaximized || ev.button !== 0) {
       return;
     }
-    if ((ev.target as Element | null)?.closest(".vault-preview-title-actions")) {
+    const target = ev.target as Element | null;
+    if (target?.closest(".vault-preview-title-actions")) {
       return; // header action buttons keep their own click behaviour
+    }
+    if (target?.closest(".vault-preview-meta")) {
+      return; // the meta block stays selectable (drag works on its padding)
     }
     ev.preventDefault();
     const rect = this.previewEl.getBoundingClientRect();
@@ -1722,7 +1822,7 @@ export class VaultPanel {
       this.pendingNested.delete(msg.entryId);
       if (msg.detail && !msg.error) {
         this.nestedDetails.set(msg.entryId, msg.detail);
-        this.renderNestedInto(nestedContainer, msg.detail);
+        this.renderNestedInto(nestedContainer, msg.detail, msg.entryId);
       } else {
         nestedContainer.textContent = msg.error ?? "Couldn't read this sub-session.";
       }
@@ -1741,9 +1841,15 @@ export class VaultPanel {
     // same content by preserving the distance from the bottom across the re-render.
     const bodyBefore = this.previewEl.querySelector<HTMLElement>(".vault-preview-body");
     const fromBottom = wasLoadingMore && bodyBefore ? bodyBefore.scrollHeight - bodyBefore.scrollTop : null;
-    // A load-more re-render changes the run ordering, so prior expand state is stale.
+    // A load-more re-render prepends older items to the ROOT timeline, shifting
+    // its run indices → drop root run-expansions only. Nested transcripts didn't
+    // change, so their `<entryId>#…` expansions stay valid (must not be cleared).
     if (wasLoadingMore) {
-      this.expandedRuns.clear();
+      for (const k of this.expandedRuns) {
+        if (k.startsWith("root#")) {
+          this.expandedRuns.delete(k);
+        }
+      }
     }
     this.renderPreviewDetail(this.activePreviewEntry, msg.detail);
     if (this.previewScrollToTopPending) {
@@ -1839,13 +1945,20 @@ export class VaultPanel {
 
   /** Header: agent badge + title + Resume + Close + meta block. */
   private buildPreviewHeader(entry: VaultSessionEntry, detail?: VaultSessionDetail): HTMLElement {
+    // The header is rebuilt on every preview render — tear down the prior build's
+    // custom tooltips before this build attaches new ones (no dangling listeners).
+    this.disposePreviewTooltips();
     const header = document.createElement("header");
     header.className = "vault-preview-header";
 
+    // The whole header strip (title row + its padding) is the move handle, so a
+    // drag can start anywhere in the header, not just on the title text. The
+    // meta block keeps its own behaviour (text stays selectable) via a guard in
+    // startMove.
+    header.addEventListener("pointerdown", (ev) => this.startMove(ev));
+
     const titleRow = document.createElement("div");
     titleRow.className = "vault-preview-title-row";
-    // The title row doubles as the move handle (drag to reposition the card).
-    titleRow.addEventListener("pointerdown", (ev) => this.startMove(ev));
     const badge = document.createElement("span");
     badge.className = "vault-badge";
     badge.setAttribute("aria-label", agentLabel(entry.agent));
@@ -1900,6 +2013,20 @@ export class VaultPanel {
     closeBtn.innerHTML = ICON_CLOSE;
     closeBtn.addEventListener("click", () => this.closePreview());
     actions.append(prevBtn, nextBtn, resumeBtn, maximizeBtn, closeBtn);
+    // Custom hover tooltips (fast, body-mounted) replace native `title`, which is
+    // slow + unreliable in webviews (the icon SVG also swallows the native title's
+    // hover target). `attachTooltip` reads + strips each `.title`. Maximize uses
+    // `getText` because its label flips with state — re-setting `.title` later
+    // (toggleMaximizePreview) would otherwise reintroduce the native tooltip.
+    this.previewTooltipDisposers.push(
+      attachTooltip(prevBtn),
+      attachTooltip(nextBtn),
+      attachTooltip(resumeBtn),
+      attachTooltip(maximizeBtn, {
+        getText: () => (this.previewMaximized ? "Restore size" : "Expand to full size"),
+      }),
+      attachTooltip(closeBtn),
+    );
 
     titleRow.append(badge, titleEl, actions);
     header.appendChild(titleRow);
@@ -1929,6 +2056,7 @@ export class VaultPanel {
       const loadMore = document.createElement("button");
       loadMore.type = "button";
       loadMore.className = "vault-preview-loadmore";
+      loadMore.title = "Load older messages in this session";
       loadMore.textContent = this.previewLoadingMore ? "Loading older messages…" : "↑ Load older messages";
       loadMore.disabled = this.previewLoadingMore;
       loadMore.addEventListener("click", () => this.requestMorePreview());
@@ -1941,42 +2069,10 @@ export class VaultPanel {
       body.appendChild(notice);
     }
 
-    // Full chronological transcript: user messages flush-left; each run of AI
-    // output between them (assistant text / thinking / tool calls) is indented
-    // and capped at 3 items behind a "Show N more" expand. Prominent nested nodes
-    // (subagent / workflow GROUP, and color-highlighted `teammateTurn`s) are
-    // first-class: they break the run and ALWAYS render directly — never hidden
-    // behind the step cap, or a node buried mid-run would be invisible
-    // (nest-workflow-team-sessions D10 + D13).
-    const timeline = detail.timeline ?? [];
-    let i = 0;
-    let runIndex = 0;
-    while (i < timeline.length) {
-      const item = timeline[i];
-      if (item.kind === "message" && item.role === "user") {
-        body.appendChild(this.renderTimelineItem(item));
-        i++;
-        continue;
-      }
-      if (item.kind === "subagentSession" || item.kind === "teammateTurn" || item.kind === "teammateMessage") {
-        body.appendChild(this.renderTimelineItem(item));
-        i++;
-        continue;
-      }
-      const run: VaultTimelineItem[] = [];
-      while (i < timeline.length) {
-        const it = timeline[i];
-        if (it.kind === "message" && it.role === "user") {
-          break;
-        }
-        if (it.kind === "subagentSession" || it.kind === "teammateTurn" || it.kind === "teammateMessage") {
-          break;
-        }
-        run.push(it);
-        i++;
-      }
-      this.renderRun(body, run, runIndex++);
-    }
+    // Full chronological transcript, run-grouped + capped. The same renderer is
+    // reused for nested transcripts (subagent / teammate bodies) so capping +
+    // pinned conclusions behave identically at every depth (D14).
+    this.renderTimelineInto(body, detail.timeline ?? [], "root");
 
     // Scroll to the top → load older messages (incremental, while more remain).
     body.addEventListener("scroll", () => {
@@ -2015,21 +2111,7 @@ export class VaultPanel {
       return previewMessage(item.role, `${label}${suffix}`, item.text, true);
     }
     if (item.kind === "thinking") {
-      const el = previewMessage("thinking", "Thinking", item.text, true);
-      // Long thinking is clamped to ~3 lines with a per-block show more/less toggle.
-      if (item.text.length > THINKING_CLAMP_CHARS) {
-        el.classList.add("is-clamped");
-        const toggle = document.createElement("button");
-        toggle.type = "button";
-        toggle.className = "vault-preview-thinking-toggle";
-        toggle.textContent = "Show more";
-        toggle.addEventListener("click", () => {
-          const expanded = el.classList.toggle("is-expanded");
-          toggle.textContent = expanded ? "Show less" : "Show more";
-        });
-        el.appendChild(toggle);
-      }
-      return el;
+      return thinkingBlock(item.text);
     }
     if (item.kind === "subagentSession") {
       return this.renderSubagentSession(item);
@@ -2075,6 +2157,9 @@ export class VaultPanel {
     chevron.innerHTML = ICON_CHEVRON_DOWN;
     chevron.setAttribute("aria-hidden", "true");
     head.append(dot, name, dir, chevron);
+    const fromLabel = item.from === "leader" ? "leader" : item.from;
+    head.title = `Open @${item.agentName}'s turn (from ${fromLabel})`;
+    head.setAttribute("aria-label", `Teammate @${item.agentName} turn from ${fromLabel}`);
 
     const preview = document.createElement("p");
     preview.className = "vault-preview-teammate-preview";
@@ -2173,7 +2258,11 @@ export class VaultPanel {
       titleEl.className = "vault-preview-subagent-title";
       titleEl.textContent = item.title;
       head.append(chevron, titleEl);
+      // Group nodes (workflow / team) had no accessible name — give them one.
+      head.setAttribute("aria-label", `Nested session: ${item.title}`);
     }
+    // Hover hint for the expand/collapse toggle (both agent + group variants).
+    head.title = item.agent ? `Toggle subagent @${item.agent}: ${item.title}` : `Toggle ${item.title}`;
 
     // First-message preview, shown while collapsed (hidden once expanded — the
     // child's own first message then leads the nested transcript).
@@ -2215,7 +2304,7 @@ export class VaultPanel {
   private populateNested(entryId: string, body: HTMLElement): void {
     const cached = this.nestedDetails.get(entryId);
     if (cached) {
-      this.renderNestedInto(body, cached);
+      this.renderNestedInto(body, cached, entryId);
       return;
     }
     body.replaceChildren(loadingBody());
@@ -2226,9 +2315,11 @@ export class VaultPanel {
     }
   }
 
-  /** Render a child detail's timeline into a nested container (recurses via
-   *  renderTimelineItem — no per-run cap; child transcripts are already bounded). */
-  private renderNestedInto(container: HTMLElement, detail: VaultSessionDetail): void {
+  /** Render a child detail's timeline into a nested container. Reuses the shared
+   *  run-grouping renderer (renderTimelineInto) so a nested transcript caps + pins
+   *  conclusions exactly like the root preview; `entryId` keys its run expansions
+   *  apart from the root's and from sibling nested blocks (D14). */
+  private renderNestedInto(container: HTMLElement, detail: VaultSessionDetail, entryId: string): void {
     container.replaceChildren();
     const timeline = detail.timeline ?? [];
     if (timeline.length === 0) {
@@ -2238,43 +2329,105 @@ export class VaultPanel {
       container.appendChild(empty);
       return;
     }
-    for (const item of timeline) {
-      container.appendChild(this.renderTimelineItem(item));
+    this.renderTimelineInto(container, timeline, entryId);
+  }
+
+  /**
+   * Render a timeline (root preview or a nested subagent/teammate body) into a
+   * container: user messages flush-left; each run of AI output between them
+   * (assistant text / thinking / tool calls) is indented and capped behind a
+   * "Show N more" expand. Prominent nested nodes (subagent / workflow GROUP and
+   * color-highlighted `teammateTurn`s) are first-class — they break the run and
+   * ALWAYS render directly, never hidden behind the cap (nest-workflow-team-
+   * sessions D10 + D13). Run-expansion keys are prefixed by `keyPrefix` so a
+   * nested run's expand can't collide with a root run's (D14).
+   */
+  private renderTimelineInto(container: HTMLElement, timeline: VaultTimelineItem[], keyPrefix: string): void {
+    let i = 0;
+    let runIndex = 0;
+    while (i < timeline.length) {
+      const item = timeline[i];
+      if (item.kind === "message" && item.role === "user") {
+        container.appendChild(this.renderTimelineItem(item));
+        i++;
+        continue;
+      }
+      if (item.kind === "subagentSession" || item.kind === "teammateTurn" || item.kind === "teammateMessage") {
+        container.appendChild(this.renderTimelineItem(item));
+        i++;
+        continue;
+      }
+      const run: VaultTimelineItem[] = [];
+      while (i < timeline.length) {
+        const it = timeline[i];
+        if (it.kind === "message" && it.role === "user") {
+          break;
+        }
+        if (it.kind === "subagentSession" || it.kind === "teammateTurn" || it.kind === "teammateMessage") {
+          break;
+        }
+        run.push(it);
+        i++;
+      }
+      this.renderRun(container, run, `${keyPrefix}#${runIndex++}`);
     }
   }
 
   /** Render one run of AI output, capped at 3 items with a "Show N more" expand
    *  (nest-workflow-team-sessions D10 — was 5; teammate/nested nodes break runs
-   *  and are never part of one). */
-  private renderRun(body: HTMLElement, run: VaultTimelineItem[], idx: number): void {
+   *  and are never part of one). When the run is capped, its concluding
+   *  assistant message (last in the run) is pinned BELOW the expand so the
+   *  highest-signal item stays visible instead of being buried at the tail:
+   *  head (CAP-1 items) + "Show N more" + pinned conclusion. */
+  private renderRun(body: HTMLElement, run: VaultTimelineItem[], key: string): void {
     const CAP = 3;
-    const expanded = this.expandedRuns.has(idx);
-    const shown = expanded || run.length <= CAP ? run : run.slice(0, CAP);
-    for (const it of shown) {
-      body.appendChild(this.renderTimelineItem(it));
+    const expanded = this.expandedRuns.has(key);
+    if (expanded || run.length <= CAP) {
+      for (const it of run) {
+        body.appendChild(this.renderTimelineItem(it));
+      }
+      return;
     }
-    if (!expanded && run.length > CAP) {
-      const hidden = run.length - CAP;
-      const btn = document.createElement("button");
-      btn.type = "button";
-      btn.className = "vault-preview-expand";
-      btn.textContent = `Show ${hidden} more step${hidden === 1 ? "" : "s"}`;
-      btn.addEventListener("click", () => {
-        this.expandedRuns.add(idx);
-        if (this.activePreviewEntry && this.activePreviewDetail) {
-          // renderPreviewDetail rebuilds the body from scratch, so the new body
-          // starts at scrollTop 0 — preserve the current scroll so expanding a
-          // run reveals its steps in place instead of jumping to the top. Content
-          // above the button is positionally stable, so the same offset holds.
-          const prevScroll = this.previewEl.querySelector<HTMLElement>(".vault-preview-body")?.scrollTop ?? 0;
-          this.renderPreviewDetail(this.activePreviewEntry, this.activePreviewDetail);
-          const newBody = this.previewEl.querySelector<HTMLElement>(".vault-preview-body");
-          if (newBody) {
-            newBody.scrollTop = prevScroll;
-          }
+
+    // Capped run. The conclusion — a non-empty assistant message that is the
+    // LAST item of the run — carries the most value but sits at the tail, where a
+    // plain head slice would hide it behind the expand. Pin it: keep CAP-1 head
+    // steps, then the expand, then the conclusion. Only pin when it is genuinely
+    // the final item: pinning a mid-run assistant line (with tool/thinking steps
+    // after it) would reorder the transcript and bury those trailing steps.
+    const last = run[run.length - 1];
+    const pin = last.kind === "message" && last.role === "assistant" && last.text.trim().length > 0;
+    const headCount = pin ? CAP - 1 : CAP;
+    for (let k = 0; k < headCount; k++) {
+      body.appendChild(this.renderTimelineItem(run[k]));
+    }
+
+    // headCount + (pin ? the pinned tail : 0) are shown → the rest are hidden.
+    const hidden = run.length - CAP;
+    const btn = document.createElement("button");
+    btn.type = "button";
+    btn.className = "vault-preview-expand";
+    btn.textContent = `Show ${hidden} more step${hidden === 1 ? "" : "s"}`;
+    btn.title = "Show every step in this run";
+    btn.addEventListener("click", () => {
+      this.expandedRuns.add(key);
+      if (this.activePreviewEntry && this.activePreviewDetail) {
+        // renderPreviewDetail rebuilds the body from scratch, so the new body
+        // starts at scrollTop 0 — preserve the current scroll so expanding a
+        // run reveals its steps in place instead of jumping to the top. Content
+        // above the button is positionally stable, so the same offset holds.
+        const prevScroll = this.previewEl.querySelector<HTMLElement>(".vault-preview-body")?.scrollTop ?? 0;
+        this.renderPreviewDetail(this.activePreviewEntry, this.activePreviewDetail);
+        const newBody = this.previewEl.querySelector<HTMLElement>(".vault-preview-body");
+        if (newBody) {
+          newBody.scrollTop = prevScroll;
         }
-      });
-      body.appendChild(btn);
+      }
+    });
+    body.appendChild(btn);
+
+    if (pin) {
+      body.appendChild(this.renderTimelineItem(last));
     }
   }
 

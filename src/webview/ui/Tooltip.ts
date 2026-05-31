@@ -1,10 +1,11 @@
-// src/webview/fileTree/Tooltip.ts — Custom hover tooltip widget.
+// src/webview/ui/Tooltip.ts — Shared custom hover tooltip widget.
 //
 // Native browser `title` tooltips don't render reliably inside VSCode webviews
 // (long OS-dependent delays; some platforms suppress them). This module owns
 // a single shared widget mounted on `document.body` so it isn't clipped by
-// any panel's `overflow: hidden`. Styled with `--vscode-editorHoverWidget-*`
-// theme vars (see fileTreePanel.css `.file-tree-tooltip`).
+// any panel's `overflow: hidden`. Used by both the file-tree and vault panels.
+// Styled with `--vscode-editorHoverWidget-*` theme vars (see ui/tooltip.css
+// `.webview-tooltip`).
 //
 // Usage:
 //   const dispose = attachTooltip(btn);                            // reads & strips btn.title
@@ -17,7 +18,7 @@
 //   - Focus/blur show the tooltip in addition to mouse — WCAG 1.4.13.
 
 const SHOW_DELAY_MS = 300;
-const WIDGET_ID = "file-tree-tooltip-widget";
+const WIDGET_ID = "webview-tooltip-widget";
 
 interface Singleton {
   doc: Document;
@@ -34,7 +35,7 @@ function ensureWidget(doc: Document): HTMLDivElement {
   }
   widget?.el.remove();
   const el = doc.createElement("div");
-  el.className = "file-tree-tooltip";
+  el.className = "webview-tooltip";
   el.setAttribute("role", "tooltip");
   el.id = WIDGET_ID;
   el.style.display = "none";

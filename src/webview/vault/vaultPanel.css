@@ -349,6 +349,20 @@
     var(--vscode-sideBar-background, var(--vscode-editor-background))
   );
   border-bottom: 1px solid color-mix(in srgb, var(--vscode-foreground) 8%, transparent);
+  /* Every non-Recent header (Agent + Folder) toggles its group's collapse. */
+  cursor: pointer;
+}
+.vault-group-header:focus-visible {
+  outline: 1px solid var(--vscode-focusBorder);
+  outline-offset: -1px;
+}
+.vault-group-chevron {
+  display: inline-flex;
+  color: var(--vscode-descriptionForeground);
+  transition: transform 120ms ease-out;
+}
+.vault-group-header.is-collapsed .vault-group-chevron {
+  transform: rotate(-90deg);
 }
 .vault-group-count {
   font-weight: 400;
@@ -372,15 +386,6 @@
   font-size: 12px;
   font-weight: 600;
   color: var(--vscode-foreground);
-  cursor: pointer;
-}
-.vault-group-header--folder .vault-group-chevron {
-  display: inline-flex;
-  color: var(--vscode-descriptionForeground);
-  transition: transform 120ms ease-out;
-}
-.vault-group-header--folder.is-collapsed .vault-group-chevron {
-  transform: rotate(-90deg);
 }
 .vault-group-icon {
   display: inline-flex;
@@ -771,17 +776,21 @@
   gap: 8px;
   padding: 12px 14px 10px;
   border-bottom: 1px solid var(--vscode-widget-border, var(--vscode-panel-border));
+  /* The whole header strip (title + padding) is the drag handle that moves the
+     floating card; the meta block opts back out below so its text is selectable. */
+  cursor: move;
+  touch-action: none;
 }
 .vault-preview-title-row {
   display: flex;
   align-items: center;
   gap: 8px;
-  /* Doubles as the drag handle to move the floating card. */
-  cursor: move;
-  touch-action: none;
+}
+.vault-preview-header .vault-preview-meta {
+  cursor: default;
 }
 /* Maximized fills the viewport — moving is disabled, so no move cursor. */
-.vault-preview--max .vault-preview-title-row {
+.vault-preview--max .vault-preview-header {
   cursor: default;
 }
 .vault-preview-title {
@@ -845,6 +854,15 @@
   outline: 1px solid var(--vscode-focusBorder);
   outline-offset: 1px;
   opacity: 1;
+}
+/* Decorative <svg> icons inside preview buttons must not steal the hover target
+   from the button itself. The header icon buttons use the custom tooltip widget
+   (mouseenter-based, SVG-agnostic), but body controls (subagent / teammate /
+   thinking heads) still use native `title`, which a hovered SVG child can
+   suppress. Keeping icons pointer-transparent makes the button the hover target
+   everywhere. */
+.vault-preview button svg {
+  pointer-events: none;
 }
 .vault-preview-meta {
   display: grid;
@@ -941,9 +959,7 @@
 .vault-preview-message p {
   margin: 0;
 }
-/* Rich message body container (markdown-lite, D17). Declared here — before the
-   higher-specificity `… .is-clamped … .vault-md` clamp rule below — so source
-   order stays ascending-specificity. */
+/* Rich message body container (markdown-lite, D17). */
 .vault-md {
   min-width: 0;
   overflow-wrap: anywhere;
@@ -1031,33 +1047,63 @@
 .vault-preview-message-thinking .vault-md {
   font-style: italic;
 }
-/* Long thinking is clamped to ~3 lines until expanded. A plain max-height +
-   overflow:hidden is used INSTEAD of `-webkit-line-clamp`: the body is a
-   `.vault-md` block container holding block children (md-p / md-pre / md-table),
-   and `-webkit-box` + line-clamp on a block-child container is undefined and can
-   collapse the whole block to height 0 in some webview engines (R5). max-height
-   clamps reliably regardless of child structure; the show-more toggle (not an
-   ellipsis) signals the cut. 3 lines ≈ 4.5em at line-height 1.5. */
-.vault-preview-message-thinking.is-clamped:not(.is-expanded) .vault-md {
-  max-height: 4.5em;
-  overflow: hidden;
-}
-.vault-preview-thinking-toggle {
-  margin-top: 3px;
+/* Collapsed reasoning: role chip + a single-line gist + chevron on one row. The
+   head is the click target; the full markdown body shows only once expanded. A
+   1-line ellipsis (below) is reliable where a multi-line clamp on the `.vault-md`
+   block is not — `-webkit-line-clamp` can collapse block-child containers to
+   height 0 in some webview engines (R5). */
+.vault-preview-thinking-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  margin: 0;
   padding: 0;
-  background: transparent;
   border: 0;
-  color: var(--vscode-textLink-foreground, var(--vscode-descriptionForeground));
+  background: transparent;
+  color: inherit;
   font: inherit;
-  font-size: 11px;
   cursor: pointer;
+  text-align: left;
 }
-.vault-preview-thinking-toggle:hover {
-  text-decoration: underline;
+.vault-preview-thinking-head .vault-preview-message-role {
+  flex: 0 0 auto;
+  margin-bottom: 0;
 }
-.vault-preview-thinking-toggle:focus-visible {
+.vault-preview-thinking-head:focus-visible {
   outline: 1px solid var(--vscode-focusBorder);
   outline-offset: 1px;
+  border-radius: 3px;
+}
+.vault-preview-thinking-gist {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  font-style: italic;
+  font-size: 12px;
+  color: var(--vscode-descriptionForeground);
+  opacity: 0.85;
+}
+.vault-preview-thinking-chevron {
+  display: inline-flex;
+  flex: 0 0 auto;
+  color: var(--vscode-descriptionForeground);
+  transition: transform 120ms ease-out;
+}
+.vault-preview-message-thinking.is-expanded .vault-preview-thinking-chevron {
+  transform: rotate(180deg);
+}
+.vault-preview-thinking-body {
+  margin-top: 4px;
+}
+/* Collapsed: hide the full body (the gist stands in). Expanded: hide the gist. */
+.vault-preview-message-thinking.is-collapsible:not(.is-expanded) .vault-preview-thinking-body {
+  display: none;
+}
+.vault-preview-message-thinking.is-expanded .vault-preview-thinking-gist {
+  display: none;
 }
 
 /* === Rich message body (markdown-lite, nest-workflow-team-sessions D17) ===

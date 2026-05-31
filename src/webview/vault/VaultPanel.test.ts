@@ -6,7 +6,7 @@
 
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { VaultListResult, VaultSessionEntry } from "../../vault/types";
-import { resetTooltipForTests } from "../fileTree/Tooltip";
+import { resetTooltipForTests } from "../ui/Tooltip";
 import { VaultPanel } from "./VaultPanel";
 
 afterEach(() => {
@@ -273,6 +273,22 @@ describe("VaultPanel grouping + states (redesign 4_2)", () => {
     host.querySelector<HTMLElement>(".vault-group-header--folder")?.click();
     expect(host.querySelectorAll(".vault-row")).toHaveLength(0);
     expect(host.querySelector(".vault-group-header--folder.is-collapsed")).not.toBeNull();
+  });
+
+  it("Agent mode collapses/expands a group on header click, hiding its rows", () => {
+    const host = createHost();
+    const panel = new VaultPanel({ host, postMessage: () => {}, getInitialCollapsed: () => false });
+    panel.render(result([entry({ id: "claude:a", agent: "claude" }), entry({ id: "claude:b", agent: "claude" })]));
+    panel.setGroupMode("agent");
+    expect(host.querySelectorAll(".vault-row")).toHaveLength(2);
+    // The agent header (not just folder) is now a collapse toggle.
+    host.querySelector<HTMLElement>(".vault-group-header")?.click();
+    expect(host.querySelectorAll(".vault-row")).toHaveLength(0);
+    expect(host.querySelector(".vault-group-header.is-collapsed")).not.toBeNull();
+    // Re-click expands it back.
+    host.querySelector<HTMLElement>(".vault-group-header")?.click();
+    expect(host.querySelectorAll(".vault-row")).toHaveLength(2);
+    expect(host.querySelector(".vault-group-header.is-collapsed")).toBeNull();
   });
 
   it("seeds + persists the grouping mode", () => {
@@ -1042,6 +1058,56 @@ describe("VaultPanel session preview (redesign 5_2)", () => {
     expect(host.querySelector(".vault-preview")?.classList.contains("vault-preview--codex")).toBe(true);
   });
 
+  it("collapses long reasoning to a one-line gist that expands on click", () => {
+    const host = createHost();
+    const panel = new VaultPanel({ host, postMessage: () => {}, getInitialCollapsed: () => false });
+    panel.render(result([entry({ id: "claude:a" })]));
+    host.querySelector<HTMLElement>(".vault-row")?.click();
+    const reasoning = "**Evaluating schema requirements**\nI'm considering the implications of an empty description.";
+    panel.handleSessionDetailResponse({
+      type: "vaultSessionDetailResponse",
+      entryId: "claude:a",
+      detail: detail({
+        timeline: [
+          { kind: "message", role: "user", text: "go" },
+          { kind: "thinking", text: reasoning },
+        ],
+      }),
+    });
+    const block = host.querySelector(".vault-preview-message-thinking");
+    expect(block?.classList.contains("is-collapsible")).toBe(true);
+    expect(block?.classList.contains("is-expanded")).toBe(false);
+    // Gist = first line with markdown noise stripped (no fade, no half-cut line).
+    expect(host.querySelector(".vault-preview-thinking-gist")?.textContent).toBe("Evaluating schema requirements");
+    // Clicking the head expands the full reasoning body.
+    const head = host.querySelector<HTMLButtonElement>(".vault-preview-thinking-head");
+    expect(head?.getAttribute("aria-expanded")).toBe("false");
+    head?.click();
+    expect(block?.classList.contains("is-expanded")).toBe(true);
+    expect(head?.getAttribute("aria-expanded")).toBe("true");
+    expect(host.querySelector(".vault-preview-thinking-body")?.textContent).toContain("empty description");
+  });
+
+  it("keeps short reasoning inline (no gist/collapse)", () => {
+    const host = createHost();
+    const panel = new VaultPanel({ host, postMessage: () => {}, getInitialCollapsed: () => false });
+    panel.render(result([entry({ id: "claude:a" })]));
+    host.querySelector<HTMLElement>(".vault-row")?.click();
+    panel.handleSessionDetailResponse({
+      type: "vaultSessionDetailResponse",
+      entryId: "claude:a",
+      detail: detail({
+        timeline: [
+          { kind: "message", role: "user", text: "go" },
+          { kind: "thinking", text: "quick note" },
+        ],
+      }),
+    });
+    expect(host.querySelector(".vault-preview-message-thinking.is-collapsible")).toBeNull();
+    expect(host.querySelector(".vault-preview-thinking-gist")).toBeNull();
+    expect(host.querySelector(".vault-preview-message-thinking p")?.textContent).toBe("quick note");
+  });
+
   it("loads older messages when truncated: the button posts a larger limit; the grown response removes it", () => {
     const host = createHost();
     const posted: { type: string; entryId?: string; limit?: number }[] = [];
@@ -1094,6 +1160,81 @@ describe("VaultPanel session preview (redesign 5_2)", () => {
     more?.click();
     expect(host.querySelectorAll(".vault-preview-body .vault-preview-message")).toHaveLength(9);
     expect(host.querySelector(".vault-preview-expand")).toBeNull();
+  });
+
+  it("pins the run's concluding assistant message below the cap (head + tail)", () => {
+    const host = createHost();
+    const panel = new VaultPanel({ host, postMessage: () => {}, getInitialCollapsed: () => false });
+    panel.render(result([entry({ id: "claude:a" })]));
+    host.querySelector<HTMLElement>(".vault-row")?.click();
+    // Run = thinking + 3 tools + a trailing conclusion (5 items, > CAP=3). The
+    // conclusion sits at the tail, where a plain head slice would bury it.
+    panel.handleSessionDetailResponse({
+      type: "vaultSessionDetailResponse",
+      entryId: "claude:a",
+      detail: detail({
+        timeline: [
+          { kind: "message", role: "user", text: "go" },
+          { kind: "thinking", text: "planning" },
+          { kind: "tool", tool: "Bash", detail: "step 1" },
+          { kind: "tool", tool: "Bash", detail: "step 2" },
+          { kind: "tool", tool: "Bash", detail: "step 3" },
+          { kind: "message", role: "assistant", text: "FINAL ANSWER" },
+        ],
+      }),
+    });
+    // Head = CAP-1 (thinking + first tool) + "Show 2 more steps" + pinned tail.
+    const more = host.querySelector<HTMLButtonElement>(".vault-preview-expand");
+    expect(more?.textContent).toBe("Show 2 more steps");
+    // The conclusion is index 4 (beyond the 2-item head) yet still rendered →
+    // it was pinned, not coincidentally inside the head window.
+    const assistant = host.querySelector(".vault-preview-body .vault-preview-message-assistant");
+    expect(assistant?.textContent).toContain("FINAL ANSWER");
+    // Only the head tool is shown; the middle two are hidden behind the expand.
+    expect(host.querySelectorAll(".vault-preview-body .vault-preview-message-tool")).toHaveLength(1);
+    // The pin sits AFTER the expand button (tail position, not in the head).
+    const buttons = Array.from(host.querySelectorAll(".vault-preview-body > *"));
+    expect(buttons.indexOf(more as Element)).toBeLessThan(buttons.indexOf(assistant as Element));
+    // Expanding reveals every step in natural order; the conclusion remains.
+    more?.click();
+    expect(host.querySelectorAll(".vault-preview-body .vault-preview-message-tool")).toHaveLength(3);
+    expect(host.querySelector(".vault-preview-expand")).toBeNull();
+    expect(
+      host.querySelector(".vault-preview-body .vault-preview-message-assistant")?.textContent,
+    ).toContain("FINAL ANSWER");
+  });
+
+  it("does NOT pin a mid-run assistant line when steps follow it (no reorder)", () => {
+    const host = createHost();
+    const panel = new VaultPanel({ host, postMessage: () => {}, getInitialCollapsed: () => false });
+    panel.render(result([entry({ id: "claude:a" })]));
+    host.querySelector<HTMLElement>(".vault-row")?.click();
+    // Run = 3 tools + a mid assistant line + a trailing tool (5 items > CAP). The
+    // assistant is NOT the last item, so pinning it would bury the trailing tool.
+    panel.handleSessionDetailResponse({
+      type: "vaultSessionDetailResponse",
+      entryId: "claude:a",
+      detail: detail({
+        timeline: [
+          { kind: "message", role: "user", text: "go" },
+          { kind: "tool", tool: "Bash", detail: "s1" },
+          { kind: "tool", tool: "Bash", detail: "s2" },
+          { kind: "tool", tool: "Bash", detail: "s3" },
+          { kind: "message", role: "assistant", text: "let me inspect" },
+          { kind: "tool", tool: "Bash", detail: "s4" },
+        ],
+      }),
+    });
+    // Plain head (3 tools) + "Show 2 more"; the mid assistant stays hidden, NOT pinned.
+    expect(host.querySelector(".vault-preview-expand")?.textContent).toBe("Show 2 more steps");
+    expect(host.querySelectorAll(".vault-preview-body .vault-preview-message-tool")).toHaveLength(3);
+    expect(host.querySelector(".vault-preview-body .vault-preview-message-assistant")).toBeNull();
+    // Expanding shows the assistant in its natural position (before the last tool).
+    host.querySelector<HTMLButtonElement>(".vault-preview-expand")?.click();
+    expect(host.querySelector(".vault-preview-body .vault-preview-message-assistant")?.textContent).toContain(
+      "let me inspect",
+    );
+    expect(host.querySelectorAll(".vault-preview-body .vault-preview-message-tool")).toHaveLength(4);
   });
 
   it("renders a subagentSession as a collapsed block with title + first message", () => {
@@ -1165,6 +1306,116 @@ describe("VaultPanel session preview (redesign 5_2)", () => {
     expect(host.querySelector(".vault-preview-subagent-body .vault-preview-message-assistant p")?.textContent).toBe(
       "child reply",
     );
+  });
+
+  it("caps + pins the conclusion inside a nested subagent transcript (like the root)", () => {
+    const host = createHost();
+    const panel = new VaultPanel({ host, postMessage: () => {}, getInitialCollapsed: () => false });
+    panel.render(result([entry({ id: "opencode:a", agent: "opencode" })]));
+    host.querySelector<HTMLElement>(".vault-row")?.click();
+    panel.handleSessionDetailResponse({
+      type: "vaultSessionDetailResponse",
+      entryId: "opencode:a",
+      detail: detail({
+        entryId: "opencode:a",
+        timeline: [{ kind: "subagentSession", entryId: "opencode:ses_kid", title: "Sub", firstMessage: "prompt" }],
+      }),
+    });
+    host.querySelector<HTMLButtonElement>(".vault-preview-subagent-head")?.click();
+    // Child run = thinking + 3 tools + a trailing conclusion (5 items > CAP=3).
+    panel.handleSessionDetailResponse({
+      type: "vaultSessionDetailResponse",
+      entryId: "opencode:ses_kid",
+      detail: detail({
+        entryId: "opencode:ses_kid",
+        timeline: [
+          { kind: "message", role: "user", text: "child prompt" },
+          { kind: "thinking", text: "planning" },
+          { kind: "tool", tool: "Bash", detail: "s1" },
+          { kind: "tool", tool: "Bash", detail: "s2" },
+          { kind: "tool", tool: "Bash", detail: "s3" },
+          { kind: "message", role: "assistant", text: "CHILD CONCLUSION" },
+        ],
+      }),
+    });
+    const body = host.querySelector(".vault-preview-subagent-body");
+    // Head shows CAP-1 (thinking + 1 tool) → only 1 tool visible, not all 3.
+    expect(body?.querySelectorAll(".vault-preview-message-tool")).toHaveLength(1);
+    expect(body?.querySelector(".vault-preview-expand")?.textContent).toBe("Show 2 more steps");
+    // The conclusion is pinned below the expand and stays visible.
+    expect(body?.querySelector(".vault-preview-message-assistant")?.textContent).toContain("CHILD CONCLUSION");
+  });
+
+  it("gives nested + run controls accessible titles/labels (group subagent had none)", () => {
+    const host = createHost();
+    const panel = new VaultPanel({ host, postMessage: () => {}, getInitialCollapsed: () => false });
+    panel.render(result([entry({ id: "opencode:a", agent: "opencode" })]));
+    host.querySelector<HTMLElement>(".vault-row")?.click();
+    panel.handleSessionDetailResponse({
+      type: "vaultSessionDetailResponse",
+      entryId: "opencode:a",
+      detail: detail({
+        entryId: "opencode:a",
+        // Group node (no `agent`) — previously had no accessible name.
+        timeline: [{ kind: "subagentSession", entryId: "opencode:ses_grp", title: "Workflow run", firstMessage: "go" }],
+      }),
+    });
+    const head = host.querySelector<HTMLButtonElement>(".vault-preview-subagent-head");
+    expect(head?.getAttribute("aria-label")).toBe("Nested session: Workflow run");
+    expect(head?.title).toBe("Toggle Workflow run");
+  });
+
+  it("keeps a nested run's expansion when the ROOT loads older messages", () => {
+    const host = createHost();
+    const posted: { type: string; entryId?: string; limit?: number }[] = [];
+    const panel = new VaultPanel({ host, postMessage: (m) => posted.push(m), getInitialCollapsed: () => false });
+    panel.render(result([entry({ id: "opencode:a", agent: "opencode" })]));
+    host.querySelector<HTMLElement>(".vault-row")?.click();
+    // Root is truncated (older messages available) and holds a subagent node.
+    panel.handleSessionDetailResponse({
+      type: "vaultSessionDetailResponse",
+      entryId: "opencode:a",
+      detail: detail({
+        truncated: true,
+        timeline: [{ kind: "subagentSession", entryId: "opencode:ses_kid", title: "Sub", firstMessage: "p" }],
+      }),
+    });
+    // Expand the subagent and deliver a child transcript with a capped run.
+    host.querySelector<HTMLButtonElement>(".vault-preview-subagent-head")?.click();
+    panel.handleSessionDetailResponse({
+      type: "vaultSessionDetailResponse",
+      entryId: "opencode:ses_kid",
+      detail: detail({
+        entryId: "opencode:ses_kid",
+        timeline: [
+          { kind: "message", role: "user", text: "child" },
+          { kind: "thinking", text: "t" },
+          { kind: "tool", tool: "Bash", detail: "s1" },
+          { kind: "tool", tool: "Bash", detail: "s2" },
+          { kind: "tool", tool: "Bash", detail: "s3" },
+          { kind: "message", role: "assistant", text: "done" },
+        ],
+      }),
+    });
+    // Expand the nested run → all 3 child tools visible, no nested expand button.
+    host.querySelector<HTMLButtonElement>(".vault-preview-subagent-body .vault-preview-expand")?.click();
+    expect(host.querySelectorAll(".vault-preview-subagent-body .vault-preview-message-tool")).toHaveLength(3);
+    // Now the ROOT loads older messages (prepends to the root timeline only).
+    host.querySelector<HTMLButtonElement>(".vault-preview-loadmore")?.click();
+    panel.handleSessionDetailResponse({
+      type: "vaultSessionDetailResponse",
+      entryId: "opencode:a",
+      detail: detail({
+        truncated: false,
+        timeline: [
+          { kind: "message", role: "user", text: "older root msg" },
+          { kind: "subagentSession", entryId: "opencode:ses_kid", title: "Sub", firstMessage: "p" },
+        ],
+      }),
+    });
+    // The nested run stays expanded — only root-prefixed run keys are cleared.
+    expect(host.querySelectorAll(".vault-preview-subagent-body .vault-preview-message-tool")).toHaveLength(3);
+    expect(host.querySelector(".vault-preview-subagent-body .vault-preview-expand")).toBeNull();
   });
 
   it("collapsing a subagent block clears its nested body", () => {
@@ -1457,8 +1708,25 @@ describe("VaultPanel header tooltips", () => {
     // shared custom-tooltip widget, referenced via aria-describedby (WCAG).
     expect(searchBtn?.hasAttribute("title")).toBe(false);
     expect(refreshBtn?.hasAttribute("title")).toBe(false);
-    expect(searchBtn?.getAttribute("aria-describedby")).toBe("file-tree-tooltip-widget");
-    expect(refreshBtn?.getAttribute("aria-describedby")).toBe("file-tree-tooltip-widget");
+    expect(searchBtn?.getAttribute("aria-describedby")).toBe("webview-tooltip-widget");
+    expect(refreshBtn?.getAttribute("aria-describedby")).toBe("webview-tooltip-widget");
+  });
+
+  it("preview header icon buttons use the custom tooltip (no slow native title)", () => {
+    const host = createHost();
+    const panel = new VaultPanel({ host, postMessage: () => {}, getInitialCollapsed: () => false });
+    panel.render(result([entry({ id: "claude:a" })]));
+    host.querySelector<HTMLElement>(".vault-row")?.click(); // opens the preview (header built)
+    const close = host.querySelector<HTMLButtonElement>(".vault-preview-close");
+    const max = host.querySelector<HTMLButtonElement>(".vault-preview-maximize");
+    expect(close?.hasAttribute("title")).toBe(false);
+    expect(close?.getAttribute("aria-describedby")).toBe("webview-tooltip-widget");
+    expect(max?.hasAttribute("title")).toBe(false);
+    expect(max?.getAttribute("aria-describedby")).toBe("webview-tooltip-widget");
+    // Toggling maximize must NOT reintroduce a native title — getText drives the
+    // stateful label, so the in-place button mutation never re-sets `.title`.
+    max?.click();
+    expect(host.querySelector<HTMLButtonElement>(".vault-preview-maximize")?.hasAttribute("title")).toBe(false);
   });
 
   it("opening search does not re-introduce a native title (dynamic getText drives the hint)", () => {
@@ -1583,5 +1851,51 @@ describe("VaultPanel session-preview geometry persistence", () => {
     );
     document.dispatchEvent(new PointerEvent("pointerup", { pointerId: 1 }));
     expect(persisted).toHaveLength(0);
+  });
+
+  it("starts a move when dragging the header padding, not just the title", () => {
+    const host = createHost();
+    const persisted: import("../state/WebviewState").VaultPreviewGeometry[] = [];
+    const panel = new VaultPanel({
+      host,
+      postMessage: () => {},
+      getInitialCollapsed: () => false,
+      getInitialPreviewGeometry: () => ({ top: 50, left: 100, width: 600, height: 400 }),
+      persistPreviewGeometry: (g) => persisted.push(g),
+    });
+    panel.render(result([entry({ id: "claude:a" })]));
+    const preview = openPreview(host);
+    rectFromStyle(preview, { left: 100, top: 50, width: 600, height: 400 });
+    // Press the header itself (the padding area), not the inner title row.
+    const header = preview.querySelector<HTMLElement>(".vault-preview-header") as HTMLElement;
+    header.dispatchEvent(
+      new PointerEvent("pointerdown", { bubbles: true, button: 0, pointerId: 1, clientX: 200, clientY: 200 }),
+    );
+    document.dispatchEvent(new PointerEvent("pointermove", { pointerId: 1, clientX: 230, clientY: 240 }));
+    document.dispatchEvent(new PointerEvent("pointerup", { pointerId: 1 }));
+    expect(persisted.at(-1)).toEqual({ top: 90, left: 130, width: 600, height: 400, maximized: false });
+  });
+
+  it("does not start a move when pressing the meta block (keeps it selectable)", () => {
+    const host = createHost();
+    const persisted: import("../state/WebviewState").VaultPreviewGeometry[] = [];
+    const panel = new VaultPanel({
+      host,
+      postMessage: () => {},
+      getInitialCollapsed: () => false,
+      getInitialPreviewGeometry: () => ({ top: 50, left: 100, width: 600, height: 400 }),
+      persistPreviewGeometry: (g) => persisted.push(g),
+    });
+    panel.render(result([entry({ id: "claude:a" })]));
+    const preview = openPreview(host);
+    rectFromStyle(preview, { left: 100, top: 50, width: 600, height: 400 });
+    const meta = preview.querySelector<HTMLElement>(".vault-preview-meta") as HTMLElement;
+    meta.dispatchEvent(
+      new PointerEvent("pointerdown", { bubbles: true, button: 0, pointerId: 1, clientX: 200, clientY: 200 }),
+    );
+    document.dispatchEvent(new PointerEvent("pointermove", { pointerId: 1, clientX: 230, clientY: 240 }));
+    document.dispatchEvent(new PointerEvent("pointerup", { pointerId: 1 }));
+    expect(persisted).toHaveLength(0);
+    expect(preview.style.left).toBe("100px");
   });
 });
