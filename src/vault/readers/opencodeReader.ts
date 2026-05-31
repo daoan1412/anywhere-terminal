@@ -103,12 +103,24 @@ function isPlaceholderTitle(title: string): boolean {
  * Split the suffix off: return the clean description plus the embedded agent, so
  * the agent can also be RECOVERED when the row's own `agent` column is empty (it
  * frequently is for nested spawns). No match → the title is returned untouched
- * with no agent. Anchored at both ends with the literal `(@…subagent)` tail, so
- * it's linear (no catastrophic backtracking) on the short session-title input. */
+ * with no agent.
+ *
+ * The agent is captured as `[^)]+?` — "anything up to the structural ` subagent)`
+ * tail, minus a literal `)`" — NOT a restricted id class: OpenCode interpolates the
+ * raw `subagent_type` string into `… (@<name> subagent)` with no character limit, so
+ * a custom name containing spaces / slashes must still be split off and recovered.
+ * The lazy `.*?` description plus the `)`-excluding agent class means a description
+ * that itself contains an earlier `(@foo)` is not mis-split — only the trailing
+ * ` (@… subagent)` matches. Anchored at both ends with the literal `subagent)` tail,
+ * so it stays linear on the short session-title input. */
 export function splitOpencodeSubtaskTitle(rawTitle: string): { title: string; agent?: string } {
-  const m = /^(.*?)\s*\(@([\w.-]+)\s+subagent\)\s*$/.exec(rawTitle);
-  if (m && m[1].trim()) {
-    return { title: m[1].trim(), agent: m[2] };
+  const m = /^(.*?)\s*\(@([^)]+?)\s+subagent\)\s*$/.exec(rawTitle);
+  const agent = m?.[2].trim();
+  if (m && agent) {
+    // The description MAY be empty (an empty/near-empty task description still
+    // yields a bare ` (@<agent> subagent)` title). Return it as-is and let the
+    // caller fall back to the first message — the agent is still recovered here.
+    return { title: m[1].trim(), agent };
   }
   return { title: rawTitle.trim() };
 }
@@ -513,12 +525,15 @@ function buildChildStubs(rows: Record<string, unknown>[]): { timestamp: number; 
     // Strip it (the webview renders a separate @agent chip) and recover the agent
     // name from it when the row's own `agent` column is empty.
     const split = rawTitle ? splitOpencodeSubtaskTitle(rawTitle) : undefined;
-    const cleanTitle = split?.title;
+    // Empty cleaned title (a bare `(@x subagent)`) → undefined so the fallbacks engage.
+    const cleanTitle = split?.title || undefined;
     const firstMessage = firstUserPartText(row.first_user_part);
     // Prefer the cleaned title; fall back to the first user message for placeholders.
     const title =
       cleanTitle && !isPlaceholderTitle(cleanTitle) ? cleanTitle : (firstMessage ?? cleanTitle ?? "Subagent");
-    const agent = asString(row.agent) ?? split?.agent;
+    // `strField` trims + treats a whitespace-only column as absent, so a blank
+    // `agent` column falls through to the agent recovered from the title suffix.
+    const agent = strField(row.agent) ?? split?.agent;
     const timestamp = Number(row.time_created) || 0;
     stubs.push({
       timestamp,

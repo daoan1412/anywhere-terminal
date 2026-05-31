@@ -257,6 +257,32 @@ describe("readOpenCodeDetail child sub-sessions", () => {
     expect(stub?.kind === "subagentSession" && stub.title).toBe("Extract change knowledge");
     expect(stub?.kind === "subagentSession" && stub.agent).toBe("asm-knowledge-extract");
   });
+
+  it("falls back to the first message for a bare-suffix title while still recovering the agent", async () => {
+    const readSqliteFn = childDetailMock({
+      id: "ses_kid",
+      title: "(@general subagent)", // empty description → bare suffix
+      agent: "",
+      first_user_part: JSON.stringify({ type: "text", text: "do the thing" }),
+    });
+    const detail = await readOpenCodeDetail("ses_parent", { dataDir: "/x/oc", readSqliteFn }, undefined);
+    const stub = detail?.timeline.find((i) => i.kind === "subagentSession");
+    expect(stub?.kind === "subagentSession" && stub.title).toBe("do the thing");
+    expect(stub?.kind === "subagentSession" && stub.agent).toBe("general");
+  });
+
+  it("uses the first message for a placeholder title carrying a suffix, still recovering the agent", async () => {
+    const readSqliteFn = childDetailMock({
+      id: "ses_kid",
+      title: "New session - 2026-05-01T00:00:00Z (@asm-finder subagent)",
+      agent: "",
+      first_user_part: JSON.stringify({ type: "text", text: "find the code" }),
+    });
+    const detail = await readOpenCodeDetail("ses_parent", { dataDir: "/x/oc", readSqliteFn }, undefined);
+    const stub = detail?.timeline.find((i) => i.kind === "subagentSession");
+    expect(stub?.kind === "subagentSession" && stub.title).toBe("find the code");
+    expect(stub?.kind === "subagentSession" && stub.agent).toBe("asm-finder");
+  });
 });
 
 describe("splitOpencodeSubtaskTitle", () => {
@@ -271,8 +297,29 @@ describe("splitOpencodeSubtaskTitle", () => {
     expect(splitOpencodeSubtaskTitle("Just a normal title")).toEqual({ title: "Just a normal title" });
   });
 
-  it("does not strip when the suffix would leave an empty description", () => {
-    // Nothing meaningful to keep → leave the raw title rather than blank it out.
-    expect(splitOpencodeSubtaskTitle("(@general subagent)")).toEqual({ title: "(@general subagent)" });
+  it("recovers agent names that contain characters outside `[\\w.-]` (slashes, spaces)", () => {
+    // OpenCode interpolates the raw subagent_type, which has no character limit.
+    expect(splitOpencodeSubtaskTitle("Audit auth (@review/logic subagent)")).toEqual({
+      title: "Audit auth",
+      agent: "review/logic",
+    });
+    expect(splitOpencodeSubtaskTitle("Audit auth (@review logic subagent)")).toEqual({
+      title: "Audit auth",
+      agent: "review logic",
+    });
+  });
+
+  it("does not mis-split a description that itself contains an earlier `(@…)`", () => {
+    // Only the trailing ` (@… subagent)` is the suffix; the inner `(@foo)` stays.
+    expect(splitOpencodeSubtaskTitle("Fix (@foo) bug (@bar subagent)")).toEqual({
+      title: "Fix (@foo) bug",
+      agent: "bar",
+    });
+  });
+
+  it("recovers the agent even when the description is empty (bare suffix)", () => {
+    // Empty description → blank title (caller falls back to the first message),
+    // but the agent is still recovered so the @chip renders.
+    expect(splitOpencodeSubtaskTitle("(@general subagent)")).toEqual({ title: "", agent: "general" });
   });
 });

@@ -2165,6 +2165,9 @@ export class VaultPanel {
       titleEl.className = "vault-preview-subagent-title";
       titleEl.textContent = item.title;
       head.append(chevron, badge, agentEl, sep, titleEl);
+      // The split spans + `aria-hidden` separator would otherwise be announced as
+      // "agent @reviewer · Review the diff"; a clean accessible name reads better.
+      head.setAttribute("aria-label", `Subagent @${item.agent}: ${item.title}`);
     } else {
       const titleEl = document.createElement("span");
       titleEl.className = "vault-preview-subagent-title";
