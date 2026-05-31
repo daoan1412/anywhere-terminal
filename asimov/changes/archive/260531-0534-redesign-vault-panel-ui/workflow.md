@@ -47,11 +47,11 @@
 
 ## Archive
 
-- [ ] Deploy Gate _(skip if `asimov/project.md` § Commands → Deploy is N/A)_:
-  - [ ] Run deploy command
-  - [ ] Run smoke test
-- [ ] Apply deltas: `bun run asm change apply`
-- [ ] Archive change: `bun run asm change archive`
+- [-] Deploy Gate _(skip if `asimov/project.md` § Commands → Deploy is N/A)_: no Deploy command in project.md § Commands → skipped
+  - [-] Run deploy command
+  - [-] Run smoke test
+- [x] Apply deltas: `bun run asm change apply`
+- [x] Archive change: `bun run asm change archive`
 - [ ] Commit all changes
 
 ## Notes
