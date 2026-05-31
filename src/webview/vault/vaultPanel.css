@@ -658,7 +658,7 @@
   z-index: 1000;
   display: none;
   flex-direction: column;
-  width: 440px;
+  width: 560px;
   height: min(70vh, 560px);
   min-width: 280px;
   min-height: 200px;
@@ -776,6 +776,13 @@
   display: flex;
   align-items: center;
   gap: 8px;
+  /* Doubles as the drag handle to move the floating card. */
+  cursor: move;
+  touch-action: none;
+}
+/* Maximized fills the viewport — moving is disabled, so no move cursor. */
+.vault-preview--max .vault-preview-title-row {
+  cursor: default;
 }
 .vault-preview-title {
   flex: 1;
@@ -797,6 +804,8 @@
   align-items: center;
   gap: 4px;
   flex-shrink: 0;
+  /* Reset the title row's move cursor over the action cluster. */
+  cursor: default;
 }
 .vault-preview-resume {
   display: inline-flex;
@@ -869,6 +878,58 @@
   display: flex;
   flex-direction: column;
   gap: 8px;
+}
+/* Floating scroll-to-top / scroll-to-bottom cluster, pinned bottom-right of the
+   preview card. Container is pointer-transparent; only visible buttons accept
+   pointer events so a hidden FAB never blocks clicks on the transcript. The
+   right offset clears both the SE resize handle and a classic (non-overlay)
+   vertical scrollbar — e.g. on Windows, where the body scrollbar reserves
+   layout width. */
+.vault-preview-scroll-nav {
+  position: absolute;
+  right: 20px;
+  bottom: 16px;
+  z-index: 3;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  pointer-events: none;
+}
+.vault-preview-scroll-nav.is-empty {
+  display: none;
+}
+.vault-preview-scroll-btn {
+  width: 28px;
+  height: 28px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  border: 1px solid var(--vscode-widget-border, var(--vscode-panel-border, rgba(128, 128, 128, 0.35)));
+  border-radius: 50%;
+  background: var(--vscode-editorWidget-background, var(--vscode-editor-background));
+  color: var(--vscode-foreground);
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.4);
+  cursor: pointer;
+  opacity: 0;
+  transform: translateY(4px);
+  transition:
+    opacity 0.12s ease,
+    transform 0.12s ease;
+  pointer-events: none;
+}
+.vault-preview-scroll-btn.is-visible {
+  opacity: 0.85;
+  transform: none;
+  pointer-events: auto;
+}
+.vault-preview-scroll-btn.is-visible:hover {
+  opacity: 1;
+  background: var(--vscode-toolbar-hoverBackground, var(--vscode-editorWidget-background));
+}
+.vault-preview-scroll-btn:focus-visible {
+  outline: 1px solid var(--vscode-focusBorder);
+  outline-offset: 1px;
 }
 .vault-preview-message {
   border-left: 2px solid color-mix(in srgb, var(--vscode-foreground) 15%, transparent);
@@ -1110,10 +1171,17 @@
 /* ── Nested sub-session (subagent) block — collapsed title+first message,
       click to lazily load the child transcript ──────────────────────────── */
 .vault-preview-subagent {
-  margin: 2px 0 2px 14px;
-  border: 1px solid var(--vscode-panel-border, var(--vscode-input-border, transparent));
+  /* Accent for the whole subagent card. `--vscode-textLink-foreground` is a
+     foreground/link token (always legible across themes) — unlike the subtle
+     border vars the first team design leaned on, which resolved near-invisible. */
+  --subagent-accent: var(--vscode-textLink-foreground, #4aa3ff);
+  margin: 3px 0 3px 10px;
+  border: 1px solid color-mix(in srgb, var(--subagent-accent) 30%, transparent);
+  /* Left accent bar mirrors the teammate node so nested agent runs read as a
+     distinct, scannable band rather than blending into plain message/tool rows. */
+  border-left: 3px solid var(--subagent-accent);
   border-radius: 4px;
-  background: color-mix(in srgb, var(--vscode-editor-background) 60%, transparent);
+  background: color-mix(in srgb, var(--subagent-accent) 8%, var(--vscode-editor-background));
   overflow: hidden;
   /* Same flex-column collapse guard as .vault-preview-teammate: an
      `overflow: hidden` flex item shrinks to 0 height in a packed column. */
@@ -1122,7 +1190,7 @@
 .vault-preview-subagent-head {
   display: flex;
   align-items: center;
-  gap: 6px;
+  gap: 5px;
   width: 100%;
   padding: 4px 8px;
   border: 0;
@@ -1133,7 +1201,7 @@
   cursor: pointer;
 }
 .vault-preview-subagent-head:hover {
-  background: var(--vscode-list-hoverBackground);
+  background: color-mix(in srgb, var(--subagent-accent) 14%, transparent);
 }
 .vault-preview-subagent-head:focus-visible {
   outline: 1px solid var(--vscode-focusBorder);
@@ -1150,14 +1218,44 @@
 .vault-preview-subagent.is-open .vault-preview-subagent-chevron {
   transform: rotate(0deg);
 }
-.vault-preview-subagent-title {
-  flex: 1 1 auto;
+/* Small "agent" pill — the explicit, styled cue that this node is a nested agent
+   run (the clean equivalent of Claude's literal "(agent)" tag). */
+.vault-preview-subagent-badge {
+  flex: 0 0 auto;
+  font-size: 9px;
+  font-weight: 700;
+  line-height: 1.4;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  padding: 1px 5px;
+  border-radius: 999px;
+  color: var(--subagent-accent);
+  background: color-mix(in srgb, var(--subagent-accent) 18%, transparent);
+}
+.vault-preview-subagent-agent {
+  flex: 0 1 auto;
   min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
   font-weight: 600;
   font-size: 11px;
+  color: var(--subagent-accent);
+}
+.vault-preview-subagent-sep {
+  flex: 0 0 auto;
+  color: var(--vscode-descriptionForeground);
+  opacity: 0.7;
+}
+.vault-preview-subagent-title {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-weight: 500;
+  font-size: 11px;
+  color: var(--vscode-foreground);
 }
 .vault-preview-subagent-firstmsg {
   margin: 0;

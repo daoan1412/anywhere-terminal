@@ -3,7 +3,13 @@
 import { describe, expect, it, vi } from "vitest";
 import type { SqliteResult } from "../sqlite";
 import type { VaultTimelineItem } from "../types";
-import { mapOpencodeRows, type OcMessageRow, type OcPartRow, readOpenCodeDetail } from "./opencodeReader";
+import {
+  mapOpencodeRows,
+  type OcMessageRow,
+  type OcPartRow,
+  readOpenCodeDetail,
+  splitOpencodeSubtaskTitle,
+} from "./opencodeReader";
 
 function msg(
   id: string,
@@ -34,6 +40,23 @@ function toolPart(
 
 function subtaskPart(messageId: string, t: number, agent: string, prompt: string): OcPartRow {
   return { messageId, timeCreated: t, data: { type: "subtask", agent, prompt, description: prompt } };
+}
+
+/** Mock readSqlite for readOpenCodeDetail: one parent message + part, plus one
+ *  child session row carrying the given `title`/`agent`/`first_user_part`. */
+function childDetailMock(child: Record<string, unknown>) {
+  return vi.fn(async (_db: string, sql: string): Promise<SqliteResult> => {
+    if (!sql.includes("parent_id") && sql.includes("FROM message")) {
+      return { status: "ok", rows: [{ id: "m1", time_created: 1, data: JSON.stringify({ role: "user" }) }] };
+    }
+    if (!sql.includes("parent_id") && sql.includes("FROM part")) {
+      return {
+        status: "ok",
+        rows: [{ message_id: "m1", time_created: 1, data: JSON.stringify({ type: "text", text: "parent prompt" }) }],
+      };
+    }
+    return { status: "ok", rows: [{ time_created: 2, ...child }] };
+  });
 }
 
 describe("mapOpencodeRows", () => {
@@ -207,5 +230,49 @@ describe("readOpenCodeDetail child sub-sessions", () => {
     const detail = await readOpenCodeDetail("ses_parent", { dataDir: "/x/oc", readSqliteFn }, undefined);
     expect(detail).not.toBeNull();
     expect(detail?.timeline.some((i) => i.kind === "subagentSession")).toBe(false);
+  });
+
+  it("strips OpenCode's `(@<agent> subagent)` title suffix so the @agent chip is not duplicated", async () => {
+    const readSqliteFn = childDetailMock({
+      id: "ses_kid",
+      title: "Review logic architecture (@asm-review-logic subagent)",
+      agent: "asm-review-logic",
+      first_user_part: JSON.stringify({ type: "text", text: "review the logic" }),
+    });
+    const detail = await readOpenCodeDetail("ses_parent", { dataDir: "/x/oc", readSqliteFn }, undefined);
+    const stub = detail?.timeline.find((i) => i.kind === "subagentSession");
+    expect(stub?.kind === "subagentSession" && stub.title).toBe("Review logic architecture");
+    expect(stub?.kind === "subagentSession" && stub.agent).toBe("asm-review-logic");
+  });
+
+  it("recovers the agent from the title suffix when the `agent` column is empty", async () => {
+    const readSqliteFn = childDetailMock({
+      id: "ses_kid",
+      title: "Extract change knowledge (@asm-knowledge-extract subagent)",
+      agent: "", // OpenCode leaves the column empty for some nested spawns
+      first_user_part: JSON.stringify({ type: "text", text: "extract it" }),
+    });
+    const detail = await readOpenCodeDetail("ses_parent", { dataDir: "/x/oc", readSqliteFn }, undefined);
+    const stub = detail?.timeline.find((i) => i.kind === "subagentSession");
+    expect(stub?.kind === "subagentSession" && stub.title).toBe("Extract change knowledge");
+    expect(stub?.kind === "subagentSession" && stub.agent).toBe("asm-knowledge-extract");
+  });
+});
+
+describe("splitOpencodeSubtaskTitle", () => {
+  it("splits the `<description> (@<agent> subagent)` form into description + agent", () => {
+    expect(splitOpencodeSubtaskTitle("Review logic architecture (@asm-review-logic subagent)")).toEqual({
+      title: "Review logic architecture",
+      agent: "asm-review-logic",
+    });
+  });
+
+  it("returns the title untouched (no agent) when there is no subagent suffix", () => {
+    expect(splitOpencodeSubtaskTitle("Just a normal title")).toEqual({ title: "Just a normal title" });
+  });
+
+  it("does not strip when the suffix would leave an empty description", () => {
+    // Nothing meaningful to keep → leave the raw title rather than blank it out.
+    expect(splitOpencodeSubtaskTitle("(@general subagent)")).toEqual({ title: "(@general subagent)" });
   });
 });

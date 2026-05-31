@@ -408,8 +408,13 @@ function removeTerminal(id: string): void {
   store.terminals.delete(id);
   flowControl.delete(id);
 
-  // Delegate split cleanup to renderer
-  splitRenderer.removeTab(id);
+  // Delegate split cleanup to renderer; dispose the hover-preview controller of
+  // every split pane it tears down. The popup now lives on document.body, so
+  // removing the pane container no longer removes its popup — the controller
+  // (and its body-level overlay) must be disposed explicitly.
+  for (const splitId of splitRenderer.removeTab(id)) {
+    factory.disposeHoverController(splitId);
+  }
   store.persist();
 
   // Switch to next available tab or request new one
@@ -522,11 +527,17 @@ const routeMessage = createMessageRouter({
     if (!store.activeTabId) {
       return;
     }
-    splitRenderer.closeSplitPaneById(store.tabActivePaneIds.get(store.activeTabId) ?? store.activeTabId);
+    const closed = splitRenderer.closeSplitPaneById(store.tabActivePaneIds.get(store.activeTabId) ?? store.activeTabId);
+    if (closed) {
+      factory.disposeHoverController(closed);
+    }
   },
   onCloseSplitPaneById(msg) {
     if (msg.sessionId) {
-      splitRenderer.closeSplitPaneById(msg.sessionId);
+      const closed = splitRenderer.closeSplitPaneById(msg.sessionId);
+      if (closed) {
+        factory.disposeHoverController(closed);
+      }
     }
   },
   onSplitPaneAt(msg) {
@@ -868,6 +879,10 @@ function handleInit(msg: InitMessage): void {
       // Grouping mode — default "recent". Persisted across reloads.
       getInitialGroupMode: () => store.getState().vaultGroupMode ?? "recent",
       persistGroupMode: (mode) => store.updateState({ vaultGroupMode: mode }),
+      // Session-preview overlay size/position/maximized — persisted so the
+      // user's dragged + resized layout survives reloads and restarts.
+      getInitialPreviewGeometry: () => store.getState().vaultPreviewGeometry ?? null,
+      persistPreviewGeometry: (geometry) => store.updateState({ vaultPreviewGeometry: geometry }),
       // Folder-filter scope, pulled on each render: the HOST-resolved cwd first
       // (lsof/`/proc` live → shell-integration tracked → spawn cwd — reliable and
       // OSC-7-independent), then the webview's OSC 7 value, then the workspace

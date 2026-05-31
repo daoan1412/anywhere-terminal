@@ -6,12 +6,25 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { FilePreviewResultMessage } from "../../types/messages";
 import {
   computePosition,
+  DEFAULT_POPUP_WIDTH,
   formatBytes,
   HoverPreviewPopup,
   MAX_POPUP_HEIGHT,
   MAX_POPUP_WIDTH,
+  MIN_POPUP_HEIGHT,
+  MIN_POPUP_WIDTH,
   renderPlaceholderText,
 } from "./HoverPreviewPopup";
+
+/**
+ * Pin the jsdom window's inner size. The popup mounts on document.body as a
+ * `position: fixed` overlay and positions/clamps against the VIEWPORT (so it can
+ * spill over the vault / file tree), so the viewport is what drives the math.
+ */
+function setViewport(width: number, height: number): void {
+  Object.defineProperty(window, "innerWidth", { configurable: true, writable: true, value: width });
+  Object.defineProperty(window, "innerHeight", { configurable: true, writable: true, value: height });
+}
 
 function makeTerminalElement(width = 800, height = 600): HTMLElement {
   const el = document.createElement("div");
@@ -29,6 +42,9 @@ function makeTerminalElement(width = 800, height = 600): HTMLElement {
     value: () => ({ left: 0, top: 0, right: width, bottom: height, width, height, x: 0, y: 0, toJSON: () => ({}) }),
   });
   document.body.appendChild(el);
+  // The popup clamps to the viewport now, not the terminal box — mirror the
+  // terminal size into the window so the existing position expectations hold.
+  setViewport(width, height);
   return el;
 }
 
@@ -65,9 +81,11 @@ function makeOkResult(
 
 beforeEach(() => {
   document.body.innerHTML = "";
+  setViewport(1024, 768);
 });
 afterEach(() => {
   document.body.innerHTML = "";
+  setViewport(1024, 768);
 });
 
 describe("formatBytes", () => {
@@ -112,7 +130,7 @@ describe("renderPlaceholderText", () => {
 });
 
 describe("HoverPreviewPopup — show / hide", () => {
-  it("mounts a div.xterm-hover.anywhere-hover-preview with role=tooltip as a child of terminal.element", () => {
+  it("mounts a div.xterm-hover.anywhere-hover-preview with role=tooltip as a fixed overlay on document.body", () => {
     const term = makeTerminalElement();
     const popup = new HoverPreviewPopup();
     popup.show(
@@ -121,11 +139,17 @@ describe("HoverPreviewPopup — show / hide", () => {
       "dark",
     );
 
-    const root = term.querySelector(".anywhere-hover-preview") as HTMLElement | null;
+    const root = document.querySelector(".anywhere-hover-preview") as HTMLElement | null;
     expect(root).toBeTruthy();
     expect(root?.classList.contains("xterm-hover")).toBe(true);
     expect(root?.getAttribute("role")).toBe("tooltip");
-    expect(root?.style.zIndex).toBe("1000");
+    // Above the vault preview overlay (z-index 1000).
+    expect(root?.style.zIndex).toBe("1001");
+    // Mounted on document.body as a fixed overlay (NOT inside the terminal) so
+    // it can extend over the vault / file tree.
+    expect(root?.parentElement).toBe(document.body);
+    expect(term.contains(root)).toBe(false);
+    expect(root?.style.position).toBe("fixed");
   });
 
   it("shows the absPath in the header, truncated with title attribute", () => {
@@ -137,7 +161,7 @@ describe("HoverPreviewPopup — show / hide", () => {
       "dark",
     );
 
-    const pathLabel = term.querySelector(".anywhere-hover-preview-header-path") as HTMLElement | null;
+    const pathLabel = document.querySelector(".anywhere-hover-preview-header-path") as HTMLElement | null;
     expect(pathLabel?.textContent).toBe("/very/long/path/to/foo.ts");
     expect(pathLabel?.getAttribute("title")).toBe("/very/long/path/to/foo.ts");
   });
@@ -188,7 +212,7 @@ describe("HoverPreviewPopup — show / hide", () => {
     for (const { result, expectedSubstring } of cases) {
       popup.hide();
       popup.show(fakeMouseEvent(term, 50, 50), result, "dark");
-      const placeholder = term.querySelector(".anywhere-hover-preview-placeholder");
+      const placeholder = document.querySelector(".anywhere-hover-preview-placeholder");
       expect(placeholder?.textContent).toContain(expectedSubstring);
     }
   });
@@ -198,7 +222,7 @@ describe("HoverPreviewPopup — show / hide", () => {
     const popup = new HoverPreviewPopup();
     popup.show(fakeMouseEvent(term, 380, 50), makeOkResult({ content: "x" }), "dark");
 
-    const root = term.querySelector(".anywhere-hover-preview") as HTMLElement;
+    const root = document.querySelector(".anywhere-hover-preview") as HTMLElement;
     // popupWidth = min(560, 384) = 384, terminalWidth = 400 → left = max(0, 400 - 384) = 16.
     expect(Number.parseInt(root.style.left, 10)).toBe(16);
   });
@@ -208,7 +232,7 @@ describe("HoverPreviewPopup — show / hide", () => {
     const popup = new HoverPreviewPopup();
     popup.show(fakeMouseEvent(term, 50, 280), makeOkResult({ content: "x" }), "dark");
 
-    const root = term.querySelector(".anywhere-hover-preview") as HTMLElement;
+    const root = document.querySelector(".anywhere-hover-preview") as HTMLElement;
     // anchorY=280, offsetHeight=0 in jsdom → fallback to maxPopupHeight = min(360, 284) = 284.
     // 280 + 12 + 284 > 300 → flip. flippedTop = 280 - 12 - 284 = -16 → clamp at max(0, 300-284) = 16.
     expect(Number.parseInt(root.style.top, 10)).toBeLessThan(280);
@@ -231,7 +255,7 @@ describe("HoverPreviewPopup — show / hide", () => {
         { type: "filePreviewResult", path: "p", requestId: "r", status: "ambiguous" },
         "dark",
       );
-      const root = term.querySelector(".anywhere-hover-preview") as HTMLElement;
+      const root = document.querySelector(".anywhere-hover-preview") as HTMLElement;
       // anchorY=280, actualHeight=60. 280 + 12 + 60 = 352 > 300 → flip.
       // flippedTop = 280 - 12 - 60 = 208 (>= 0) → top = 208, popup sits just above the link.
       expect(Number.parseInt(root.style.top, 10)).toBe(208);
@@ -249,9 +273,9 @@ describe("HoverPreviewPopup — show / hide", () => {
     const popup = new HoverPreviewPopup({ onDismiss });
     popup.show(fakeMouseEvent(term, 50, 50), makeOkResult({ content: "x" }), "dark");
 
-    expect(term.querySelector(".anywhere-hover-preview")).toBeTruthy();
+    expect(document.querySelector(".anywhere-hover-preview")).toBeTruthy();
     document.body.dispatchEvent(new MouseEvent("mousedown", { bubbles: true }));
-    expect(term.querySelector(".anywhere-hover-preview")).toBeNull();
+    expect(document.querySelector(".anywhere-hover-preview")).toBeNull();
     expect(onDismiss).toHaveBeenCalledTimes(1);
   });
 
@@ -261,7 +285,7 @@ describe("HoverPreviewPopup — show / hide", () => {
     const popup = new HoverPreviewPopup({ onDismiss });
     popup.show(fakeMouseEvent(term, 50, 50), makeOkResult({ content: "x" }), "dark");
 
-    const popupEl = term.querySelector(".anywhere-hover-preview") as HTMLElement;
+    const popupEl = document.querySelector(".anywhere-hover-preview") as HTMLElement;
     expect(popupEl).toBeTruthy();
     // Install a spy on the terminal's bubble-phase mousedown — this mirrors
     // the controller's listener. With stopPropagation in the popup's capture
@@ -275,7 +299,7 @@ describe("HoverPreviewPopup — show / hide", () => {
     window.dispatchEvent(insideEvent);
 
     // Popup stays visible.
-    expect(term.querySelector(".anywhere-hover-preview")).toBeTruthy();
+    expect(document.querySelector(".anywhere-hover-preview")).toBeTruthy();
     expect(onDismiss).not.toHaveBeenCalled();
     // Controller's mousedown listener was prevented from firing.
     expect(terminalListener).not.toHaveBeenCalled();
@@ -312,7 +336,7 @@ describe("HoverPreviewPopup — show / hide", () => {
       } satisfies FilePreviewResultMessage,
       "dark",
     );
-    const pathLabel = term.querySelector(".anywhere-hover-preview-header-path") as HTMLElement;
+    const pathLabel = document.querySelector(".anywhere-hover-preview-header-path") as HTMLElement;
     expect(pathLabel.textContent).toBe("src/missing.ts");
     expect(pathLabel.getAttribute("title")).toBe("src/missing.ts");
   });
@@ -323,7 +347,7 @@ describe("HoverPreviewPopup — show / hide", () => {
     const popup = new HoverPreviewPopup({ onDismiss });
     popup.show(fakeMouseEvent(term, 50, 50), makeOkResult({ content: "x" }), "dark");
     document.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape" }));
-    expect(term.querySelector(".anywhere-hover-preview")).toBeNull();
+    expect(document.querySelector(".anywhere-hover-preview")).toBeNull();
     expect(onDismiss).toHaveBeenCalled();
   });
 
@@ -336,7 +360,7 @@ describe("HoverPreviewPopup — show / hide", () => {
     const popup = new HoverPreviewPopup();
     popup.show(fakeMouseEvent(term, 50, 50), makeOkResult({ content: "a\nb\nc" }), "dark");
 
-    const popupEl = term.querySelector(".anywhere-hover-preview") as HTMLElement;
+    const popupEl = document.querySelector(".anywhere-hover-preview") as HTMLElement;
     expect(popupEl).toBeTruthy();
 
     // Watch a bubble-phase listener on the terminal element — it would fire
@@ -348,7 +372,7 @@ describe("HoverPreviewPopup — show / hide", () => {
     popupEl.dispatchEvent(new WheelEvent("wheel", { bubbles: true, deltaY: 100 }));
     expect(terminalWheelListener).not.toHaveBeenCalled();
     // Popup must still be mounted.
-    expect(term.querySelector(".anywhere-hover-preview")).toBeTruthy();
+    expect(document.querySelector(".anywhere-hover-preview")).toBeTruthy();
   });
 
   it("uses renderMarkdown for isMarkdown=true and renderCode otherwise", () => {
@@ -367,7 +391,7 @@ describe("HoverPreviewPopup — show / hide", () => {
 
     popup.show(fakeMouseEvent(term, 50, 50), makeOkResult({ isMarkdown: true, content: "# hi" }), "dark");
     expect(renderMarkdown).toHaveBeenCalledTimes(1);
-    expect(term.querySelector(".md-rendered")).toBeTruthy();
+    expect(document.querySelector(".md-rendered")).toBeTruthy();
 
     popup.hide();
     popup.show(
@@ -376,14 +400,14 @@ describe("HoverPreviewPopup — show / hide", () => {
       "dark",
     );
     expect(renderCode).toHaveBeenCalledTimes(1);
-    expect(term.querySelector(".code-rendered")).toBeTruthy();
+    expect(document.querySelector(".code-rendered")).toBeTruthy();
   });
 
   it("falls back to plain <pre> when no renderers are provided", () => {
     const term = makeTerminalElement();
     const popup = new HoverPreviewPopup();
     popup.show(fakeMouseEvent(term, 50, 50), makeOkResult({ content: "hello\nworld" }), "dark");
-    const pre = term.querySelector(".anywhere-hover-preview-plain") as HTMLElement | null;
+    const pre = document.querySelector(".anywhere-hover-preview-plain") as HTMLElement | null;
     expect(pre?.tagName).toBe("PRE");
     // Plain text fallback wraps each line in `<span class="line">` so
     // scroll-to-line works without Shiki.
@@ -396,7 +420,7 @@ describe("HoverPreviewPopup — show / hide", () => {
     const term = makeTerminalElement();
     const popup = new HoverPreviewPopup();
     popup.show(fakeMouseEvent(term, 50, 50), makeOkResult({ content: "a\nb" }), "dark");
-    const body = term.querySelector(".anywhere-hover-preview-body") as HTMLElement | null;
+    const body = document.querySelector(".anywhere-hover-preview-body") as HTMLElement | null;
     expect(body).toBeTruthy();
     expect(body?.classList.contains("anywhere-hover-preview-body-numbers")).toBe(true);
   });
@@ -409,7 +433,7 @@ describe("HoverPreviewPopup — show / hide", () => {
       onUpdateSetting: onUpdate,
     });
     popup.show(fakeMouseEvent(term, 50, 50), makeOkResult({ content: "a" }), "dark");
-    const footer = term.querySelector(".anywhere-hover-preview-footer") as HTMLElement | null;
+    const footer = document.querySelector(".anywhere-hover-preview-footer") as HTMLElement | null;
     expect(footer).toBeTruthy();
     // Wrap/Auto toggles were removed — footer hosts only the delay input now.
     const checkboxes = footer?.querySelectorAll<HTMLInputElement>('input[type="checkbox"]');
@@ -426,7 +450,7 @@ describe("HoverPreviewPopup — show / hide", () => {
       onUpdateSetting: onUpdate,
     });
     popup.show(fakeMouseEvent(term, 50, 50), makeOkResult({ content: "a" }), "dark");
-    const num = term.querySelector<HTMLInputElement>(".anywhere-hover-preview-footer-delay input");
+    const num = document.querySelector<HTMLInputElement>(".anywhere-hover-preview-footer-delay input");
     if (!num) {
       throw new Error("no delay input");
     }
@@ -445,7 +469,7 @@ describe("HoverPreviewPopup — show / hide", () => {
     const term = makeTerminalElement();
     const popup = new HoverPreviewPopup();
     popup.show(fakeMouseEvent(term, 50, 50), makeOkResult({ content: "a" }), "dark");
-    expect(term.querySelector(".anywhere-hover-preview-footer")).toBeNull();
+    expect(document.querySelector(".anywhere-hover-preview-footer")).toBeNull();
   });
 
   it("highlights the target line when result.line is set (C)", () => {
@@ -456,7 +480,7 @@ describe("HoverPreviewPopup — show / hide", () => {
       makeOkResult({ content: "line1\nline2\nline3\nline4\nline5", line: 3 }),
       "dark",
     );
-    const lines = term.querySelectorAll(".line");
+    const lines = document.querySelectorAll(".line");
     expect(lines).toHaveLength(5);
     expect(lines[2].classList.contains("anywhere-hover-preview-line-active")).toBe(true);
     // Other lines must NOT be highlighted.
@@ -469,12 +493,15 @@ describe("HoverPreviewPopup — show / hide", () => {
     const popup = new HoverPreviewPopup();
     // Out-of-range line — no element should be flagged.
     popup.show(fakeMouseEvent(term, 50, 50), makeOkResult({ content: "line1\nline2", line: 999 }), "dark");
-    expect(term.querySelector(".anywhere-hover-preview-line-active")).toBeNull();
+    expect(document.querySelector(".anywhere-hover-preview-line-active")).toBeNull();
   });
 
-  it("max popup width / height constants match the spec", () => {
-    expect(MAX_POPUP_WIDTH).toBe(560);
+  it("popup size constants match the spec", () => {
+    expect(DEFAULT_POPUP_WIDTH).toBe(640);
+    expect(MAX_POPUP_WIDTH).toBe(1000);
     expect(MAX_POPUP_HEIGHT).toBe(360);
+    expect(MIN_POPUP_WIDTH).toBe(280);
+    expect(MIN_POPUP_HEIGHT).toBe(120);
   });
 
   it("renders the header Open button and fires onOpenFile with the result on click", () => {
@@ -484,7 +511,7 @@ describe("HoverPreviewPopup — show / hide", () => {
     const result = makeOkResult({ absPath: "/a/b/foo.ts", content: "x", line: 7 });
     popup.show(fakeMouseEvent(term, 50, 50), result, "dark");
 
-    const btn = term.querySelector(".anywhere-hover-preview-open-btn") as HTMLButtonElement | null;
+    const btn = document.querySelector(".anywhere-hover-preview-open-btn") as HTMLButtonElement | null;
     expect(btn).toBeTruthy();
     expect(btn?.getAttribute("aria-label")).toBe("Open file");
     expect(btn?.title).toBe("Open file");
@@ -493,7 +520,7 @@ describe("HoverPreviewPopup — show / hide", () => {
     expect(onOpenFile).toHaveBeenCalledTimes(1);
     expect(onOpenFile.mock.calls[0][0]).toBe(result);
     // Popup unmounts itself after click so the user sees the editor instead.
-    expect(term.querySelector(".anywhere-hover-preview")).toBeNull();
+    expect(document.querySelector(".anywhere-hover-preview")).toBeNull();
   });
 
   it("hides the Open button for not-found / error statuses", () => {
@@ -510,14 +537,14 @@ describe("HoverPreviewPopup — show / hide", () => {
       } satisfies FilePreviewResultMessage,
       "dark",
     );
-    expect(term.querySelector(".anywhere-hover-preview-open-btn")).toBeNull();
+    expect(document.querySelector(".anywhere-hover-preview-open-btn")).toBeNull();
   });
 
   it("does not render the Open button when onOpenFile is not wired", () => {
     const term = makeTerminalElement();
     const popup = new HoverPreviewPopup();
     popup.show(fakeMouseEvent(term, 50, 50), makeOkResult({ content: "x" }), "dark");
-    expect(term.querySelector(".anywhere-hover-preview-open-btn")).toBeNull();
+    expect(document.querySelector(".anywhere-hover-preview-open-btn")).toBeNull();
   });
 
   it("mousedown on the Open button is swallowed so the outside-click dismiss listener does not fire", () => {
@@ -525,8 +552,152 @@ describe("HoverPreviewPopup — show / hide", () => {
     const onDismiss = vi.fn();
     const popup = new HoverPreviewPopup({ onOpenFile: vi.fn(), onDismiss });
     popup.show(fakeMouseEvent(term, 50, 50), makeOkResult({ content: "x" }), "dark");
-    const btn = term.querySelector(".anywhere-hover-preview-open-btn") as HTMLButtonElement | null;
+    const btn = document.querySelector(".anywhere-hover-preview-open-btn") as HTMLButtonElement | null;
     btn?.dispatchEvent(new MouseEvent("mousedown", { bubbles: true, cancelable: true }));
     expect(onDismiss).not.toHaveBeenCalled();
+  });
+});
+
+describe("HoverPreviewPopup — drag / resize (live popup, no persistence)", () => {
+  // Track every popup so afterEach can dispose() it — that removes the
+  // window `mousedown` / document `keydown` listeners attached on show(),
+  // preventing cross-test listener leakage in the full-suite run.
+  const popups: HoverPreviewPopup[] = [];
+  function track(popup: HoverPreviewPopup): HoverPreviewPopup {
+    popups.push(popup);
+    return popup;
+  }
+  afterEach(() => {
+    for (const p of popups.splice(0)) {
+      p.dispose();
+    }
+  });
+
+  // Gestures use Pointer Events with setPointerCapture; pointermove/up are
+  // delivered to the captured handle element (header for move, grip for resize),
+  // so tests dispatch them on that same element.
+  function pointerDownOn(handle: HTMLElement, clientX: number, clientY: number): void {
+    handle.dispatchEvent(
+      new PointerEvent("pointerdown", { bubbles: true, cancelable: true, button: 0, pointerId: 1, clientX, clientY }),
+    );
+  }
+  function pointerMoveOn(handle: HTMLElement, clientX: number, clientY: number): void {
+    handle.dispatchEvent(new PointerEvent("pointermove", { pointerId: 1, clientX, clientY }));
+  }
+  function pointerUpOn(handle: HTMLElement): void {
+    handle.dispatchEvent(new PointerEvent("pointerup", { pointerId: 1 }));
+  }
+
+  it("opens at DEFAULT_POPUP_WIDTH, cursor-anchored, with no explicit height", () => {
+    const term = makeTerminalElement(800, 600);
+    const popup = track(new HoverPreviewPopup());
+    popup.show(fakeMouseEvent(term, 50, 50), makeOkResult({ content: "x" }), "dark");
+    const root = document.querySelector(".anywhere-hover-preview") as HTMLElement;
+    expect(root.style.width).toBe(`${DEFAULT_POPUP_WIDTH}px`);
+    // Anchored next to the cursor (computePosition path).
+    expect(root.style.left).toBe("50px");
+    expect(root.style.top).toBe("62px");
+    // No explicit height until the user resizes the live popup.
+    expect(root.style.height).toBe("");
+  });
+
+  it("clamps the default width down to a narrow terminal", () => {
+    const term = makeTerminalElement(400, 600);
+    const popup = track(new HoverPreviewPopup());
+    popup.show(fakeMouseEvent(term, 10, 10), makeOkResult({ content: "x" }), "dark");
+    const root = document.querySelector(".anywhere-hover-preview") as HTMLElement;
+    // maxWidth = min(MAX_POPUP_WIDTH, clientWidth - 16) = min(1000, 384) = 384.
+    expect(root.style.width).toBe("384px");
+  });
+
+  it("moves the live popup when dragging the header", () => {
+    const term = makeTerminalElement(800, 600);
+    const popup = track(new HoverPreviewPopup());
+    popup.show(fakeMouseEvent(term, 50, 50), makeOkResult({ content: "x" }), "dark");
+    const root = document.querySelector(".anywhere-hover-preview") as HTMLElement;
+    const header = document.querySelector(".anywhere-hover-preview-header") as HTMLElement;
+    // start at (100,100); move +30,+40 → left 50→80, top 62→102 (height 0 in jsdom).
+    pointerDownOn(header, 100, 100);
+    pointerMoveOn(header, 130, 140);
+    pointerUpOn(header);
+    expect(root.style.left).toBe("80px");
+    expect(root.style.top).toBe("102px");
+  });
+
+  it("resizes the live popup when dragging the SE grip", () => {
+    const term = makeTerminalElement(800, 600);
+    const popup = track(new HoverPreviewPopup());
+    popup.show(fakeMouseEvent(term, 50, 50), makeOkResult({ content: "x" }), "dark");
+    const root = document.querySelector(".anywhere-hover-preview") as HTMLElement;
+    const grip = document.querySelector(".anywhere-hover-preview-resize-grip") as HTMLElement;
+    // width 640→690 (+50); height floored to MIN (offsetHeight is 0 in jsdom).
+    pointerDownOn(grip, 200, 200);
+    pointerMoveOn(grip, 250, 260);
+    pointerUpOn(grip);
+    expect(root.style.width).toBe("690px");
+    expect(root.style.height).toBe(`${MIN_POPUP_HEIGHT}px`);
+  });
+
+  it("forgets the dragged/resized geometry on the next show (each hover refreshes)", () => {
+    const term = makeTerminalElement(800, 600);
+    const popup = track(new HoverPreviewPopup());
+    popup.show(fakeMouseEvent(term, 50, 50), makeOkResult({ content: "x" }), "dark");
+    let root = document.querySelector(".anywhere-hover-preview") as HTMLElement;
+    const header = document.querySelector(".anywhere-hover-preview-header") as HTMLElement;
+    const grip = document.querySelector(".anywhere-hover-preview-resize-grip") as HTMLElement;
+    // Move + resize the live popup away from the defaults.
+    pointerDownOn(header, 100, 100);
+    pointerMoveOn(header, 200, 180);
+    pointerUpOn(header);
+    pointerDownOn(grip, 200, 200);
+    pointerMoveOn(grip, 280, 300);
+    pointerUpOn(grip);
+    expect(root.style.left).not.toBe("50px");
+    expect(root.style.width).not.toBe(`${DEFAULT_POPUP_WIDTH}px`);
+
+    // A fresh hover re-creates the popup at the default geometry + anchor —
+    // nothing is remembered between hovers.
+    popup.hide();
+    popup.show(fakeMouseEvent(term, 50, 50), makeOkResult({ content: "x" }), "dark");
+    root = document.querySelector(".anywhere-hover-preview") as HTMLElement;
+    expect(root.style.width).toBe(`${DEFAULT_POPUP_WIDTH}px`);
+    expect(root.style.left).toBe("50px");
+    expect(root.style.top).toBe("62px");
+    expect(root.style.height).toBe("");
+  });
+
+  it("suppresses leave-dismiss while a drag gesture is in flight", () => {
+    const term = makeTerminalElement(800, 600);
+    const onPointerLeave = vi.fn();
+    const popup = track(new HoverPreviewPopup({ onPointerLeave }));
+    popup.show(fakeMouseEvent(term, 50, 50), makeOkResult({ content: "x" }), "dark");
+    const root = document.querySelector(".anywhere-hover-preview") as HTMLElement;
+    const header = document.querySelector(".anywhere-hover-preview-header") as HTMLElement;
+
+    pointerDownOn(header, 100, 100);
+    // Cursor crosses the popup edge mid-drag → must NOT trigger leave-dismiss.
+    root.dispatchEvent(new MouseEvent("mouseleave", {}));
+    expect(onPointerLeave).not.toHaveBeenCalled();
+
+    pointerUpOn(header); // gesture ends → interacting cleared
+    // A genuine leave AFTER the gesture is delivered normally.
+    root.dispatchEvent(new MouseEvent("mouseleave", {}));
+    expect(onPointerLeave).toHaveBeenCalledTimes(1);
+  });
+
+  it("tears down gesture listeners on unmount (move after hide is a no-op)", () => {
+    const term = makeTerminalElement(800, 600);
+    const popup = track(new HoverPreviewPopup());
+    popup.show(fakeMouseEvent(term, 50, 50), makeOkResult({ content: "x" }), "dark");
+    const header = document.querySelector(".anywhere-hover-preview-header") as HTMLElement;
+    pointerDownOn(header, 100, 100);
+    // Hiding mid-gesture must release capture + drop the pointermove/up listeners.
+    popup.hide();
+    // Late events on the detached handle must not throw or resurrect the popup.
+    expect(() => {
+      pointerMoveOn(header, 300, 300);
+      pointerUpOn(header);
+    }).not.toThrow();
+    expect(document.querySelector(".anywhere-hover-preview")).toBeNull();
   });
 });

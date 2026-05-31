@@ -95,6 +95,24 @@ function isPlaceholderTitle(title: string): boolean {
   return /^New session\b/i.test(title.trim());
 }
 
+/**
+ * OpenCode names a subtask (subagent) session `<description> (@<agent> subagent)`
+ * — e.g. `Review logic architecture (@asm-review-logic subagent)`. The webview
+ * already shows the agent as its own `@<agent>` chip, so leaving the suffix in
+ * makes it render twice (`@asm-review-logic · … (@asm-review-logic subagent)`).
+ * Split the suffix off: return the clean description plus the embedded agent, so
+ * the agent can also be RECOVERED when the row's own `agent` column is empty (it
+ * frequently is for nested spawns). No match → the title is returned untouched
+ * with no agent. Anchored at both ends with the literal `(@…subagent)` tail, so
+ * it's linear (no catastrophic backtracking) on the short session-title input. */
+export function splitOpencodeSubtaskTitle(rawTitle: string): { title: string; agent?: string } {
+  const m = /^(.*?)\s*\(@([\w.-]+)\s+subagent\)\s*$/.exec(rawTitle);
+  if (m && m[1].trim()) {
+    return { title: m[1].trim(), agent: m[2] };
+  }
+  return { title: rawTitle.trim() };
+}
+
 /** First user message text from the `first_user_part` subquery (a text part). */
 function firstUserPartText(raw: unknown): string | undefined {
   return strField(parseJsonData(raw)?.text);
@@ -491,9 +509,16 @@ function buildChildStubs(rows: Record<string, unknown>[]): { timestamp: number; 
       continue;
     }
     const rawTitle = asString(row.title);
+    // OpenCode embeds the agent in the subtask title as `… (@<agent> subagent)`.
+    // Strip it (the webview renders a separate @agent chip) and recover the agent
+    // name from it when the row's own `agent` column is empty.
+    const split = rawTitle ? splitOpencodeSubtaskTitle(rawTitle) : undefined;
+    const cleanTitle = split?.title;
     const firstMessage = firstUserPartText(row.first_user_part);
-    // Prefer the real title; fall back to the first user message for placeholders.
-    const title = rawTitle && !isPlaceholderTitle(rawTitle) ? rawTitle : (firstMessage ?? rawTitle ?? "Subagent");
+    // Prefer the cleaned title; fall back to the first user message for placeholders.
+    const title =
+      cleanTitle && !isPlaceholderTitle(cleanTitle) ? cleanTitle : (firstMessage ?? cleanTitle ?? "Subagent");
+    const agent = asString(row.agent) ?? split?.agent;
     const timestamp = Number(row.time_created) || 0;
     stubs.push({
       timestamp,
@@ -502,7 +527,7 @@ function buildChildStubs(rows: Record<string, unknown>[]): { timestamp: number; 
         entryId: formatEntryId("opencode", childId),
         title: boundedPreview(title),
         ...(firstMessage ? { firstMessage: truncate(firstMessage) } : {}),
-        ...(asString(row.agent) ? { agent: asString(row.agent) } : {}),
+        ...(agent ? { agent } : {}),
         timestamp,
       },
     });

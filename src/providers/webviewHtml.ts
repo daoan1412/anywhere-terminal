@@ -315,6 +315,15 @@ export function getTerminalHtml(
     /* Hover-preview popup — see asimov/changes/add-hover-file-preview/design.md D2, D8. */
     .anywhere-hover-preview {
       box-sizing: border-box;
+      /* Positioning context for the absolutely-positioned SE resize grip. */
+      position: absolute;
+      /* Column layout so the header pins to the top and the footer to the
+       * bottom while the body grows/scrolls in between — the footer follows the
+       * bottom edge as the popup is resized taller. The body is the sole
+       * scroller (overflow: hidden here clips to the rounded corners). */
+      display: flex;
+      flex-direction: column;
+      overflow: hidden;
       border: 1px solid var(--vscode-editorHoverWidget-border, rgba(128, 128, 128, 0.35));
       background: var(--vscode-editorHoverWidget-background, rgba(30, 30, 30, 0.98));
       color: var(--vscode-editorHoverWidget-foreground, var(--vscode-editor-foreground, #ddd));
@@ -326,6 +335,8 @@ export function getTerminalHtml(
       pointer-events: auto;
     }
     .anywhere-hover-preview-header {
+      /* Fixed-height row pinned to the top of the flex column. */
+      flex: 0 0 auto;
       display: flex;
       align-items: center;
       gap: 8px;
@@ -333,6 +344,8 @@ export function getTerminalHtml(
       border-bottom: 1px solid var(--vscode-editorHoverWidget-border, rgba(128, 128, 128, 0.35));
       color: var(--vscode-descriptionForeground, #999);
       font-size: 11px;
+      /* The header doubles as the drag handle for moving the popup. */
+      cursor: move;
     }
     .anywhere-hover-preview-header-path {
       flex: 1 1 auto;
@@ -343,8 +356,10 @@ export function getTerminalHtml(
       direction: rtl; /* keep the file name visible when the abs path is long */
       text-align: left;
       unicode-bidi: plaintext;
-      user-select: text;
-      cursor: text;
+      /* Non-selectable so a header drag doesn't fight text selection. */
+      user-select: none;
+      -webkit-user-select: none;
+      cursor: move;
     }
     .anywhere-hover-preview-open-btn {
       flex: 0 0 auto;
@@ -373,6 +388,11 @@ export function getTerminalHtml(
       display: block;
     }
     .anywhere-hover-preview-body {
+      /* Grows to fill the space between header and footer and scrolls its own
+       * overflow; min-height:0 lets it shrink below content size inside the
+       * flex column so the footer stays visible at the bottom. */
+      flex: 1 1 auto;
+      min-height: 0;
       padding: 8px 10px;
       overflow: auto;
       counter-reset: anywhere-line;
@@ -483,6 +503,9 @@ export function getTerminalHtml(
     }
     /* Footer toolbar — toggles for wrap/auto + delay input. See: design.md D17. */
     .anywhere-hover-preview-footer {
+      /* Fixed-height row pinned to the bottom of the flex column — it follows
+       * the bottom edge as the popup is resized taller. */
+      flex: 0 0 auto;
       display: flex;
       align-items: center;
       gap: 12px;
@@ -514,6 +537,34 @@ export function getTerminalHtml(
     }
     .anywhere-hover-preview-footer input[type="checkbox"] {
       cursor: pointer;
+    }
+    /* SE-corner resize grip. Dragging it resizes the live popup; the size is
+     * not persisted — the next hover re-creates the popup at the default size.
+     * Two short diagonal lines hint at the affordance. */
+    .anywhere-hover-preview-resize-grip {
+      position: absolute;
+      right: 0;
+      bottom: 0;
+      width: 16px;
+      height: 16px;
+      cursor: nwse-resize;
+      z-index: 1;
+      background-image: linear-gradient(
+        135deg,
+        transparent 0%,
+        transparent 45%,
+        var(--vscode-descriptionForeground, #999) 45%,
+        var(--vscode-descriptionForeground, #999) 55%,
+        transparent 55%,
+        transparent 70%,
+        var(--vscode-descriptionForeground, #999) 70%,
+        var(--vscode-descriptionForeground, #999) 80%,
+        transparent 80%
+      );
+      opacity: 0.5;
+    }
+    .anywhere-hover-preview-resize-grip:hover {
+      opacity: 0.9;
     }
     /* Highlight the line referenced by path:LineNo / path#LineNo. */
     .anywhere-hover-preview .line.anywhere-hover-preview-line-active {

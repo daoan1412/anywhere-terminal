@@ -273,20 +273,26 @@ export class SplitTreeRenderer {
   /**
    * Close a specific split pane by session ID within the active tab.
    * If the pane is the only one in the tab, closes the entire tab.
+   *
+   * Returns the session ID of the pane terminal that was actually disposed here
+   * (so the caller can dispose its hover-preview controller — the popup lives on
+   * `document.body` now, so removing the pane container no longer removes it).
+   * Returns null when it falls back to a full tab close (that path disposes the
+   * terminal + its controller via `removeTerminal`) or when it no-ops.
    */
-  closeSplitPaneById(paneSessionId: string): void {
+  closeSplitPaneById(paneSessionId: string): string | null {
     if (!this.store.activeTabId) {
-      return;
+      return null;
     }
     const layout = this.store.tabLayouts.get(this.store.activeTabId);
     if (!layout) {
-      return;
+      return null;
     }
 
     // If the layout is a single leaf, fall back to tab close
     if (layout.type === "leaf") {
       this.postMessage({ type: "closeTab", tabId: this.store.activeTabId });
-      return;
+      return null;
     }
 
     // Remove the pane from the split tree
@@ -294,7 +300,7 @@ export class SplitTreeRenderer {
 
     if (updatedLayout === null) {
       this.postMessage({ type: "closeTab", tabId: this.store.activeTabId });
-      return;
+      return null;
     }
 
     // Find the sibling to focus (first leaf in the remaining tree)
@@ -333,6 +339,7 @@ export class SplitTreeRenderer {
     });
 
     this.onTabBarUpdate();
+    return paneSessionId;
   }
 
   /**

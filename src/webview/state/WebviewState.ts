@@ -93,4 +93,25 @@ export interface WebviewState {
    * See: asimov/changes/redesign-vault-panel-ui/design.md D2.
    */
   vaultGroupMode?: "recent" | "agent" | "folder";
+  /**
+   * Persisted floating geometry of the AI Vault session-preview overlay
+   * (`.vault-preview`). Saved whenever the user drags/resizes/maximizes it, so
+   * the size + position survive a reload AND a full VSCode restart. Absent →
+   * the preview auto-anchors next to the activated row at its default size.
+   */
+  vaultPreviewGeometry?: VaultPreviewGeometry;
+}
+
+/**
+ * Floating geometry for the AI Vault session-preview overlay. Viewport-relative
+ * (the overlay is `position: fixed`). `maximized` records the full-viewport
+ * state so it restores expanded; the other fields hold the floating size/pos to
+ * return to when un-maximized.
+ */
+export interface VaultPreviewGeometry {
+  top: number;
+  left: number;
+  width: number;
+  height: number;
+  maximized?: boolean;
 }

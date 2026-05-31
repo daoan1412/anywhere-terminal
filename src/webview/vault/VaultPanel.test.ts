@@ -4,7 +4,7 @@
 // header-click toggle, and the session-count badge. The vault is now a
 // collapsible section stacked above the file tree (no panel exclusivity).
 
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import type { VaultListResult, VaultSessionEntry } from "../../vault/types";
 import { resetTooltipForTests } from "../fileTree/Tooltip";
 import { VaultPanel } from "./VaultPanel";
@@ -545,6 +545,144 @@ describe("VaultPanel session preview (redesign 5_2)", () => {
     expect(host.querySelector(".vault-preview-expand")).toBeNull();
   });
 
+  it("scroll FABs stay hidden until a scroll, reveal per edge, then auto-hide when idle", () => {
+    vi.useFakeTimers();
+    try {
+      const host = createHost();
+      const panel = new VaultPanel({ host, postMessage: () => {}, getInitialCollapsed: () => false });
+      panel.render(result([entry({ id: "claude:a" })]));
+      host.querySelector<HTMLElement>(".vault-row")?.click();
+      panel.handleSessionDetailResponse({
+        type: "vaultSessionDetailResponse",
+        entryId: "claude:a",
+        detail: detail({ timeline: [{ kind: "message", role: "user", text: "go", timestamp: 1 }] }),
+      });
+      const body = host.querySelector<HTMLElement>(".vault-preview-body");
+      const topBtn = host.querySelector<HTMLElement>(".vault-preview-scroll-top");
+      const bottomBtn = host.querySelector<HTMLElement>(".vault-preview-scroll-bottom");
+      if (!body || !topBtn || !bottomBtn) {
+        throw new Error("missing preview body / scroll FABs");
+      }
+      // jsdom computes no layout — simulate a scrollable body (1000px content in a
+      // 300px viewport) and drive scrollTop to each position.
+      Object.defineProperty(body, "scrollHeight", { configurable: true, value: 1000 });
+      Object.defineProperty(body, "clientHeight", { configurable: true, value: 300 });
+      const setScroll = (top: number): void => {
+        body.scrollTop = top;
+        body.dispatchEvent(new Event("scroll"));
+      };
+
+      // Hidden until the user actually scrolls.
+      expect(topBtn.classList.contains("is-visible")).toBe(false);
+      expect(bottomBtn.classList.contains("is-visible")).toBe(false);
+
+      // Scroll near the top: only "scroll to bottom" reveals.
+      setScroll(0);
+      expect(topBtn.classList.contains("is-visible")).toBe(false);
+      expect(bottomBtn.classList.contains("is-visible")).toBe(true);
+
+      // In the middle: both reveal.
+      setScroll(500);
+      expect(topBtn.classList.contains("is-visible")).toBe(true);
+      expect(bottomBtn.classList.contains("is-visible")).toBe(true);
+
+      // At the bottom (scrollTop = scrollHeight - clientHeight): only "scroll to top".
+      setScroll(700);
+      expect(topBtn.classList.contains("is-visible")).toBe(true);
+      expect(bottomBtn.classList.contains("is-visible")).toBe(false);
+
+      // Idle past the hide delay → both fade out.
+      vi.advanceTimersByTime(1200);
+      expect(topBtn.classList.contains("is-visible")).toBe(false);
+      expect(bottomBtn.classList.contains("is-visible")).toBe(false);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  // Build a timeline of N user messages; the first one carries `firstText` so a
+  // test can assert it landed on the session's true first message.
+  const userTimeline = (n: number, firstText: string) =>
+    Array.from({ length: n }, (_, i) => ({
+      kind: "message" as const,
+      role: "user" as const,
+      text: i === 0 ? firstText : `m${i}`,
+    }));
+
+  it("scroll-to-top loads every older window, then lands on the session's first message", () => {
+    const host = createHost();
+    const posted: { type: string; entryId?: string; limit?: number }[] = [];
+    const panel = new VaultPanel({ host, postMessage: (m) => posted.push(m), getInitialCollapsed: () => false });
+    panel.render(result([entry({ id: "claude:a" })]));
+    host.querySelector<HTMLElement>(".vault-row")?.click();
+    const detailReqs = (): number => posted.filter((m) => m.type === "requestVaultSessionDetail").length;
+    expect(detailReqs()).toBe(1); // initial open
+
+    // First window: truncated, 1 item (older messages remain).
+    panel.handleSessionDetailResponse({
+      type: "vaultSessionDetailResponse",
+      entryId: "claude:a",
+      detail: detail({ truncated: true, timeline: userTimeline(1, "m0") }),
+    });
+    // Click "scroll to first message" → must request the next older window.
+    host.querySelector<HTMLElement>(".vault-preview-scroll-top")?.click();
+    expect(detailReqs()).toBe(2);
+
+    // Still truncated AND the window grew (2 > 1) → keeps loading automatically.
+    panel.handleSessionDetailResponse({
+      type: "vaultSessionDetailResponse",
+      entryId: "claude:a",
+      detail: detail({ truncated: true, timeline: userTimeline(2, "m0") }),
+    });
+    expect(detailReqs()).toBe(3);
+
+    // Final window is NOT truncated → stop loading and land on the first message.
+    panel.handleSessionDetailResponse({
+      type: "vaultSessionDetailResponse",
+      entryId: "claude:a",
+      detail: detail({ truncated: false, timeline: userTimeline(3, "FIRST-OF-SESSION") }),
+    });
+    expect(detailReqs()).toBe(3); // no further load-more once untruncated
+    expect(host.querySelector(".vault-preview-body")?.textContent).toContain("FIRST-OF-SESSION");
+  });
+
+  it("scroll-to-top stops when the host stops returning more (cap reached), instead of looping forever", () => {
+    const host = createHost();
+    const posted: { type: string }[] = [];
+    const panel = new VaultPanel({ host, postMessage: (m) => posted.push(m), getInitialCollapsed: () => false });
+    panel.render(result([entry({ id: "claude:a" })]));
+    host.querySelector<HTMLElement>(".vault-row")?.click();
+    const detailReqs = (): number => posted.filter((m) => m.type === "requestVaultSessionDetail").length;
+
+    // A session larger than the host cap: every response stays truncated with the
+    // SAME timeline length (the host clamps at MAX_DETAIL_LIMIT).
+    panel.handleSessionDetailResponse({
+      type: "vaultSessionDetailResponse",
+      entryId: "claude:a",
+      detail: detail({ truncated: true, timeline: userTimeline(5, "capped") }),
+    });
+    host.querySelector<HTMLElement>(".vault-preview-scroll-top")?.click();
+    expect(detailReqs()).toBe(2); // one load-more requested
+
+    // Capped response — same length, still truncated → must NOT request again.
+    panel.handleSessionDetailResponse({
+      type: "vaultSessionDetailResponse",
+      entryId: "claude:a",
+      detail: detail({ truncated: true, timeline: userTimeline(5, "capped") }),
+    });
+    expect(detailReqs()).toBe(2); // loop terminated, no infinite requests
+  });
+
+  it("hides the scroll FAB cluster while the preview is loading (no body yet)", () => {
+    const host = createHost();
+    const panel = new VaultPanel({ host, postMessage: () => {}, getInitialCollapsed: () => false });
+    panel.render(result([entry({ id: "claude:a" })]));
+    host.querySelector<HTMLElement>(".vault-row")?.click();
+    // Loading placeholder is shown before the detail arrives — no .vault-preview-body.
+    expect(host.querySelector(".vault-preview-loading")).not.toBeNull();
+    expect(host.querySelector(".vault-preview-scroll-nav")?.classList.contains("is-empty")).toBe(true);
+  });
+
   it("renders a nested sub-session node directly mid-run, never behind the step cap (D10)", () => {
     const host = createHost();
     const panel = new VaultPanel({ host, postMessage: () => {}, getInitialCollapsed: () => false });
@@ -576,6 +714,8 @@ describe("VaultPanel session preview (redesign 5_2)", () => {
     // The group node is in the DOM (visible), not hidden behind a "Show N more".
     const group = host.querySelector(".vault-preview-subagent-title");
     expect(group?.textContent).toBe("Team: arco · 4 members");
+    // A group has no single agent → title-only form (no "agent" badge / @chip).
+    expect(host.querySelector(".vault-preview-subagent-badge")).toBeNull();
     // It broke the run into two still-independently-capped halves (6 → 3 + "Show 3 more").
     expect(host.querySelectorAll(".vault-preview-expand")).toHaveLength(2);
   });
@@ -979,7 +1119,11 @@ describe("VaultPanel session preview (redesign 5_2)", () => {
     });
     const block = host.querySelector(".vault-preview-subagent");
     expect(block).not.toBeNull();
-    expect(host.querySelector(".vault-preview-subagent-title")?.textContent).toBe("@reviewer · Review the diff");
+    // The agent identity is split out into a badge + accent chip; the description
+    // alone lives in `-title` (no more `@reviewer · …` concatenated into one span).
+    expect(host.querySelector(".vault-preview-subagent-badge")?.textContent).toBe("agent");
+    expect(host.querySelector(".vault-preview-subagent-agent")?.textContent).toBe("@reviewer");
+    expect(host.querySelector(".vault-preview-subagent-title")?.textContent).toBe("Review the diff");
     expect(host.querySelector(".vault-preview-subagent-firstmsg")?.textContent).toBe("go review");
     // Collapsed by default — no nested transcript yet.
     expect(block?.classList.contains("is-open")).toBe(false);
@@ -1325,5 +1469,119 @@ describe("VaultPanel header tooltips", () => {
     expect(panel.isCollapsed()).toBe(false);
     expect(searchBtn?.getAttribute("aria-label")).toBe("Close search");
     expect(searchBtn?.hasAttribute("title")).toBe(false); // no native tooltip resurrected
+  });
+});
+
+describe("VaultPanel session-preview geometry persistence", () => {
+  /** Make getBoundingClientRect reflect the element's inline left/top/width/height
+   *  (jsdom computes no layout) so capture-on-drag sees the dragged position. */
+  function rectFromStyle(el: HTMLElement, fallback: { left: number; top: number; width: number; height: number }) {
+    Object.defineProperty(el, "getBoundingClientRect", {
+      configurable: true,
+      value: () => {
+        const num = (v: string, d: number) => {
+          const n = Number.parseFloat(v);
+          return Number.isFinite(n) ? n : d;
+        };
+        const left = num(el.style.left, fallback.left);
+        const top = num(el.style.top, fallback.top);
+        const width = num(el.style.width, fallback.width);
+        const height = num(el.style.height, fallback.height);
+        return {
+          left,
+          top,
+          width,
+          height,
+          right: left + width,
+          bottom: top + height,
+          x: left,
+          y: top,
+          toJSON: () => ({}),
+        };
+      },
+    });
+  }
+
+  function openPreview(host: HTMLElement): HTMLElement {
+    host.querySelector<HTMLElement>(".vault-row")?.click();
+    return host.querySelector<HTMLElement>(".vault-preview") as HTMLElement;
+  }
+
+  it("restores seeded geometry (clamped) onto the preview when opened", () => {
+    const host = createHost();
+    const panel = new VaultPanel({
+      host,
+      postMessage: () => {},
+      getInitialCollapsed: () => false,
+      getInitialPreviewGeometry: () => ({ top: 50, left: 100, width: 600, height: 400 }),
+    });
+    panel.render(result([entry({ id: "claude:a" })]));
+    const preview = openPreview(host);
+    expect(preview.style.left).toBe("100px");
+    expect(preview.style.top).toBe("50px");
+    expect(preview.style.width).toBe("600px");
+    expect(preview.style.height).toBe("400px");
+    // Not maximized (no flag) → no full-viewport class.
+    expect(preview.classList.contains("vault-preview--max")).toBe(false);
+  });
+
+  it("restores the maximized state from seeded geometry", () => {
+    const host = createHost();
+    const panel = new VaultPanel({
+      host,
+      postMessage: () => {},
+      getInitialCollapsed: () => false,
+      getInitialPreviewGeometry: () => ({ top: 50, left: 100, width: 600, height: 400, maximized: true }),
+    });
+    panel.render(result([entry({ id: "claude:a" })]));
+    const preview = openPreview(host);
+    expect(preview.classList.contains("vault-preview--max")).toBe(true);
+  });
+
+  it("persists the new position after dragging the header", () => {
+    const host = createHost();
+    const persisted: import("../state/WebviewState").VaultPreviewGeometry[] = [];
+    const panel = new VaultPanel({
+      host,
+      postMessage: () => {},
+      getInitialCollapsed: () => false,
+      getInitialPreviewGeometry: () => ({ top: 50, left: 100, width: 600, height: 400 }),
+      persistPreviewGeometry: (g) => persisted.push(g),
+    });
+    panel.render(result([entry({ id: "claude:a" })]));
+    const preview = openPreview(host);
+    rectFromStyle(preview, { left: 100, top: 50, width: 600, height: 400 });
+    const titleRow = preview.querySelector<HTMLElement>(".vault-preview-title-row") as HTMLElement;
+
+    titleRow.dispatchEvent(
+      new PointerEvent("pointerdown", { bubbles: true, button: 0, pointerId: 1, clientX: 200, clientY: 200 }),
+    );
+    document.dispatchEvent(new PointerEvent("pointermove", { pointerId: 1, clientX: 230, clientY: 240 }));
+    document.dispatchEvent(new PointerEvent("pointerup", { pointerId: 1 }));
+
+    // left 100→130 (+30), top 50→90 (+40); size unchanged.
+    expect(persisted.at(-1)).toEqual({ top: 90, left: 130, width: 600, height: 400, maximized: false });
+  });
+
+  it("does not persist on a plain header click (no drag movement)", () => {
+    const host = createHost();
+    const persisted: import("../state/WebviewState").VaultPreviewGeometry[] = [];
+    const panel = new VaultPanel({
+      host,
+      postMessage: () => {},
+      getInitialCollapsed: () => false,
+      getInitialPreviewGeometry: () => ({ top: 50, left: 100, width: 600, height: 400 }),
+      persistPreviewGeometry: (g) => persisted.push(g),
+    });
+    panel.render(result([entry({ id: "claude:a" })]));
+    const preview = openPreview(host);
+    rectFromStyle(preview, { left: 100, top: 50, width: 600, height: 400 });
+    const titleRow = preview.querySelector<HTMLElement>(".vault-preview-title-row") as HTMLElement;
+
+    titleRow.dispatchEvent(
+      new PointerEvent("pointerdown", { bubbles: true, button: 0, pointerId: 1, clientX: 200, clientY: 200 }),
+    );
+    document.dispatchEvent(new PointerEvent("pointerup", { pointerId: 1 }));
+    expect(persisted).toHaveLength(0);
   });
 });

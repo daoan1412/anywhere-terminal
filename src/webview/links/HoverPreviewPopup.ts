@@ -1,6 +1,7 @@
-// src/webview/links/HoverPreviewPopup.ts — Floating preview popup attached as
-// a child of `terminal.element` with class `xterm-hover` so xterm's hover
-// machinery doesn't treat hovers over the popup as falling through.
+// src/webview/links/HoverPreviewPopup.ts — Floating preview popup mounted on
+// `document.body` as a `position: fixed` overlay (clamped to the webview
+// viewport) so it can extend out of the terminal over the AI vault / file tree
+// for more room. Keeps the `xterm-hover` class as a styling/identity hook.
 //
 // See: asimov/changes/add-hover-file-preview/design.md D2, D8, D10
 // See: asimov/changes/add-hover-file-preview/specs/file-link-hover-preview/spec.md
@@ -17,9 +18,29 @@ import type { HoverPreviewPopupHost, HoverPreviewThemeKind } from "./HoverPrevie
 const ANCHOR_OFFSET_Y = 12;
 /** Inset from the terminal's right / bottom edges. */
 const VIEWPORT_INSET = 16;
-/** Maximum popup dimensions. */
-export const MAX_POPUP_WIDTH = 560;
+/**
+ * Default popup width for every hover. Wider than the old fixed 560 so typical
+ * code previews aren't cramped; still clamped to the terminal width so it never
+ * exceeds the viewport. The popup remembers nothing between hovers — each
+ * `show()` re-anchors at this width; drag/resize apply only to the live popup.
+ */
+export const DEFAULT_POPUP_WIDTH = 640;
+/**
+ * Upper bound the user can resize the live popup to (also clamped to the
+ * terminal width at show time). Raised above DEFAULT so the SE-grip can grow
+ * the popup within the current hover.
+ */
+export const MAX_POPUP_WIDTH = 1000;
+/** Auto-height cap for a fresh popup, before any in-session resize grows it. */
 export const MAX_POPUP_HEIGHT = 360;
+/** Lower bounds so a resize can't shrink the popup into an unusable sliver. */
+export const MIN_POPUP_WIDTH = 280;
+export const MIN_POPUP_HEIGHT = 120;
+
+/** Clamp `value` into the inclusive `[lo, hi]` range (lo wins if lo > hi). */
+function clamp(value: number, lo: number, hi: number): number {
+  return Math.max(lo, Math.min(hi, value));
+}
 
 /** True iff the result variant carries a resolved `absPath` field. */
 function hasAbsPath(
@@ -220,13 +241,25 @@ export class HoverPreviewPopup implements HoverPreviewPopupHost {
   private readonly onOpenFile?: (result: FilePreviewResultMessage) => void;
   private disposed = false;
 
+  /**
+   * True while a drag (move) or resize gesture is in flight. Suppresses the
+   * pointer-leave → controller leave-grace dismissal so the cursor crossing
+   * the popup boundary mid-gesture can't tear the popup down (which would
+   * abort the drag/resize). Cleared on `mouseup`.
+   */
+  private interacting = false;
+  /** Cleanup for the active gesture's pointer capture + per-handle pointermove/up/cancel listeners. */
+  private gestureCleanup: (() => void) | null = null;
+
   // Listeners attached on show; removed on hide.
   private readonly onWindowMouseDown = (event: MouseEvent) => {
     if (this.el && event.target && this.el.contains(event.target as Node)) {
       // Click inside popup — keep it. Stop propagation so the controller's
       // terminal-level `mousedown` listener doesn't see this event and
-      // dismiss us via its dismiss() path. (Capture-phase stopPropagation
-      // also blocks the subsequent bubble-phase delivery.)
+      // dismiss us mid-interaction. Drag/resize are driven by dedicated
+      // `pointerdown` handlers on the header + grip (pointer capture, so the
+      // gesture survives the cursor leaving the webview iframe) — a separate
+      // event flow this mouse-path doesn't touch.
       event.stopPropagation();
       return;
     }
@@ -278,19 +311,34 @@ export class HoverPreviewPopup implements HoverPreviewPopupHost {
     const root = document.createElement("div");
     root.className = "xterm-hover anywhere-hover-preview";
     root.setAttribute("role", "tooltip");
-    root.style.position = "absolute";
-    root.style.zIndex = "1000";
+    root.style.position = "fixed";
+    // Above the vault session-preview overlay (z-index 1000) so a hover the user
+    // just triggered sits on top of it deterministically (both are body-level
+    // fixed overlays; equal z-index would order by DOM insertion).
+    root.style.zIndex = "1001";
 
-    // Width is fixed; height is bounded by maxHeight, then the ACTUAL rendered
-    // height is measured after mount so the flip-above math doesn't overshoot
-    // for short content (e.g. "Multiple matches" placeholder ~50px tall when
-    // maxPopupHeight is 360 — old math placed popup ~300px above the anchor).
-    const rect = terminalElement.getBoundingClientRect();
-    const popupWidth = Math.min(MAX_POPUP_WIDTH, terminalElement.clientWidth - VIEWPORT_INSET);
-    const maxPopupHeight = Math.min(MAX_POPUP_HEIGHT, terminalElement.clientHeight - VIEWPORT_INSET);
+    // Every hover starts fresh: default width, anchored to the cursor. The
+    // popup deliberately remembers nothing between hovers — drag/resize affect
+    // only the live popup, and the next hover re-anchors at the default. It
+    // mounts on document.body as a `position: fixed` overlay clamped to the
+    // webview VIEWPORT (not the terminal box) so it can spill over the AI vault
+    // / file tree for more room. Height stays `auto` (capped at
+    // MAX_POPUP_HEIGHT) until the user resizes the live popup; the ACTUAL
+    // rendered height is measured after mount so the flip-above math doesn't
+    // overshoot for short content.
+    const bounds = this.computeBounds();
+    const popupWidth = clamp(DEFAULT_POPUP_WIDTH, bounds.minWidth, bounds.maxWidth);
+    const autoMaxHeight = Math.min(MAX_POPUP_HEIGHT, bounds.maxHeight);
+
     root.style.width = `${popupWidth}px`;
-    root.style.maxHeight = `${maxPopupHeight}px`;
-    root.style.overflow = "auto";
+    root.style.maxWidth = `${bounds.maxWidth}px`;
+    root.style.maxHeight = `${autoMaxHeight}px`;
+    // The root is a flex column (see `.anywhere-hover-preview` CSS): the body
+    // grows to fill and scrolls within the remaining space while the footer
+    // stays pinned to the bottom — including after a resize that grows the
+    // popup taller. `overflow: hidden` makes the body the sole scroller and
+    // clips content to the rounded corners.
+    root.style.overflow = "hidden";
     // Hide while we mount + measure so the user never sees the popup at the
     // pre-measurement position.
     root.style.visibility = "hidden";
@@ -304,6 +352,9 @@ export class HoverPreviewPopup implements HoverPreviewPopupHost {
     // "Open" icon button on the right.
     const header = document.createElement("div");
     header.className = "anywhere-hover-preview-header";
+    // Drag-to-move handle. Pointer capture keeps the gesture alive even when the
+    // cursor leaves the (often narrow) sidebar iframe before release.
+    header.addEventListener("pointerdown", this.onHeaderPointerDown);
     const headerPath = (hasAbsPath(result) ? result.absPath : undefined) ?? result.path;
     const pathLabel = document.createElement("span");
     pathLabel.className = "anywhere-hover-preview-header-path";
@@ -319,7 +370,7 @@ export class HoverPreviewPopup implements HoverPreviewPopupHost {
     root.appendChild(header);
 
     // Build body. The `-body-numbers` class enables the CSS-counter gutter on
-    // every `.line` element. Long lines overflow horizontally — the popup root
+    // every `.line` element. Long lines overflow horizontally — the body
     // has overflow:auto so the user can scroll sideways. See: design.md D14.
     const body = document.createElement("div");
     body.className = "anywhere-hover-preview-body anywhere-hover-preview-body-numbers";
@@ -341,38 +392,42 @@ export class HoverPreviewPopup implements HoverPreviewPopupHost {
       root.appendChild(this.buildFooter(this.getSettings(), this.onUpdateSetting));
     }
 
-    terminalElement.appendChild(root);
+    // SE-corner resize grip. Its own pointerdown starts a pointer-captured
+    // resize gesture (see onGripPointerDown).
+    const grip = document.createElement("div");
+    grip.className = "anywhere-hover-preview-resize-grip";
+    grip.setAttribute("aria-hidden", "true");
+    grip.addEventListener("pointerdown", this.onGripPointerDown);
+    root.appendChild(grip);
+
+    document.body.appendChild(root);
 
     // Measure ACTUAL rendered height now that content is laid out. Fall back
-    // to maxPopupHeight when offsetHeight is 0 — jsdom returns 0 because it
+    // to autoMaxHeight when offsetHeight is 0 — jsdom returns 0 because it
     // doesn't compute layout, and a defensive fallback also covers the rare
     // case where the popup is detached or display:none under user CSS.
     const measured = root.offsetHeight;
-    const actualHeight = measured > 0 ? Math.min(measured, maxPopupHeight) : maxPopupHeight;
+    const actualHeight = measured > 0 ? Math.min(measured, autoMaxHeight) : autoMaxHeight;
 
-    // Position relative to terminal.element's padding box.
-    const anchorX = anchor.clientX - rect.left;
-    const anchorY = anchor.clientY - rect.top;
-    const pos = computePosition(
-      anchorX,
-      anchorY,
-      popupWidth,
-      actualHeight,
-      terminalElement.clientWidth,
-      terminalElement.clientHeight,
-    );
+    // Anchor next to the cursor in VIEWPORT coordinates (the popup is
+    // `position: fixed`), clamped/flipped to stay inside the webview viewport —
+    // so it may spill out of the terminal over the vault / file tree but never
+    // off-screen. Always cursor-anchored — the popup keeps no remembered position.
+    const vp = this.viewportSize();
+    const pos = computePosition(anchor.clientX, anchor.clientY, popupWidth, actualHeight, vp.width, vp.height);
     root.style.left = `${pos.left}px`;
     root.style.top = `${pos.top}px`;
     root.style.visibility = "";
 
     this.el = root;
-    this.host = terminalElement;
+    // Mount parent for the overlay + non-null guard for the gesture handlers.
+    this.host = document.body;
 
     this.attachListeners();
 
     // Line-focus scroll MUST run after the popup is in the DOM AND positioned
-    // — scrollIntoView is a no-op on detached elements (the popup root has
-    // overflow:auto so the body's scroll position is what matters). The
+    // — scrollIntoView is a no-op on detached elements (the body is the
+    // scroll container so its scroll position is what matters). The
     // active-line class was set during renderOkBody so we just need to scroll
     // it into the popup's viewport now.
     this.scrollToActiveLine(root);
@@ -643,6 +698,12 @@ export class HoverPreviewPopup implements HoverPreviewPopupHost {
   };
 
   private readonly onPopupMouseLeave = () => {
+    if (this.interacting) {
+      // A drag/resize is in flight — the cursor crossing the popup edge must
+      // NOT start the controller's leave-grace dismissal (that would tear the
+      // popup down mid-gesture). The gesture's own `mouseup` ends it cleanly.
+      return;
+    }
     try {
       this.onPointerLeave?.();
     } catch {
@@ -651,6 +712,10 @@ export class HoverPreviewPopup implements HoverPreviewPopupHost {
   };
 
   private unmountElement(): void {
+    // End any in-flight drag/resize first so its pointer capture + move/up
+    // listeners never outlive the popup (would otherwise leak across renders
+    // and, in jsdom, across tests).
+    this.endGesture();
     if (this.el) {
       try {
         this.detachListeners();
@@ -661,6 +726,166 @@ export class HoverPreviewPopup implements HoverPreviewPopupHost {
       this.el = null;
       this.host = null;
     }
+  }
+
+  // ─── Drag / resize ─────────────────────────────────────────────────
+  //
+  // Both gestures use Pointer Events with setPointerCapture (mirroring
+  // FileTreeSash). Capture is essential in the webview: the popup often lives
+  // in a narrow sidebar iframe, and a mouse-based `window` mousemove/mouseup
+  // gesture loses its `mouseup` the moment the cursor exits the iframe — so the
+  // popup would stop tracking and never release the gesture. Pointer capture
+  // routes pointermove / pointerup back to the captured element no matter where
+  // the cursor goes, guaranteeing the gesture completes cleanly. The new
+  // geometry lives only on the popup's inline styles — nothing is persisted, so
+  // the next hover starts fresh at the default size/position.
+
+  /** Pointerdown on the header → move gesture (unless the press is on the Open button). */
+  private readonly onHeaderPointerDown = (event: PointerEvent) => {
+    if (event.button !== 0 || !this.el || !this.host) {
+      return;
+    }
+    if ((event.target as HTMLElement | null)?.closest(".anywhere-hover-preview-open-btn")) {
+      return;
+    }
+    this.beginPointerGesture(event, "move");
+  };
+
+  /** Pointerdown on the SE grip → resize gesture. */
+  private readonly onGripPointerDown = (event: PointerEvent) => {
+    if (event.button !== 0 || !this.el || !this.host) {
+      return;
+    }
+    this.beginPointerGesture(event, "resize");
+  };
+
+  /**
+   * Drive a move/resize gesture from `pointerdown` until `pointerup` /
+   * `pointercancel`, capturing the pointer to the affordance element. Sets
+   * `interacting` (suppresses leave-dismiss) for the gesture's duration. The
+   * gesture only mutates the live popup's inline geometry — nothing is
+   * persisted. Mutually exclusive — a new gesture ends any prior one.
+   */
+  private beginPointerGesture(event: PointerEvent, kind: "move" | "resize"): void {
+    if (!this.el || !this.host) {
+      return;
+    }
+    this.endGesture();
+    // Suppress text selection / native drag while dragging the handle.
+    event.preventDefault();
+    const el = this.el;
+    const handle = event.currentTarget as HTMLElement;
+    const pointerId = event.pointerId;
+    const startX = event.clientX;
+    const startY = event.clientY;
+    const startLeft = this.styleNum(el.style.left) ?? el.offsetLeft;
+    const startTop = this.styleNum(el.style.top) ?? el.offsetTop;
+    const startWidth = this.styleNum(el.style.width) ?? el.offsetWidth;
+    const startHeight = this.styleNum(el.style.height) ?? el.offsetHeight;
+    const vp = this.viewportSize();
+    const b = this.computeBounds();
+    if (kind === "resize") {
+      // A manual resize may grow the popup past the default height cap — lift
+      // max-height to the full viewport so the explicit height isn't clipped.
+      el.style.maxHeight = `${b.maxHeight}px`;
+    }
+    try {
+      handle.setPointerCapture(pointerId);
+    } catch {
+      // Best-effort — jsdom / older engines may not implement pointer capture.
+    }
+    this.interacting = true;
+
+    const onMove = (move: PointerEvent) => {
+      try {
+        if (kind === "move") {
+          const width = this.styleNum(el.style.width) ?? el.offsetWidth;
+          const height = this.styleNum(el.style.height) ?? el.offsetHeight;
+          const left = clamp(startLeft + (move.clientX - startX), 0, Math.max(0, vp.width - width));
+          const top = clamp(startTop + (move.clientY - startY), 0, Math.max(0, vp.height - height));
+          el.style.left = `${left}px`;
+          el.style.top = `${top}px`;
+        } else {
+          // Bound by the absolute caps AND the space remaining to the
+          // viewport's right/bottom edge from the popup's top-left corner.
+          const availW = Math.max(b.minWidth, vp.width - startLeft);
+          const availH = Math.max(b.minHeight, vp.height - startTop);
+          const width = clamp(startWidth + (move.clientX - startX), b.minWidth, Math.min(b.maxWidth, availW));
+          const height = clamp(startHeight + (move.clientY - startY), b.minHeight, Math.min(b.maxHeight, availH));
+          el.style.width = `${width}px`;
+          el.style.height = `${height}px`;
+        }
+      } catch {
+        // Best-effort — a throwing move handler must not strand the gesture.
+      }
+    };
+    const onEnd = () => {
+      // Geometry is intentionally not persisted — the live inline styles set by
+      // `onMove` are the whole effect, and the next hover re-anchors at default.
+      this.endGesture();
+    };
+
+    handle.addEventListener("pointermove", onMove);
+    handle.addEventListener("pointerup", onEnd);
+    handle.addEventListener("pointercancel", onEnd);
+    this.gestureCleanup = () => {
+      try {
+        handle.releasePointerCapture(pointerId);
+      } catch {
+        // Best-effort.
+      }
+      handle.removeEventListener("pointermove", onMove);
+      handle.removeEventListener("pointerup", onEnd);
+      handle.removeEventListener("pointercancel", onEnd);
+    };
+  }
+
+  /** End the active gesture: release capture, drop listeners, clear the flag. Idempotent. */
+  private endGesture(): void {
+    this.interacting = false;
+    if (this.gestureCleanup) {
+      const cleanup = this.gestureCleanup;
+      this.gestureCleanup = null;
+      cleanup();
+    }
+  }
+
+  // ─── Geometry helpers ──────────────────────────────────────────────
+
+  /** Min/max width & height bounds for the popup within the webview viewport. */
+  private computeBounds(): {
+    minWidth: number;
+    maxWidth: number;
+    minHeight: number;
+    maxHeight: number;
+  } {
+    // Max = the space the popup may occupy inside the webview viewport. When the
+    // viewport is narrower/shorter than the usability minimum, the popup shrinks
+    // to fit rather than overflowing — so `max` is floored at 0 (not at MIN_*),
+    // and `min` collapses down to `max` so the clamp range never inverts.
+    const vp = this.viewportSize();
+    const maxWidth = Math.max(0, Math.min(MAX_POPUP_WIDTH, vp.width - VIEWPORT_INSET));
+    const maxHeight = Math.max(0, vp.height - VIEWPORT_INSET);
+    return {
+      minWidth: Math.min(MIN_POPUP_WIDTH, maxWidth),
+      maxWidth,
+      minHeight: Math.min(MIN_POPUP_HEIGHT, maxHeight),
+      maxHeight,
+    };
+  }
+
+  /**
+   * Current webview viewport size — the popup is `position: fixed` and clamped
+   * to this, so it can overlay the whole webview (vault, file tree, terminal).
+   */
+  private viewportSize(): { width: number; height: number } {
+    return { width: window.innerWidth, height: window.innerHeight };
+  }
+
+  /** Parse a `"123px"` inline-style value to a number, or null when absent/invalid. */
+  private styleNum(value: string): number | null {
+    const n = Number.parseFloat(value);
+    return Number.isFinite(n) ? n : null;
   }
 
   private dismissSelf(): void {

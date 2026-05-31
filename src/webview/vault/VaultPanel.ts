@@ -26,6 +26,7 @@ import type {
   VaultTimelineItem,
 } from "../../vault/types";
 import { attachTooltip } from "../fileTree/Tooltip";
+import type { VaultPreviewGeometry } from "../state/WebviewState";
 import { getAgentAccent, getAgentDisplayName, getAgentIcon, VAULT_ACCENTS } from "./agentIcons";
 import { type GroupMode, groupEntries } from "./grouping";
 import { renderMarkdownLite } from "./markdownLite";
@@ -64,6 +65,11 @@ const ICON_NAV_PREV =
   '<svg viewBox="0 0 16 16" width="13" height="13" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 10l4-4 4 4"/></svg>';
 const ICON_NAV_NEXT =
   '<svg viewBox="0 0 16 16" width="13" height="13" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 6l4 4 4-4"/></svg>';
+// Jump-to-top: a bar over an up chevron. Jump-to-bottom: a down chevron over a bar.
+const ICON_SCROLL_TOP =
+  '<svg viewBox="0 0 16 16" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 3.5h8"/><path d="M4.5 9l3.5-3.5L11.5 9"/></svg>';
+const ICON_SCROLL_BOTTOM =
+  '<svg viewBox="0 0 16 16" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4.5 7l3.5 3.5L11.5 7"/><path d="M4 12.5h8"/></svg>';
 const ICON_ARCHIVE =
   '<svg viewBox="0 0 16 16" width="26" height="26" fill="none" stroke="currentColor" stroke-width="1.1" stroke-linejoin="round" aria-hidden="true"><rect x="2" y="3" width="12" height="3"/><path d="M3 6v7h10V6"/><line x1="6.5" y1="9" x2="9.5" y2="9"/></svg>';
 const ICON_OPEN =
@@ -304,6 +310,18 @@ export interface VaultPanelDeps {
   /** Persist the grouping mode whenever it changes. */
   persistGroupMode?: (mode: GroupMode) => void;
   /**
+   * Initial floating geometry of the session-preview overlay (size + position +
+   * maximized). Read once on construction to restore the user's last layout
+   * across reloads / restarts. Absent / null → auto-anchor to the row on open.
+   */
+  getInitialPreviewGeometry?: () => VaultPreviewGeometry | null;
+  /**
+   * Persist the preview overlay geometry whenever the user drags / resizes /
+   * maximizes it (or `null` is never sent — geometry only grows once set). Wired
+   * to `WebviewStateStore.updateState({ vaultPreviewGeometry })` in main.ts.
+   */
+  persistPreviewGeometry?: (geometry: VaultPreviewGeometry) => void;
+  /**
    * Resolve the active terminal pane's CURRENT cwd on demand (live, OSC 7
    * tracked). Pulled on every render so "This folder only" reflects where the
    * focused terminal is right now — not a value captured before OSC 7 fired
@@ -392,6 +410,7 @@ export class VaultPanel {
   private readonly persistCollapsed?: (collapsed: boolean) => void;
   private readonly persistFolderOnly?: (folderOnly: boolean) => void;
   private readonly persistGroupMode?: (mode: GroupMode) => void;
+  private readonly persistPreviewGeometry?: (geometry: VaultPreviewGeometry) => void;
   private readonly getContextCwd?: () => string | null;
   private readonly animateCollapse?: (apply: () => void) => void;
 
@@ -443,6 +462,26 @@ export class VaultPanel {
   private previewLimit = PREVIEW_LIMIT_DEFAULT;
   /** True while a load-more request is in flight (debounces the scroll trigger). */
   private previewLoadingMore = false;
+  /**
+   * Scroll-FAB transient state. The cluster is hidden by default and only
+   * revealed for a short window after a scroll (or while the pointer is on it).
+   */
+  private previewScrollActive = false;
+  private previewScrollHovering = false;
+  private previewScrollIdleTimer: ReturnType<typeof setTimeout> | null = null;
+  /**
+   * Set while a "scroll to top" gesture is loading every older window so it can
+   * land on the session's true FIRST message (not just the first one currently
+   * rendered). Cleared on the final untruncated render or when the preview closes.
+   */
+  private previewScrollToTopPending = false;
+  /**
+   * Timeline length seen on the previous load-all step. When a `truncated`
+   * response stops growing it (the host clamps detail limits at MAX_DETAIL_LIMIT),
+   * the load-all loop terminates instead of requesting forever for sessions
+   * larger than the cap.
+   */
+  private previewScrollToTopLastCount = 0;
   /** Nested sub-session (subagent) expansion state — keyed by child entryId.
    *  `expandedNested` survives root re-renders; `nestedDetails` caches fetched
    *  child transcripts; `pendingNested` routes an in-flight detail response to
@@ -452,6 +491,15 @@ export class VaultPanel {
   private readonly pendingNested = new Map<string, HTMLElement>();
   /** Edge/corner drag handles for resizing the preview (re-attached each render). */
   private readonly resizeHandles: HTMLElement[];
+  /**
+   * Floating scroll-to-top / scroll-to-bottom cluster pinned to the preview's
+   * bottom-right. Each button auto-hides at its edge (top hides at the top,
+   * bottom hides at the bottom). Re-attached on every render like the resize
+   * handles; its scroll listener is rebound to the fresh `.vault-preview-body`.
+   */
+  private readonly previewScrollNav: HTMLElement;
+  private readonly previewScrollTopBtn: HTMLButtonElement;
+  private readonly previewScrollBottomBtn: HTMLButtonElement;
   private onPreviewDocPointerDown?: (ev: MouseEvent) => void;
   private onPreviewDocKeyDown?: (ev: KeyboardEvent) => void;
 
@@ -461,9 +509,23 @@ export class VaultPanel {
     this.persistCollapsed = deps.persistCollapsed;
     this.persistFolderOnly = deps.persistFolderOnly;
     this.persistGroupMode = deps.persistGroupMode;
+    this.persistPreviewGeometry = deps.persistPreviewGeometry;
     this.getContextCwd = deps.getContextCwd;
     this.animateCollapse = deps.animateCollapse;
     this.groupMode = deps.getInitialGroupMode?.() ?? "recent";
+
+    // Restore the preview overlay's last floating geometry + maximized state so
+    // its size/position survive reloads and restarts (auto-anchors when absent).
+    const seededGeometry = deps.getInitialPreviewGeometry?.() ?? null;
+    if (seededGeometry) {
+      this.previewGeometry = {
+        top: seededGeometry.top,
+        left: seededGeometry.left,
+        width: seededGeometry.width,
+        height: seededGeometry.height,
+      };
+      this.previewMaximized = seededGeometry.maximized === true;
+    }
 
     this.host.classList.add("vault-panel");
     this.host.replaceChildren();
@@ -635,6 +697,10 @@ export class VaultPanel {
     this.previewEl.className = "vault-preview";
     this.previewEl.setAttribute("aria-label", "Session preview");
     this.resizeHandles = this.createResizeHandles();
+    const scrollNav = this.buildPreviewScrollNav();
+    this.previewScrollNav = scrollNav.nav;
+    this.previewScrollTopBtn = scrollNav.top;
+    this.previewScrollBottomBtn = scrollNav.bottom;
 
     this.host.append(header, toolbar, this.statusEl, this.bodyEl, this.previewEl);
 
@@ -1207,6 +1273,8 @@ export class VaultPanel {
     this.pendingNested.clear();
     this.previewLimit = PREVIEW_LIMIT_DEFAULT;
     this.previewLoadingMore = false;
+    this.previewScrollToTopPending = false;
+    this.resetPreviewScrollNavState();
     row.setAttribute("aria-selected", "true");
 
     this.applyPreviewAgentAccent(entry.agent);
@@ -1246,11 +1314,20 @@ export class VaultPanel {
   }
 
   private applyPreviewGeometry(g: { top: number; left: number; width: number; height: number }): void {
+    // Clamp into the CURRENT viewport — a geometry saved in a larger window (or
+    // before a restart at a different window size) must not place the card
+    // off-screen. Mirrors the bounds the resize/move gestures enforce.
+    const vw = window.innerWidth;
+    const vh = window.innerHeight;
+    const width = Math.min(Math.max(280, g.width), Math.max(280, vw - 16));
+    const height = Math.min(Math.max(160, g.height), Math.max(160, vh - 16));
+    const left = Math.max(0, Math.min(g.left, Math.max(0, vw - 40)));
+    const top = Math.max(0, Math.min(g.top, Math.max(0, vh - 40)));
     this.previewEl.style.right = "auto";
-    this.previewEl.style.left = `${g.left}px`;
-    this.previewEl.style.top = `${g.top}px`;
-    this.previewEl.style.width = `${g.width}px`;
-    this.previewEl.style.height = `${g.height}px`;
+    this.previewEl.style.left = `${left}px`;
+    this.previewEl.style.top = `${top}px`;
+    this.previewEl.style.width = `${width}px`;
+    this.previewEl.style.height = `${height}px`;
   }
 
   private clearPreviewInlineGeometry(): void {
@@ -1266,7 +1343,19 @@ export class VaultPanel {
     const r = this.previewEl.getBoundingClientRect();
     if (r.width > 0 && r.height > 0) {
       this.previewGeometry = { top: r.top, left: r.left, width: r.width, height: r.height };
+      this.persistPreviewState();
     }
+  }
+
+  /**
+   * Persist the current floating geometry + maximized flag to durable webview
+   * state so it survives reloads / restarts. No-op until a geometry exists.
+   */
+  private persistPreviewState(): void {
+    if (!this.previewGeometry) {
+      return;
+    }
+    this.persistPreviewGeometry?.({ ...this.previewGeometry, maximized: this.previewMaximized });
   }
 
   private closePreview(): void {
@@ -1285,6 +1374,8 @@ export class VaultPanel {
     this.pendingNested.clear();
     this.activePreviewRow?.removeAttribute("aria-selected");
     this.activePreviewRow = null;
+    this.previewScrollToTopPending = false;
+    this.resetPreviewScrollNavState();
     this.detachPreviewCloseListeners();
   }
 
@@ -1317,6 +1408,9 @@ export class VaultPanel {
         this.anchorPreview(this.activePreviewRow);
       }
     }
+    // Persist the new maximized flag (capturePreviewGeometry above only ran in
+    // the floating→max direction and recorded maximized=false).
+    this.persistPreviewState();
   }
 
   /** Build the 8 edge/corner resize handles (created once, re-attached per render). */
@@ -1331,9 +1425,151 @@ export class VaultPanel {
     });
   }
 
-  /** Render preview content, keeping the resize handles attached on top. */
+  /** Render preview content, keeping the resize handles + scroll nav attached on top. */
   private setPreviewContent(...nodes: Node[]): void {
-    this.previewEl.replaceChildren(...nodes, ...this.resizeHandles);
+    this.previewEl.replaceChildren(...nodes, ...this.resizeHandles, this.previewScrollNav);
+    this.wirePreviewScrollNav();
+  }
+
+  /**
+   * Build the floating scroll-to-top / scroll-to-bottom cluster. The container
+   * is pointer-transparent; only the visible buttons take pointer events (CSS),
+   * so a hidden button never blocks clicks on the transcript behind it. Click
+   * handlers re-query the live `.vault-preview-body` so they always act on the
+   * current render.
+   */
+  private buildPreviewScrollNav(): { nav: HTMLElement; top: HTMLButtonElement; bottom: HTMLButtonElement } {
+    const nav = document.createElement("div");
+    nav.className = "vault-preview-scroll-nav";
+    // Keep the cluster alive while the pointer is on it so a fading FAB doesn't
+    // slip away just as the user reaches to click it.
+    nav.addEventListener("pointerenter", () => {
+      this.previewScrollHovering = true;
+      if (this.previewScrollIdleTimer) {
+        clearTimeout(this.previewScrollIdleTimer);
+        this.previewScrollIdleTimer = null;
+      }
+    });
+    nav.addEventListener("pointerleave", () => {
+      this.previewScrollHovering = false;
+      this.scheduleHidePreviewScrollNav();
+    });
+    const make = (cls: string, label: string, svg: string, onClick: () => void): HTMLButtonElement => {
+      const btn = document.createElement("button");
+      btn.type = "button";
+      btn.className = `vault-preview-scroll-btn ${cls}`;
+      btn.title = label;
+      btn.setAttribute("aria-label", label);
+      btn.innerHTML = svg;
+      // mousedown.stopPropagation so the preview's outside-click close listener
+      // doesn't treat the FAB press as a dismiss.
+      btn.addEventListener("mousedown", (e) => e.stopPropagation());
+      btn.addEventListener("click", onClick);
+      return btn;
+    };
+    const top = make("vault-preview-scroll-top", "Scroll to first message", ICON_SCROLL_TOP, () =>
+      this.scrollPreviewToTop(),
+    );
+    const bottom = make("vault-preview-scroll-bottom", "Scroll to latest message", ICON_SCROLL_BOTTOM, () =>
+      this.smoothScrollPreviewBody("end"),
+    );
+    nav.append(top, bottom);
+    return { nav, top, bottom };
+  }
+
+  /**
+   * Scroll to the session's FIRST message. The preview is paginated (the newest
+   * window is rendered first), so when older messages are still truncated this
+   * loads every older window before landing on the true first message — handled
+   * incrementally in `handleSessionDetailResponse` via `previewScrollToTopPending`.
+   */
+  private scrollPreviewToTop(): void {
+    if (this.activePreviewDetail?.truncated) {
+      this.previewScrollToTopPending = true;
+      this.previewScrollToTopLastCount = this.activePreviewDetail.timeline?.length ?? 0;
+      this.requestMorePreview();
+      return;
+    }
+    this.smoothScrollPreviewBody(0);
+  }
+
+  /** Smooth-scroll the live preview body to the top (0) or its end. */
+  private smoothScrollPreviewBody(target: 0 | "end"): void {
+    const body = this.previewEl.querySelector<HTMLElement>(".vault-preview-body");
+    if (!body) {
+      return;
+    }
+    body.scrollTo({ top: target === "end" ? body.scrollHeight : 0, behavior: "smooth" });
+  }
+
+  /**
+   * After each render, (re)bind the scroll listener to the fresh body. The
+   * previous body element is discarded by `replaceChildren`, so its listener is
+   * collected with it — no leak, no double-bind. The cluster starts hidden and
+   * is revealed transiently on scroll. When the body is absent (loading/error
+   * placeholder), the whole cluster hides.
+   */
+  private wirePreviewScrollNav(): void {
+    const body = this.previewEl.querySelector<HTMLElement>(".vault-preview-body");
+    if (!body) {
+      this.previewScrollNav.classList.add("is-empty");
+      return;
+    }
+    this.previewScrollNav.classList.remove("is-empty");
+    this.previewScrollActive = false;
+    body.addEventListener("scroll", () => this.revealPreviewScrollNav(body), { passive: true });
+    this.updatePreviewScrollNav(body);
+  }
+
+  /** Reveal the FABs (subject to edge/scrollable checks) and (re)arm the idle-hide timer. */
+  private revealPreviewScrollNav(body: HTMLElement): void {
+    this.previewScrollActive = true;
+    this.updatePreviewScrollNav(body);
+    this.scheduleHidePreviewScrollNav();
+  }
+
+  /** Hide the FAB cluster after a short idle period — unless the pointer is on it. */
+  private scheduleHidePreviewScrollNav(): void {
+    if (this.previewScrollIdleTimer) {
+      clearTimeout(this.previewScrollIdleTimer);
+      this.previewScrollIdleTimer = null;
+    }
+    if (this.previewScrollHovering) {
+      return;
+    }
+    this.previewScrollIdleTimer = setTimeout(() => {
+      this.previewScrollIdleTimer = null;
+      this.previewScrollActive = false;
+      const body = this.previewEl.querySelector<HTMLElement>(".vault-preview-body");
+      if (body) {
+        this.updatePreviewScrollNav(body);
+      }
+    }, 1100);
+  }
+
+  /** Clear transient scroll-nav state (timer + flags). Called when the preview reopens/closes. */
+  private resetPreviewScrollNavState(): void {
+    if (this.previewScrollIdleTimer) {
+      clearTimeout(this.previewScrollIdleTimer);
+      this.previewScrollIdleTimer = null;
+    }
+    this.previewScrollActive = false;
+    this.previewScrollHovering = false;
+    this.previewScrollToTopLastCount = 0;
+  }
+
+  /**
+   * Toggle each FAB from the body's scroll position. Both stay hidden unless the
+   * cluster is currently "active" (recently scrolled / hovered) so the buttons
+   * only appear while the user is actually scrolling.
+   */
+  private updatePreviewScrollNav(body: HTMLElement): void {
+    const EDGE = 8;
+    const show = this.previewScrollActive && body.scrollHeight - body.clientHeight > EDGE;
+    const atTop = body.scrollTop <= EDGE;
+    const atBottom = body.scrollHeight - body.scrollTop - body.clientHeight <= EDGE;
+    this.previewScrollTopBtn.classList.toggle("is-visible", show && !atTop);
+    this.previewScrollBottomBtn.classList.toggle("is-visible", show && !atBottom);
   }
 
   /** Drag one edge/corner handle to resize the floating preview (all 4 sides). */
@@ -1415,6 +1651,65 @@ export class VaultPanel {
   }
 
   /**
+   * Drag the preview header to move the floating card (translate left/top, size
+   * pinned). Pointer-captured + document-listener driven like `startResize`, so
+   * the gesture survives the cursor leaving the (narrow sidebar) iframe. Ignores
+   * presses on the action buttons and a plain click (no movement), so the card
+   * is only "pinned" once actually dragged.
+   */
+  private startMove(ev: PointerEvent): void {
+    if (this.previewMaximized || ev.button !== 0) {
+      return;
+    }
+    if ((ev.target as Element | null)?.closest(".vault-preview-title-actions")) {
+      return; // header action buttons keep their own click behaviour
+    }
+    ev.preventDefault();
+    const rect = this.previewEl.getBoundingClientRect();
+    const startX = ev.clientX;
+    const startY = ev.clientY;
+    const startL = rect.left;
+    const startT = rect.top;
+    const w = rect.width;
+    const h = rect.height;
+    const handle = ev.currentTarget as HTMLElement;
+    handle.setPointerCapture?.(ev.pointerId);
+    this.previewEl.style.right = "auto";
+    let moved = false;
+    const onMove = (e: PointerEvent): void => {
+      const dx = e.clientX - startX;
+      const dy = e.clientY - startY;
+      if (!moved && Math.abs(dx) + Math.abs(dy) < 3) {
+        return; // sub-pixel jitter — a plain click must not pin/persist geometry
+      }
+      moved = true;
+      const l = Math.max(0, Math.min(startL + dx, window.innerWidth - 40));
+      const t = Math.max(0, Math.min(startT + dy, window.innerHeight - 40));
+      this.previewEl.style.left = `${l}px`;
+      this.previewEl.style.top = `${t}px`;
+      // Pin the size so the card translates rather than reflowing.
+      this.previewEl.style.width = `${w}px`;
+      this.previewEl.style.height = `${h}px`;
+    };
+    const teardown = (): void => {
+      document.removeEventListener("pointermove", onMove);
+      document.removeEventListener("pointerup", onUp);
+      handle.releasePointerCapture?.(ev.pointerId);
+      this.cancelActiveResize = undefined;
+    };
+    const onUp = (): void => {
+      teardown();
+      if (moved) {
+        this.capturePreviewGeometry(); // remember + persist the new position
+      }
+    };
+    // Reuse the resize abort hook so closePreview can cancel a move mid-drag.
+    this.cancelActiveResize = teardown;
+    document.addEventListener("pointermove", onMove);
+    document.addEventListener("pointerup", onUp);
+  }
+
+  /**
    * Host → webview detail reply. Drops a response whose `entryId` is no longer
    * the active preview (the user opened a different row first) — the stale-render
    * guard. Renders the detail, a partial notice, or an inline error.
@@ -1451,7 +1746,28 @@ export class VaultPanel {
       this.expandedRuns.clear();
     }
     this.renderPreviewDetail(this.activePreviewEntry, msg.detail);
-    if (fromBottom !== null) {
+    if (this.previewScrollToTopPending) {
+      // A "scroll to first message" gesture is walking older windows. Keep
+      // loading while the timeline still GROWS; stop once it's fully loaded OR
+      // the host stops returning more (it clamps detail limits at
+      // MAX_DETAIL_LIMIT, so a >cap session stays `truncated` forever — without
+      // the growth check this would loop indefinitely). Then jump to the very
+      // top (instant — a smooth scroll across the full history would be a long,
+      // jarring animation).
+      const count = this.activePreviewDetail?.timeline?.length ?? 0;
+      const grew = count > this.previewScrollToTopLastCount;
+      this.previewScrollToTopLastCount = count;
+      if (this.activePreviewDetail?.truncated && grew) {
+        this.requestMorePreview();
+      } else {
+        this.previewScrollToTopPending = false;
+        this.previewScrollToTopLastCount = 0;
+        const bodyAfter = this.previewEl.querySelector<HTMLElement>(".vault-preview-body");
+        if (bodyAfter) {
+          bodyAfter.scrollTop = 0;
+        }
+      }
+    } else if (fromBottom !== null) {
       const bodyAfter = this.previewEl.querySelector<HTMLElement>(".vault-preview-body");
       if (bodyAfter) {
         bodyAfter.scrollTop = Math.max(0, bodyAfter.scrollHeight - fromBottom);
@@ -1508,7 +1824,7 @@ export class VaultPanel {
     const rowRect = row.getBoundingClientRect();
     const vw = window.innerWidth;
     const vh = window.innerHeight;
-    const w = this.previewEl.offsetWidth || 440;
+    const w = this.previewEl.offsetWidth || 560;
     const h = this.previewEl.offsetHeight || Math.min(Math.round(vh * 0.7), 560);
     let left = rowRect.left - w - 12;
     if (left < 8) {
@@ -1528,6 +1844,8 @@ export class VaultPanel {
 
     const titleRow = document.createElement("div");
     titleRow.className = "vault-preview-title-row";
+    // The title row doubles as the move handle (drag to reposition the card).
+    titleRow.addEventListener("pointerdown", (ev) => this.startMove(ev));
     const badge = document.createElement("span");
     badge.className = "vault-badge";
     badge.setAttribute("aria-label", agentLabel(entry.agent));
@@ -1826,10 +2144,33 @@ export class VaultPanel {
     chevron.className = "vault-preview-subagent-chevron";
     chevron.innerHTML = ICON_CHEVRON_DOWN;
     chevron.setAttribute("aria-hidden", "true");
-    const titleEl = document.createElement("span");
-    titleEl.className = "vault-preview-subagent-title";
-    titleEl.textContent = item.agent ? `@${item.agent} · ${item.title}` : item.title;
-    head.append(chevron, titleEl);
+    // Make a subagent spawn legible at a glance: an "agent" badge + the
+    // accent-colored `@<agent>` chip mark it as a nested agent run and separate
+    // the agent identity from the description (which the same value used to blur
+    // into). Group nodes (workflow / team) carry no single agent — they keep the
+    // title-only form. The description always lives in `-title` so the badge +
+    // accent styling stays scoped to the agent.
+    if (item.agent) {
+      const badge = document.createElement("span");
+      badge.className = "vault-preview-subagent-badge";
+      badge.textContent = "agent";
+      const agentEl = document.createElement("span");
+      agentEl.className = "vault-preview-subagent-agent";
+      agentEl.textContent = `@${item.agent}`;
+      const sep = document.createElement("span");
+      sep.className = "vault-preview-subagent-sep";
+      sep.textContent = "·";
+      sep.setAttribute("aria-hidden", "true");
+      const titleEl = document.createElement("span");
+      titleEl.className = "vault-preview-subagent-title";
+      titleEl.textContent = item.title;
+      head.append(chevron, badge, agentEl, sep, titleEl);
+    } else {
+      const titleEl = document.createElement("span");
+      titleEl.className = "vault-preview-subagent-title";
+      titleEl.textContent = item.title;
+      head.append(chevron, titleEl);
+    }
 
     // First-message preview, shown while collapsed (hidden once expanded — the
     // child's own first message then leads the nested transcript).
