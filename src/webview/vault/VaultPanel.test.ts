@@ -1199,9 +1199,9 @@ describe("VaultPanel session preview (redesign 5_2)", () => {
     more?.click();
     expect(host.querySelectorAll(".vault-preview-body .vault-preview-message-tool")).toHaveLength(3);
     expect(host.querySelector(".vault-preview-expand")).toBeNull();
-    expect(
-      host.querySelector(".vault-preview-body .vault-preview-message-assistant")?.textContent,
-    ).toContain("FINAL ANSWER");
+    expect(host.querySelector(".vault-preview-body .vault-preview-message-assistant")?.textContent).toContain(
+      "FINAL ANSWER",
+    );
   });
 
   it("does NOT pin a mid-run assistant line when steps follow it (no reorder)", () => {

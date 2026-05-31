@@ -35,13 +35,13 @@ import type {
   RequestUnsubscribeFsChangesMessage,
 } from "../../types/messages";
 import type { FileTreeState } from "../state/WebviewState";
+import { attachTooltip } from "../ui/Tooltip";
 import { FileSystemDataSource } from "./FileSystemDataSource";
 import { FileTreeSash, isHorizontalLayout } from "./FileTreeSash";
 import type { FileNode } from "./IFileSystemProvider";
 import { FILE_TREE_DRAG_MIME, ReadOnlyFileRenderer } from "./ReadOnlyFileRenderer";
 import { FileTreeSearchController, isSyntheticSearchRow } from "./search/FileTreeSearchController";
 import type { SearchMode } from "./search/matching";
-import { attachTooltip } from "../ui/Tooltip";
 import { Tree } from "./Tree";
 
 // `postMessage` accepts all outbound types this panel can send. Kept as a
