@@ -13,13 +13,13 @@ import { fileURLToPath } from "node:url";
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const TARGET = path.resolve(__dirname, "..", "media", "webview.js");
 
-const CEILING_BYTES = Math.round(3.6 * 1024 * 1024); // 3.6 MB
+const CEILING_BYTES = Math.round(4.5 * 1024 * 1024); // 4.5 MB
 //
 // Run against PRODUCTION builds only (esbuild --production). Dev builds skip
 // minification entirely and run ~10-15% larger; gating dev builds at the
 // shipping ceiling causes false failures during the inner compile loop.
 //
-// Why 3.6 MB (was 3 MB, originally 1.6 MB):
+// Why 4.5 MB (was 3.6 MB, before that 3 MB, originally 1.6 MB):
 //   - The webview build keeps `minifyIdentifiers: false` and `minifySyntax: false`
 //     for xterm.js v6 compatibility (see esbuild.js:95-103). This roughly doubles
 //     the Shiki grammar payload because TextMate grammars contain many long
@@ -34,6 +34,10 @@ const CEILING_BYTES = Math.round(3.6 * 1024 * 1024); // 3.6 MB
 //     Oracle-measured pre-vendor baseline was 3,089,435 bytes (55 KB headroom against
 //     3 MB). The actual delta is gated separately by `scripts/measure-vendor-delta.mjs`
 //     (≤ 450 KB).
+//   - Bumped from 3.6 MB → 4.5 MB for the v0.16.0 AI Coding Vault redesign (VaultPanel,
+//     agent brand icons, content-rich session preview, markdown-lite renderer). The
+//     production build measured 3,826,109 bytes (~3.65 MB), 50 KB over the old 3.6 MB
+//     ceiling. 4.5 MB leaves ~850 KB headroom while still catching accidental bloat.
 //
 // See: design.md D11, Risk Map "Shiki bundle size"
 
