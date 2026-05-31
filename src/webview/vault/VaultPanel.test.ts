@@ -540,6 +540,24 @@ describe("VaultPanel session preview (redesign 5_2)", () => {
     expect(host.querySelector('.vault-row[data-entry-id="claude:a"]')?.getAttribute("aria-selected")).toBe("true");
   });
 
+  it("moves the highlight when switching previews and clears it on close", () => {
+    const host = createHost();
+    const panel = new VaultPanel({ host, postMessage: () => {}, getInitialCollapsed: () => false });
+    panel.render(result([entry({ id: "claude:a" }), entry({ id: "codex:b", agent: "codex" })]));
+    const sel = (id: string) => host.querySelector(`.vault-row[data-entry-id="${id}"]`)?.getAttribute("aria-selected");
+
+    host.querySelector<HTMLElement>('.vault-row[data-entry-id="claude:a"]')?.click();
+    expect(sel("claude:a")).toBe("true");
+    // Switching to another row moves the single highlight (old one is cleared).
+    host.querySelector<HTMLElement>('.vault-row[data-entry-id="codex:b"]')?.click();
+    expect(sel("codex:b")).toBe("true");
+    expect(sel("claude:a")).toBeNull();
+    // Closing the preview (Esc) clears the highlight entirely.
+    document.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape" }));
+    expect(host.querySelector(".vault-preview.is-open")).toBeNull();
+    expect(sel("codex:b")).toBeNull();
+  });
+
   it("expanding a capped run reveals its hidden steps in place (UI-2)", () => {
     const host = createHost();
     const panel = new VaultPanel({ host, postMessage: () => {}, getInitialCollapsed: () => false });
@@ -687,6 +705,35 @@ describe("VaultPanel session preview (redesign 5_2)", () => {
       detail: detail({ truncated: true, timeline: userTimeline(5, "capped") }),
     });
     expect(detailReqs()).toBe(2); // loop terminated, no infinite requests
+  });
+
+  it("clears the scroll-to-top walk when a window errors, so a later reply doesn't auto-jump", () => {
+    const host = createHost();
+    const posted: { type: string }[] = [];
+    const panel = new VaultPanel({ host, postMessage: (m) => posted.push(m), getInitialCollapsed: () => false });
+    panel.render(result([entry({ id: "claude:a" })]));
+    host.querySelector<HTMLElement>(".vault-row")?.click();
+    const detailReqs = (): number => posted.filter((m) => m.type === "requestVaultSessionDetail").length;
+
+    panel.handleSessionDetailResponse({
+      type: "vaultSessionDetailResponse",
+      entryId: "claude:a",
+      detail: detail({ truncated: true, timeline: userTimeline(1, "m0") }),
+    });
+    host.querySelector<HTMLElement>(".vault-preview-scroll-top")?.click();
+    expect(detailReqs()).toBe(2); // walk started one load-more
+
+    // The older-window request fails mid-walk.
+    panel.handleSessionDetailResponse({ type: "vaultSessionDetailResponse", entryId: "claude:a", error: "boom" });
+
+    // A later (still-truncated) reply must render WITHOUT resuming the walk — the
+    // pending flag was cleared on error, so no spurious auto load-more fires.
+    panel.handleSessionDetailResponse({
+      type: "vaultSessionDetailResponse",
+      entryId: "claude:a",
+      detail: detail({ truncated: true, timeline: userTimeline(2, "m0") }),
+    });
+    expect(detailReqs()).toBe(2); // no auto-jump-to-top loop revived by the stale flag
   });
 
   it("hides the scroll FAB cluster while the preview is loading (no body yet)", () => {
@@ -1346,6 +1393,84 @@ describe("VaultPanel session preview (redesign 5_2)", () => {
     expect(body?.querySelector(".vault-preview-message-assistant")?.textContent).toContain("CHILD CONCLUSION");
   });
 
+  it("resolves every block sharing a child entryId from one detail reply (not just the latest)", () => {
+    const host = createHost();
+    const posted: { type: string; entryId?: string }[] = [];
+    const panel = new VaultPanel({ host, postMessage: (m) => posted.push(m), getInitialCollapsed: () => false });
+    panel.render(result([entry({ id: "opencode:a", agent: "opencode" })]));
+    host.querySelector<HTMLElement>(".vault-row")?.click();
+    // Root references the SAME child entryId in two blocks, with a capped run between
+    // them (4 tools → "Show 1 more") so expanding the run forces a re-render.
+    panel.handleSessionDetailResponse({
+      type: "vaultSessionDetailResponse",
+      entryId: "opencode:a",
+      detail: detail({
+        entryId: "opencode:a",
+        timeline: [
+          { kind: "subagentSession", entryId: "opencode:ses_dup", title: "Sub A", firstMessage: "p" },
+          { kind: "tool", tool: "Bash", detail: "t1" },
+          { kind: "tool", tool: "Bash", detail: "t2" },
+          { kind: "tool", tool: "Bash", detail: "t3" },
+          { kind: "tool", tool: "Bash", detail: "t4" },
+          { kind: "subagentSession", entryId: "opencode:ses_dup", title: "Sub B", firstMessage: "p" },
+        ],
+      }),
+    });
+    // Expand the first block → one child request in flight, its body added to the Set.
+    host.querySelectorAll<HTMLButtonElement>(".vault-preview-subagent-head")[0]?.click();
+    const childReqs = (): number =>
+      posted.filter((m) => m.type === "requestVaultSessionDetail" && m.entryId === "opencode:ses_dup").length;
+    expect(childReqs()).toBe(1);
+    // Expanding the run re-renders; both blocks now auto-populate the SAME pending id
+    // (no second request — already in flight).
+    host.querySelector<HTMLButtonElement>(".vault-preview-expand")?.click();
+    expect(childReqs()).toBe(1);
+
+    panel.handleSessionDetailResponse({
+      type: "vaultSessionDetailResponse",
+      entryId: "opencode:ses_dup",
+      detail: detail({ entryId: "opencode:ses_dup", timeline: [{ kind: "message", role: "user", text: "DUP-CHILD" }] }),
+    });
+    // Both visible blocks resolve — the earlier one is no longer stuck loading.
+    const bodies = Array.from(host.querySelectorAll(".vault-preview-subagent-body"));
+    expect(bodies).toHaveLength(2);
+    for (const b of bodies) {
+      expect(b.textContent).toContain("DUP-CHILD");
+    }
+  });
+
+  it("does not stack-overflow on a self-referential nested detail (cycle guard)", () => {
+    const host = createHost();
+    const panel = new VaultPanel({ host, postMessage: () => {}, getInitialCollapsed: () => false });
+    panel.render(result([entry({ id: "opencode:a", agent: "opencode" })]));
+    host.querySelector<HTMLElement>(".vault-row")?.click();
+    panel.handleSessionDetailResponse({
+      type: "vaultSessionDetailResponse",
+      entryId: "opencode:a",
+      detail: detail({
+        entryId: "opencode:a",
+        timeline: [{ kind: "subagentSession", entryId: "opencode:ses_self", title: "Sub", firstMessage: "p" }],
+      }),
+    });
+    host.querySelector<HTMLButtonElement>(".vault-preview-subagent-head")?.click();
+    // The child transcript nests its OWN entryId while expanded — without the guard
+    // the synchronous cached re-render recurses until the stack overflows.
+    expect(() =>
+      panel.handleSessionDetailResponse({
+        type: "vaultSessionDetailResponse",
+        entryId: "opencode:ses_self",
+        detail: detail({
+          entryId: "opencode:ses_self",
+          timeline: [
+            { kind: "message", role: "user", text: "SELF" },
+            { kind: "subagentSession", entryId: "opencode:ses_self", title: "Sub", firstMessage: "p" },
+          ],
+        }),
+      }),
+    ).not.toThrow();
+    expect(host.querySelector(".vault-preview-subagent-body")?.textContent).toContain("SELF");
+  });
+
   it("gives nested + run controls accessible titles/labels (group subagent had none)", () => {
     const host = createHost();
     const panel = new VaultPanel({ host, postMessage: () => {}, getInitialCollapsed: () => false });
@@ -1897,5 +2022,63 @@ describe("VaultPanel session-preview geometry persistence", () => {
     document.dispatchEvent(new PointerEvent("pointerup", { pointerId: 1 }));
     expect(persisted).toHaveLength(0);
     expect(preview.style.left).toBe("100px");
+  });
+
+  it("ignores a second pointer mid-drag so it can't hijack the move", () => {
+    const host = createHost();
+    const persisted: import("../state/WebviewState").VaultPreviewGeometry[] = [];
+    const panel = new VaultPanel({
+      host,
+      postMessage: () => {},
+      getInitialCollapsed: () => false,
+      getInitialPreviewGeometry: () => ({ top: 50, left: 100, width: 600, height: 400 }),
+      persistPreviewGeometry: (g) => persisted.push(g),
+    });
+    panel.render(result([entry({ id: "claude:a" })]));
+    const preview = openPreview(host);
+    rectFromStyle(preview, { left: 100, top: 50, width: 600, height: 400 });
+    const titleRow = preview.querySelector<HTMLElement>(".vault-preview-title-row") as HTMLElement;
+
+    titleRow.dispatchEvent(
+      new PointerEvent("pointerdown", { bubbles: true, button: 0, pointerId: 1, clientX: 200, clientY: 200 }),
+    );
+    // A foreign pointer (id 2) moving across the document must not drive this drag.
+    document.dispatchEvent(new PointerEvent("pointermove", { pointerId: 2, clientX: 400, clientY: 400 }));
+    expect(preview.style.left).toBe("100px");
+    expect(preview.style.top).toBe("50px");
+    // The owning pointer (id 1) still drives it; release commits the new position.
+    document.dispatchEvent(new PointerEvent("pointermove", { pointerId: 1, clientX: 230, clientY: 240 }));
+    document.dispatchEvent(new PointerEvent("pointerup", { pointerId: 1 }));
+    expect(persisted.at(-1)).toEqual({ top: 90, left: 130, width: 600, height: 400, maximized: false });
+  });
+});
+
+describe("VaultPanel dispose", () => {
+  it("closes an open preview via the dispose chain", () => {
+    const host = createHost();
+    const panel = new VaultPanel({ host, postMessage: () => {}, getInitialCollapsed: () => false });
+    panel.render(result([entry({ id: "claude:a" })]));
+    host.querySelector<HTMLElement>(".vault-row")?.click();
+    expect(host.querySelector(".vault-preview.is-open")).not.toBeNull();
+    panel.dispose();
+    expect(host.querySelector(".vault-preview.is-open")).toBeNull();
+  });
+
+  it("tears down the open context menu and is idempotent + inert afterwards", () => {
+    const host = createHost();
+    const panel = new VaultPanel({ host, postMessage: () => {}, getInitialCollapsed: () => false });
+    panel.render(result([entry({ id: "claude:a" })]));
+    host
+      .querySelector<HTMLElement>(".vault-row")
+      ?.dispatchEvent(new MouseEvent("contextmenu", { bubbles: true, cancelable: true, clientX: 5, clientY: 5 }));
+    expect(host.querySelector(".vault-context-menu")).not.toBeNull();
+    panel.dispose();
+    expect(host.querySelector(".vault-context-menu")).toBeNull();
+    // A second dispose + stray document events must not throw (listeners detached).
+    expect(() => {
+      panel.dispose();
+      document.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape" }));
+      document.dispatchEvent(new MouseEvent("mousedown", { bubbles: true }));
+    }).not.toThrow();
   });
 });

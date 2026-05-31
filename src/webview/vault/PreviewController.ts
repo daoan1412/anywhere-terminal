@@ -28,6 +28,12 @@ export interface PreviewControllerDeps {
   isContextMenuOpen: () => boolean;
   /** Close the context menu when a preview opens. */
   closeContextMenu: () => void;
+  /** Live-resolve the list row for the open preview's entryId (anchoring). The
+   *  controller stores no row ref — VaultPanel owns the list DOM (no rebind seam). */
+  getActiveRow: () => HTMLElement | null;
+  /** Ask VaultPanel to re-apply the selection highlight from `activeEntryId`
+   *  (called after open/close, since an internal close has no VaultPanel call). */
+  syncHighlight: () => void;
   getInitialPreviewGeometry?: () => VaultPreviewGeometry | null;
   persistPreviewGeometry?: (geometry: VaultPreviewGeometry) => void;
 }
@@ -43,7 +49,6 @@ export class PreviewController {
   /** The entry id whose detail the open preview is for — stale responses (≠ this) are dropped. */
   private activePreviewEntryId: string | null = null;
   private activePreviewEntry: VaultSessionEntry | null = null;
-  private activePreviewRow: HTMLElement | null = null;
   /** The detail currently shown — kept so "show more" can re-render in place. */
   private activePreviewDetail: VaultSessionDetail | null = null;
   /** Keys (`<prefix>#<runIndex>`) of AI-runs expanded past the per-run cap. */
@@ -64,7 +69,12 @@ export class PreviewController {
    *  in-flight detail response to its block. All reset when the preview closes. */
   private readonly expandedNested = new Set<string>();
   private readonly nestedDetails = new Map<string, VaultSessionDetail>();
-  private readonly pendingNested = new Map<string, HTMLElement>();
+  /** Child entryId → every open block awaiting that detail. A Set (not one element)
+   *  so two blocks sharing a child entryId both resolve from a single response. */
+  private readonly pendingNested = new Map<string, Set<HTMLElement>>();
+  /** Child entryIds whose cached detail is mid-render — breaks a self-referential
+   *  cycle (a child that nests its own id) before it overflows the stack. */
+  private readonly renderingNested = new Set<string>();
   private onPreviewDocPointerDown?: (ev: MouseEvent) => void;
   private onPreviewDocKeyDown?: (ev: KeyboardEvent) => void;
 
@@ -77,7 +87,7 @@ export class PreviewController {
       el: this.previewEl,
       initialGeometry: deps.getInitialPreviewGeometry?.() ?? null,
       persistGeometry: deps.persistPreviewGeometry,
-      getAnchorRow: () => this.activePreviewRow,
+      getAnchorRow: deps.getActiveRow,
     });
     this.scrollNav = new PreviewScrollNav({
       el: this.previewEl,
@@ -114,15 +124,16 @@ export class PreviewController {
     return this.activePreviewEntryId;
   }
 
-  /** Re-anchor the selection highlight after a list re-render rebuilt the rows (W4). */
-  rebindActiveRow(row: HTMLElement | null): void {
-    this.activePreviewRow = row;
-    row?.setAttribute("aria-selected", "true");
-  }
-
   /** Keep the active entry reference live when a host push skips the DOM re-render. */
   refreshActiveEntry(entry: VaultSessionEntry): void {
     this.activePreviewEntry = entry;
+  }
+
+  /** Tear down all owned resources. Closing the preview detaches the document
+   *  listeners, disposes header tooltips, cancels any in-flight drag, and resets
+   *  the scroll-nav timer. Idempotent — safe when nothing is open. */
+  dispose(): void {
+    this.closePreview();
   }
 
   /**
@@ -130,14 +141,11 @@ export class PreviewController {
    * the row, request the session detail. `activePreviewEntryId` is the guard the
    * response handler checks so a slow response for a row the user has left is dropped.
    */
-  open(entry: VaultSessionEntry, row: HTMLElement): void {
+  open(entry: VaultSessionEntry): void {
     this.deps.closeContextMenu();
-    // Clear the prior selection highlight (switching previews without closing).
-    this.activePreviewRow?.removeAttribute("aria-selected");
 
     this.activePreviewEntryId = entry.id;
     this.activePreviewEntry = entry;
-    this.activePreviewRow = row;
     this.activePreviewDetail = null;
     this.expandedRuns.clear();
     this.expandedNested.clear();
@@ -148,12 +156,12 @@ export class PreviewController {
     this.previewScrollToTopPending = false;
     this.previewScrollToTopLastCount = 0;
     this.scrollNav.reset();
-    row.setAttribute("aria-selected", "true");
 
     this.applyPreviewAgentAccent(entry.agent);
     this.renderPreviewLoading(entry);
     this.previewEl.classList.add("is-open");
-    this.floatingWindow.place(row);
+    this.deps.syncHighlight(); // VaultPanel sets aria-selected on the active row
+    this.floatingWindow.place(); // anchors via getActiveRow (the just-clicked row)
     this.attachPreviewCloseListeners();
     this.deps.postMessage({ type: "requestVaultSessionDetail", entryId: entry.id });
   }
@@ -185,11 +193,10 @@ export class PreviewController {
     this.expandedNested.clear();
     this.nestedDetails.clear();
     this.pendingNested.clear();
-    this.activePreviewRow?.removeAttribute("aria-selected");
-    this.activePreviewRow = null;
     this.previewScrollToTopPending = false;
     this.previewScrollToTopLastCount = 0;
     this.scrollNav.reset();
+    this.deps.syncHighlight(); // clears aria-selected (activeEntryId is now null)
     this.disposePreviewTooltips();
     this.detachPreviewCloseListeners();
   }
@@ -225,14 +232,19 @@ export class PreviewController {
    * an inline error; a nested reply routes to its expanded block independently.
    */
   handleSessionDetailResponse(msg: VaultSessionDetailResponseMessage): void {
-    const nestedContainer = this.pendingNested.get(msg.entryId);
-    if (nestedContainer) {
+    const nestedContainers = this.pendingNested.get(msg.entryId);
+    if (nestedContainers) {
       this.pendingNested.delete(msg.entryId);
       if (msg.detail && !msg.error) {
         this.nestedDetails.set(msg.entryId, msg.detail);
-        renderNestedInto(nestedContainer, msg.detail, msg.entryId, this.timelineBag);
+        for (const container of nestedContainers) {
+          renderNestedInto(container, msg.detail, msg.entryId, this.timelineBag);
+        }
       } else {
-        nestedContainer.textContent = msg.error ?? "Couldn't read this sub-session.";
+        const text = msg.error ?? "Couldn't read this sub-session.";
+        for (const container of nestedContainers) {
+          container.textContent = text;
+        }
       }
       return;
     }
@@ -242,6 +254,10 @@ export class PreviewController {
     const wasLoadingMore = this.previewLoadingMore;
     this.previewLoadingMore = false;
     if (msg.error || !msg.detail) {
+      // Clear an in-flight "scroll to first message" walk — otherwise the flag
+      // stays stale and the next successful reply jumps to the top unexpectedly.
+      this.previewScrollToTopPending = false;
+      this.previewScrollToTopLastCount = 0;
       this.renderPreviewError(this.activePreviewEntry, msg.error ?? "Couldn't read this session.");
       return;
     }
@@ -423,12 +439,25 @@ export class PreviewController {
   private populateNested(entryId: string, body: HTMLElement): void {
     const cached = this.nestedDetails.get(entryId);
     if (cached) {
-      renderNestedInto(body, cached, entryId, this.timelineBag);
+      // Cached render is synchronous; if this id is already on the render stack the
+      // detail nests itself — stop rather than recurse into a stack overflow.
+      if (this.renderingNested.has(entryId)) {
+        body.replaceChildren();
+        return;
+      }
+      this.renderingNested.add(entryId);
+      try {
+        renderNestedInto(body, cached, entryId, this.timelineBag);
+      } finally {
+        this.renderingNested.delete(entryId);
+      }
       return;
     }
     body.replaceChildren(loadingBody());
-    const alreadyPending = this.pendingNested.has(entryId);
-    this.pendingNested.set(entryId, body); // latest container wins (survives re-render)
+    const containers = this.pendingNested.get(entryId) ?? new Set<HTMLElement>();
+    const alreadyPending = containers.size > 0;
+    containers.add(body); // every open block sharing this entryId resolves together
+    this.pendingNested.set(entryId, containers);
     if (!alreadyPending) {
       this.deps.postMessage({ type: "requestVaultSessionDetail", entryId });
     }

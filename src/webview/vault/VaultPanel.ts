@@ -147,13 +147,15 @@ export class VaultPanel {
   private readonly rowCallbacks: VaultRowCallbacks;
   /** Floating session-preview overlay — owns its own DOM, state, and listeners. */
   private readonly preview: PreviewController;
+  /** Disposers for resources owned directly by the panel (header tooltips). */
+  private readonly disposers: Array<() => void> = [];
 
   constructor(deps: VaultPanelDeps) {
     this.host = deps.host;
     this.postMessage = deps.postMessage;
     this.contextMenu = new VaultContextMenu({ host: this.host, postMessage: this.postMessage });
     this.rowCallbacks = {
-      onActivate: (entry, row) => this.preview.open(entry, row),
+      onActivate: (entry) => this.preview.open(entry),
       onContextMenu: (entry, ev, row) => this.contextMenu.open(entry, ev, row),
       onResume: (entryId) => this.postMessage({ type: "vaultResume", entryId }),
     };
@@ -161,6 +163,10 @@ export class VaultPanel {
       postMessage: this.postMessage,
       isContextMenuOpen: () => this.contextMenu.isOpen(),
       closeContextMenu: () => this.contextMenu.close(),
+      // VaultPanel owns the list DOM: it resolves the active row live (anchoring)
+      // and owns the selection highlight (no cross-module rebind seam).
+      getActiveRow: () => this.findRow(this.preview.activeEntryId),
+      syncHighlight: () => this.applyActiveHighlight(),
       getInitialPreviewGeometry: deps.getInitialPreviewGeometry,
       persistPreviewGeometry: deps.persistPreviewGeometry,
     });
@@ -276,12 +282,15 @@ export class VaultPanel {
     // Reliable hover/focus tooltips — native `title` doesn't render dependably in
     // VSCode webviews (see fileTree/Tooltip). `getText` for search so the hint
     // tracks the open/close toggle WITHOUT a `title` attribute that would
-    // reintroduce the native tooltip. No dispose: the panel lives for the webview's
-    // lifetime (unlike FileTreePanel, it is never rebuilt), so listeners aren't leaked.
-    attachTooltip(searchBtn, {
-      getText: () => (this.searchActive ? "Close search" : "Search sessions by title, folder, or agent"),
-    });
-    attachTooltip(refreshBtn, { text: "Refresh — re-read sessions from disk now" });
+    // reintroduce the native tooltip. The panel lives for the webview's lifetime
+    // (never rebuilt), so these aren't leaked in practice — but `dispose()` still
+    // releases them for tests / hot-reload / a future rebuild.
+    this.disposers.push(
+      attachTooltip(searchBtn, {
+        getText: () => (this.searchActive ? "Close search" : "Search sessions by title, folder, or agent"),
+      }),
+      attachTooltip(refreshBtn, { text: "Refresh — re-read sessions from disk now" }),
+    );
 
     // Toolbar: grouping segmented control (left) + "This folder only" (right).
     const toolbar = document.createElement("div");
@@ -671,26 +680,39 @@ export class VaultPanel {
       }
     }
 
-    // A re-render (group/filter/search change or a host push) rebuilds every row,
-    // so the open preview's selection highlight lands on a now-detached node. Re-
-    // apply it to the fresh row so the preview stays anchored to its source (W4).
-    // If that row is no longer visible (filtered out / collapsed / behind "show
-    // more"), clear the stale ref — the preview stays open, just unanchored.
-    const activeId = this.preview.activeEntryId;
-    if (activeId) {
-      // Match on dataset rather than a `[data-entry-id="…"]` selector so an
-      // entryId's `:` separator needs no CSS escaping (and no CSS.escape dep).
-      const row =
-        Array.from(this.listEl.querySelectorAll<HTMLElement>(".vault-row")).find(
-          (r) => r.dataset.entryId === activeId,
-        ) ?? null;
-      this.preview.rebindActiveRow(row);
-    }
+    // A re-render rebuilds every row, so the open preview's selection highlight
+    // lands on a now-detached node. Re-derive it from the active entryId against
+    // the fresh rows (W4). If that row is gone (filtered / collapsed / behind "show
+    // more"), nothing is highlighted — the preview stays open, just unanchored.
+    this.applyActiveHighlight();
 
     // Record what we just painted so the render() guard compares host responses
     // against the ACTUAL DOM projection — including renders triggered by local UI
     // changes (search/filter/group), which call renderList directly.
     this.lastRenderSig = this.currentSignature();
+  }
+
+  /** The list row for an entryId (or null). Matches on `dataset.entryId` rather
+   *  than a `[data-entry-id="…"]` selector so the `:` separator needs no CSS escaping. */
+  private findRow(entryId: string | null): HTMLElement | null {
+    if (!entryId) {
+      return null;
+    }
+    return (
+      Array.from(this.listEl.querySelectorAll<HTMLElement>(".vault-row")).find(
+        (r) => r.dataset.entryId === entryId,
+      ) ?? null
+    );
+  }
+
+  /** Re-derive the selection highlight from the preview's active entryId: clear any
+   *  stale `aria-selected`, then mark the active row if it is currently visible.
+   *  Single owner of the highlight (the panel owns the list DOM). */
+  private applyActiveHighlight(): void {
+    for (const r of Array.from(this.listEl.querySelectorAll<HTMLElement>('.vault-row[aria-selected="true"]'))) {
+      r.removeAttribute("aria-selected");
+    }
+    this.findRow(this.preview.activeEntryId)?.setAttribute("aria-selected", "true");
   }
 
   private toggleGroup(mode: GroupMode, key: string): void {
@@ -708,4 +730,20 @@ export class VaultPanel {
     this.preview.handleSessionDetailResponse(msg);
   }
 
+  /** Release every owned resource: the refresh safety-timer, the context menu and
+   *  preview controller (each detaches its own document listeners), and the header
+   *  tooltips. Not wired to a teardown today (the panel lives for the webview's
+   *  lifetime) — present so tests / hot-reload / a future rebuild don't leak. */
+  dispose(): void {
+    if (this.refreshTimer !== null) {
+      clearTimeout(this.refreshTimer);
+      this.refreshTimer = null;
+    }
+    this.contextMenu.close();
+    this.preview.dispose();
+    for (const dispose of this.disposers) {
+      dispose();
+    }
+    this.disposers.length = 0;
+  }
 }

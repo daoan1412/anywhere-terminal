@@ -54,8 +54,9 @@ export class FloatingWindow {
     this.activeGestureTeardown?.();
   }
 
-  /** Place the card on open: remembered geometry / maximized, else anchor to the row. */
-  place(row: HTMLElement): void {
+  /** Place the card on open: remembered geometry / maximized, else anchor to the
+   *  live row (re-queried via getAnchorRow — no stored row ref). */
+  place(): void {
     this.el.classList.toggle("vault-preview--max", this.maximized);
     if (this.maximized) {
       this.clearInlineGeometry();
@@ -64,7 +65,10 @@ export class FloatingWindow {
     if (this.geometry) {
       this.applyGeometry(this.geometry);
     } else {
-      this.anchor(row);
+      const row = this.getAnchorRow();
+      if (row) {
+        this.anchor(row);
+      }
     }
   }
 
@@ -116,6 +120,7 @@ export class FloatingWindow {
     if (target?.closest(".vault-preview-meta")) {
       return; // the meta block stays selectable (drag works on its padding)
     }
+    this.activeGestureTeardown?.(); // only one gesture's listeners live at a time
     ev.preventDefault();
     const rect = this.el.getBoundingClientRect();
     const startX = ev.clientX;
@@ -124,11 +129,15 @@ export class FloatingWindow {
     const startT = rect.top;
     const w = rect.width;
     const h = rect.height;
+    const pointerId = ev.pointerId;
     const handle = ev.currentTarget as HTMLElement;
-    handle.setPointerCapture?.(ev.pointerId);
+    handle.setPointerCapture?.(pointerId);
     this.el.style.right = "auto";
     let moved = false;
     const onMove = (e: PointerEvent): void => {
+      if (e.pointerId !== pointerId) {
+        return; // a second pointer (multi-touch / pen) must not hijack this drag
+      }
       const dx = e.clientX - startX;
       const dy = e.clientY - startY;
       if (!moved && Math.abs(dx) + Math.abs(dy) < 3) {
@@ -145,10 +154,13 @@ export class FloatingWindow {
     const teardown = (): void => {
       document.removeEventListener("pointermove", onMove);
       document.removeEventListener("pointerup", onUp);
-      handle.releasePointerCapture?.(ev.pointerId);
+      handle.releasePointerCapture?.(pointerId);
       this.activeGestureTeardown = undefined;
     };
-    const onUp = (): void => {
+    const onUp = (e: PointerEvent): void => {
+      if (e.pointerId !== pointerId) {
+        return;
+      }
       teardown();
       if (moved) {
         this.captureGeometry();
@@ -174,6 +186,7 @@ export class FloatingWindow {
     if (this.maximized) {
       return;
     }
+    this.activeGestureTeardown?.(); // only one gesture's listeners live at a time
     ev.preventDefault();
     ev.stopPropagation();
     const rect = this.el.getBoundingClientRect();
@@ -185,11 +198,15 @@ export class FloatingWindow {
     const startT = rect.top;
     const minW = 280;
     const minH = 160;
+    const pointerId = ev.pointerId;
     const handle = ev.currentTarget as HTMLElement;
-    handle.setPointerCapture?.(ev.pointerId);
+    handle.setPointerCapture?.(pointerId);
     this.el.style.right = "auto";
 
     const onMove = (e: PointerEvent): void => {
+      if (e.pointerId !== pointerId) {
+        return; // a second pointer must not hijack this resize
+      }
       const dx = e.clientX - startX;
       const dy = e.clientY - startY;
       let w = startW;
@@ -232,10 +249,13 @@ export class FloatingWindow {
     const teardown = (): void => {
       document.removeEventListener("pointermove", onMove);
       document.removeEventListener("pointerup", onUp);
-      handle.releasePointerCapture?.(ev.pointerId);
+      handle.releasePointerCapture?.(pointerId);
       this.activeGestureTeardown = undefined;
     };
-    const onUp = (): void => {
+    const onUp = (e: PointerEvent): void => {
+      if (e.pointerId !== pointerId) {
+        return;
+      }
       teardown();
       this.captureGeometry(); // commit; an aborted drag skips this (no persist)
     };

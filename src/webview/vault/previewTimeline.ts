@@ -10,6 +10,13 @@ import { ICON_CHEVRON_DOWN } from "./icons";
 import { teammateAccent } from "./previewColors";
 import { activityStep, previewMessage, thinkingBlock } from "./renderAtoms";
 
+/** A prominent node that breaks the surrounding AI-output run and renders directly
+ *  (nested subagent/workflow blocks + threaded/inline teammate communications). A
+ *  new prominent kind is added here ONCE, not in both run-grouping conditions. */
+function breaksRun(item: VaultTimelineItem): boolean {
+  return item.kind === "subagentSession" || item.kind === "teammateTurn" || item.kind === "teammateMessage";
+}
+
 export interface PreviewTimelineBag {
   /** Whether an AI-run (keyed `<prefix>#<idx>`) is expanded past its cap. */
   isRunExpanded: (key: string) => boolean;
@@ -45,7 +52,7 @@ export function renderTimelineInto(
       i++;
       continue;
     }
-    if (item.kind === "subagentSession" || item.kind === "teammateTurn" || item.kind === "teammateMessage") {
+    if (breaksRun(item)) {
       container.appendChild(renderTimelineItem(item, bag));
       i++;
       continue;
@@ -56,7 +63,7 @@ export function renderTimelineInto(
       if (it.kind === "message" && it.role === "user") {
         break;
       }
-      if (it.kind === "subagentSession" || it.kind === "teammateTurn" || it.kind === "teammateMessage") {
+      if (breaksRun(it)) {
         break;
       }
       run.push(it);
