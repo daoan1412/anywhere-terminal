@@ -1,8 +1,9 @@
 // Orchestrates the floating session-preview overlay: open/close lifecycle,
 // detail pagination (load-more + scroll-to-first), nested subagent/teammate
-// lazy-loading, the document close-listeners, and header tooltip disposal.
-// Mediates between FloatingWindow (window chrome), PreviewScrollNav (FABs), and
-// the pure previewTimeline renderers — it is the single owner of preview state.
+// lazy-loading, and header tooltip mapping. Owns the preview STATE and delegates
+// all window chrome (card, resize/move/maximize, scroll FABs, close-listeners,
+// tooltip disposal) to FloatingPreviewShell — the same shell the subagent popup
+// uses, so the two previews cannot visually diverge.
 //
 // Security: every host message carries `entryId` only (D9); untrusted strings go
 // through textContent; the only innerHTML lives in the closed-map icon builders.
@@ -10,12 +11,12 @@
 import type { VaultSessionDetailResponseMessage } from "../../types/messages";
 import type { VaultSessionDetail, VaultSessionEntry } from "../../vault/types";
 import type { VaultPreviewGeometry } from "../state/WebviewState";
-import { getAgentAccent, VAULT_ACCENTS } from "./agentIcons";
-import { FloatingWindow } from "./FloatingWindow";
+import { getAgentAccent, getAgentIcon, VAULT_ACCENTS } from "./agentIcons";
+import { FloatingPreviewShell } from "./FloatingPreviewShell";
+import { agentLabel } from "./format";
 import { buildPreviewHeader as buildPreviewHeaderDom } from "./previewHeader";
-import { PreviewScrollNav } from "./previewScrollNav";
 import { type PreviewTimelineBag, renderNestedInto, renderTimelineInto } from "./previewTimeline";
-import { loadingBody } from "./renderAtoms";
+import { buildPreviewMeta, loadingBody } from "./renderAtoms";
 import type { VaultPanelPostMessage } from "./VaultPanel";
 
 /** Timeline items requested on the first open, and the step added per load-more. */
@@ -39,11 +40,9 @@ export interface PreviewControllerDeps {
 }
 
 export class PreviewController {
-  /** Floating session-preview overlay element (at most one open). */
-  private readonly previewEl: HTMLElement;
   private readonly deps: PreviewControllerDeps;
-  private readonly floatingWindow: FloatingWindow;
-  private readonly scrollNav: PreviewScrollNav;
+  /** Window chrome (card + FloatingWindow + scroll FABs + close-listeners + tooltips). */
+  private readonly shell: FloatingPreviewShell;
   private readonly timelineBag: PreviewTimelineBag;
 
   /** The entry id whose detail the open preview is for — stale responses (≠ this) are dropped. */
@@ -53,8 +52,6 @@ export class PreviewController {
   private activePreviewDetail: VaultSessionDetail | null = null;
   /** Keys (`<prefix>#<runIndex>`) of AI-runs expanded past the per-run cap. */
   private readonly expandedRuns = new Set<string>();
-  /** Dispose fns for the preview header's custom tooltips (rebuilt every render). */
-  private readonly previewTooltipDisposers: Array<() => void> = [];
   /** Timeline-item limit for the open preview (grows when older msgs are loaded). */
   private previewLimit = PREVIEW_LIMIT_DEFAULT;
   /** True while a load-more request is in flight (debounces the scroll trigger). */
@@ -75,23 +72,18 @@ export class PreviewController {
   /** Child entryIds whose cached detail is mid-render — breaks a self-referential
    *  cycle (a child that nests its own id) before it overflows the stack. */
   private readonly renderingNested = new Set<string>();
-  private onPreviewDocPointerDown?: (ev: MouseEvent) => void;
-  private onPreviewDocKeyDown?: (ev: KeyboardEvent) => void;
 
   constructor(deps: PreviewControllerDeps) {
     this.deps = deps;
-    this.previewEl = document.createElement("aside");
-    this.previewEl.className = "vault-preview";
-    this.previewEl.setAttribute("aria-label", "Session preview");
-    this.floatingWindow = new FloatingWindow({
-      el: this.previewEl,
-      initialGeometry: deps.getInitialPreviewGeometry?.() ?? null,
-      persistGeometry: deps.persistPreviewGeometry,
+    this.shell = new FloatingPreviewShell({
+      ariaLabel: "Session preview",
       getAnchorRow: deps.getActiveRow,
-    });
-    this.scrollNav = new PreviewScrollNav({
-      el: this.previewEl,
+      initialGeometry: deps.getInitialPreviewGeometry,
+      persistGeometry: deps.persistPreviewGeometry,
       onScrollTop: () => this.scrollPreviewToTop(),
+      onRequestClose: () => this.closePreview(),
+      shouldCloseOnEscape: () => !deps.isContextMenuOpen(),
+      outsideCloseExclude: [".vault-row"],
     });
     this.timelineBag = {
       isRunExpanded: (key) => this.expandedRuns.has(key),
@@ -116,7 +108,7 @@ export class PreviewController {
 
   /** The overlay element — appended into the panel host by VaultPanel. */
   get element(): HTMLElement {
-    return this.previewEl;
+    return this.shell.el;
   }
 
   /** Entry id of the open preview (or null) — VaultPanel reads it to re-anchor selection. */
@@ -155,37 +147,33 @@ export class PreviewController {
     this.previewLoadingMore = false;
     this.previewScrollToTopPending = false;
     this.previewScrollToTopLastCount = 0;
-    this.scrollNav.reset();
+    this.shell.scrollNav.reset();
 
     this.applyPreviewAgentAccent(entry.agent);
     this.renderPreviewLoading(entry);
-    this.previewEl.classList.add("is-open");
+    this.shell.show(); // is-open + anchor via getActiveRow + attach close-listeners
     this.deps.syncHighlight(); // VaultPanel sets aria-selected on the active row
-    this.floatingWindow.place(); // anchors via getActiveRow (the just-clicked row)
-    this.attachPreviewCloseListeners();
     this.deps.postMessage({ type: "requestVaultSessionDetail", entryId: entry.id });
   }
 
   /** Tint the preview's user messages with the session's agent accent (D: #3). */
   private applyPreviewAgentAccent(agent: string): void {
     for (const a of VAULT_ACCENTS) {
-      this.previewEl.classList.remove(`vault-preview--${a}`);
+      this.shell.el.classList.remove(`vault-preview--${a}`);
     }
     // Only a known, closed accent may become a class — never a raw session-derived
     // agent string (W6 / the injection rule).
     const accent = getAgentAccent(agent);
     if (accent) {
-      this.previewEl.classList.add(`vault-preview--${accent}`);
+      this.shell.el.classList.add(`vault-preview--${accent}`);
     }
   }
 
   private closePreview(): void {
-    // Abort an in-flight drag first so its listeners don't outlive the closed
-    // preview or overwrite the saved geometry on release (W5).
-    this.floatingWindow.cancelGesture();
-    this.previewEl.classList.remove("is-open");
-    this.previewEl.replaceChildren();
-    // FloatingWindow keeps geometry + maximized so the next open restores them (#1).
+    // Shell teardown: cancel any in-flight drag, clear content, reset the scroll
+    // nav, dispose header tooltips, detach the document close-listeners. Geometry +
+    // maximized survive in FloatingWindow so the next open restores them (#1).
+    this.shell.hide();
     this.activePreviewEntryId = null;
     this.activePreviewEntry = null;
     this.activePreviewDetail = null;
@@ -195,23 +183,7 @@ export class PreviewController {
     this.pendingNested.clear();
     this.previewScrollToTopPending = false;
     this.previewScrollToTopLastCount = 0;
-    this.scrollNav.reset();
     this.deps.syncHighlight(); // clears aria-selected (activeEntryId is now null)
-    this.disposePreviewTooltips();
-    this.detachPreviewCloseListeners();
-  }
-
-  private disposePreviewTooltips(): void {
-    for (const dispose of this.previewTooltipDisposers) {
-      dispose();
-    }
-    this.previewTooltipDisposers.length = 0;
-  }
-
-  /** Render preview content, keeping the resize handles + scroll nav attached on top. */
-  private setPreviewContent(...nodes: Node[]): void {
-    this.previewEl.replaceChildren(...nodes, ...this.floatingWindow.resizeHandles, this.scrollNav.element);
-    this.scrollNav.wire();
   }
 
   /** Scroll to the session's FIRST message; loads every older window first when
@@ -223,7 +195,7 @@ export class PreviewController {
       this.requestMorePreview();
       return;
     }
-    this.scrollNav.scrollBody(0);
+    this.shell.scrollNav.scrollBody(0);
   }
 
   /**
@@ -263,7 +235,7 @@ export class PreviewController {
     }
     // On load-more, older items are prepended → keep the viewport anchored to the
     // same content by preserving the distance from the bottom across the re-render.
-    const bodyBefore = this.previewEl.querySelector<HTMLElement>(".vault-preview-body");
+    const bodyBefore = this.shell.el.querySelector<HTMLElement>(".vault-preview-body");
     const fromBottom = wasLoadingMore && bodyBefore ? bodyBefore.scrollHeight - bodyBefore.scrollTop : null;
     // A load-more re-render prepends older items to the ROOT timeline, shifting its
     // run indices → drop root run-expansions only. Nested transcripts didn't change,
@@ -290,80 +262,55 @@ export class PreviewController {
       } else {
         this.previewScrollToTopPending = false;
         this.previewScrollToTopLastCount = 0;
-        const bodyAfter = this.previewEl.querySelector<HTMLElement>(".vault-preview-body");
+        const bodyAfter = this.shell.el.querySelector<HTMLElement>(".vault-preview-body");
         if (bodyAfter) {
           bodyAfter.scrollTop = 0;
         }
       }
     } else if (fromBottom !== null) {
-      const bodyAfter = this.previewEl.querySelector<HTMLElement>(".vault-preview-body");
+      const bodyAfter = this.shell.el.querySelector<HTMLElement>(".vault-preview-body");
       if (bodyAfter) {
         bodyAfter.scrollTop = Math.max(0, bodyAfter.scrollHeight - fromBottom);
       }
     } else {
       // Initial open: jump to the latest message (bottom); scroll up for history (#1).
-      this.scrollNav.scrollToEnd();
-    }
-  }
-
-  private attachPreviewCloseListeners(): void {
-    this.detachPreviewCloseListeners();
-    this.onPreviewDocPointerDown = (e) => {
-      const target = e.target as Node;
-      // Don't close when the click is inside the preview or on a row (a row click
-      // opens a different preview, handled by its own listener).
-      if (this.previewEl.contains(target) || (target instanceof Element && target.closest(".vault-row"))) {
-        return;
-      }
-      this.closePreview();
-    };
-    this.onPreviewDocKeyDown = (e) => {
-      // When the context menu is also open, let its own Esc handler dismiss only
-      // that layer first — one Esc shouldn't close both (W5).
-      if (e.key === "Escape" && !this.deps.isContextMenuOpen()) {
-        this.closePreview();
-      }
-    };
-    document.addEventListener("mousedown", this.onPreviewDocPointerDown);
-    document.addEventListener("keydown", this.onPreviewDocKeyDown);
-  }
-
-  private detachPreviewCloseListeners(): void {
-    if (this.onPreviewDocPointerDown) {
-      document.removeEventListener("mousedown", this.onPreviewDocPointerDown);
-      this.onPreviewDocPointerDown = undefined;
-    }
-    if (this.onPreviewDocKeyDown) {
-      document.removeEventListener("keydown", this.onPreviewDocKeyDown);
-      this.onPreviewDocKeyDown = undefined;
+      this.shell.scrollNav.scrollToEnd();
     }
   }
 
   private buildPreviewHeader(entry: VaultSessionEntry, detail?: VaultSessionDetail): HTMLElement {
     // Tear down the prior build's tooltips before the new build attaches its own.
-    this.disposePreviewTooltips();
-    const { element, disposers } = buildPreviewHeaderDom(entry, detail, {
-      isMaximized: () => this.floatingWindow.isMaximized(),
-      onMovePointerDown: (ev) => this.floatingWindow.startMove(ev),
-      onPrevUser: () => this.scrollNav.scrollToAdjacentUser(-1),
-      onNextUser: () => this.scrollNav.scrollToAdjacentUser(1),
-      onResume: () => this.deps.postMessage({ type: "vaultResume", entryId: entry.id }),
-      onToggleMaximize: () => this.floatingWindow.toggleMaximize(),
-      onClose: () => this.closePreview(),
-    });
-    this.previewTooltipDisposers.push(...disposers);
+    this.shell.disposeTooltips();
+    const label = agentLabel(entry.agent);
+    const { element, disposers } = buildPreviewHeaderDom(
+      {
+        badge: { icon: getAgentIcon(entry.agent), ariaLabel: label, fallbackText: label.slice(0, 2) },
+        title: entry.title || "(untitled session)",
+        meta: buildPreviewMeta(entry, detail),
+      },
+      {
+        isMaximized: () => this.shell.floatingWindow.isMaximized(),
+        onMovePointerDown: (ev) => this.shell.floatingWindow.startMove(ev),
+        onPrevUser: () => this.shell.scrollNav.scrollToAdjacentUser(-1),
+        onNextUser: () => this.shell.scrollNav.scrollToAdjacentUser(1),
+        onResume: () => this.deps.postMessage({ type: "vaultResume", entryId: entry.id }),
+        onToggleMaximize: () => this.shell.floatingWindow.toggleMaximize(),
+        onClose: () => this.closePreview(),
+      },
+    );
+    this.shell.trackTooltips(disposers);
     return element;
   }
 
   private renderPreviewLoading(entry: VaultSessionEntry): void {
-    this.setPreviewContent(this.buildPreviewHeader(entry), loadingBody());
+    this.shell.render(this.buildPreviewHeader(entry), loadingBody());
   }
 
   private renderPreviewError(entry: VaultSessionEntry, message: string): void {
     const body = document.createElement("div");
     body.className = "vault-preview-error";
     body.textContent = message;
-    this.setPreviewContent(this.buildPreviewHeader(entry), body);
+    this.shell.render(this.buildPreviewHeader(entry), body);
   }
 
   private renderPreviewDetail(entry: VaultSessionEntry, detail: VaultSessionDetail): void {
@@ -399,7 +346,7 @@ export class PreviewController {
       }
     });
 
-    this.setPreviewContent(this.buildPreviewHeader(entry, detail), body);
+    this.shell.render(this.buildPreviewHeader(entry, detail), body);
   }
 
   /** Re-render the active detail in place, preserving scroll — used when expanding
@@ -408,9 +355,9 @@ export class PreviewController {
     if (!this.activePreviewEntry || !this.activePreviewDetail) {
       return;
     }
-    const prevScroll = this.previewEl.querySelector<HTMLElement>(".vault-preview-body")?.scrollTop ?? 0;
+    const prevScroll = this.shell.el.querySelector<HTMLElement>(".vault-preview-body")?.scrollTop ?? 0;
     this.renderPreviewDetail(this.activePreviewEntry, this.activePreviewDetail);
-    const newBody = this.previewEl.querySelector<HTMLElement>(".vault-preview-body");
+    const newBody = this.shell.el.querySelector<HTMLElement>(".vault-preview-body");
     if (newBody) {
       newBody.scrollTop = prevScroll;
     }
@@ -423,7 +370,7 @@ export class PreviewController {
     }
     this.previewLoadingMore = true;
     this.previewLimit += PREVIEW_LIMIT_STEP;
-    const btn = this.previewEl.querySelector<HTMLButtonElement>(".vault-preview-loadmore");
+    const btn = this.shell.el.querySelector<HTMLButtonElement>(".vault-preview-loadmore");
     if (btn) {
       btn.textContent = "Loading older messages…";
       btn.disabled = true;

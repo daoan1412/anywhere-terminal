@@ -1,9 +1,15 @@
 import * as crypto from "node:crypto";
+import * as fs from "node:fs/promises";
 import * as vscode from "vscode";
+import { descendantPids } from "../pty/processTree";
 import type { SessionManager } from "../session/SessionManager";
+import { resolveClaudeSession, type ResolveClaudeSessionDeps } from "../session/resolveClaudeSession";
 import type { PendingSnapshot } from "../session/SessionSnapshot";
 import { readTerminalConfig, readTerminalSettings } from "../settings/SettingsReader";
 import type { SetPanelIdMessage, ThemeChangedMessage, WebViewToExtensionMessage } from "../types/messages";
+import { readClaudeSessions, resolveClaudeSessionPath } from "../vault/readers/claudeReader";
+import { listRunningClaudeSessions } from "../vault/readers/runningSessions";
+import { resolveSubagentDetail } from "../vault/readers/subagentLookup";
 import { FileTreeHost } from "./fileTreeHost";
 import type { WatcherPool } from "./fsWatcherPool";
 import type { GitDecorationProvider } from "./gitDecorationProvider";
@@ -571,6 +577,10 @@ export class TerminalEditorProvider {
           }
           break;
 
+        case "requestSubagentPreview":
+          void this.handleRequestSubagentPreview(message);
+          break;
+
         case "updateHoverPreviewSetting":
           // Mirrors TerminalViewProvider — webview-driven setting update.
           if (
@@ -593,6 +603,74 @@ export class TerminalEditorProvider {
     } catch (err) {
       console.error(`[AnyWhere Terminal] Error handling editor message ${message.type}:`, err);
     }
+  }
+
+  /**
+   * Resolve a clicked subagent (Task) line in a running Claude editor-terminal to
+   * its sub-session transcript and reply with `subagentPreviewResponse`. Mirrors
+   * `TerminalViewProvider.handleRequestSubagentPreview`; posts to this panel's
+   * webview. A missing session / no match / read error becomes an `error` marker —
+   * it never throws (design.md D3).
+   */
+  private async handleRequestSubagentPreview(
+    message: Extract<WebViewToExtensionMessage, { type: "requestSubagentPreview" }>,
+  ): Promise<void> {
+    const { terminalId, requestId, description } = message;
+    try {
+      const session = await resolveClaudeSession(terminalId, this.subagentResolveDeps());
+      if (!session) {
+        this.safePostMessage({ type: "subagentPreviewResponse", requestId, error: "noSession" });
+        return;
+      }
+      const detail = await resolveSubagentDetail(session.sessionId, description);
+      this.safePostMessage(
+        detail
+          ? { type: "subagentPreviewResponse", requestId, detail }
+          : { type: "subagentPreviewResponse", requestId, error: "notFound" },
+      );
+    } catch (err) {
+      this.safePostMessage({
+        type: "subagentPreviewResponse",
+        requestId,
+        error: err instanceof Error ? err.message : "Failed to read subagent transcript",
+      });
+    }
+  }
+
+  /** Wire SessionManager + Claude readers into the `resolveClaudeSession` deps. */
+  private subagentResolveDeps(): ResolveClaudeSessionDeps {
+    return {
+      getPtyPid: (id) => this.sessionManager.getSession(id)?.pty.pid,
+      getCwd: async (id) =>
+        (await this.sessionManager.getLiveCwd(id)) ??
+        this.sessionManager.getCurrentCwd(id) ??
+        this.sessionManager.getInitialCwd(id),
+      listRunning: () => listRunningClaudeSessions(),
+      descendantPids: (pid) => descendantPids(pid),
+      sessionMtime: async (sessionId) => {
+        const filePath = await resolveClaudeSessionPath(sessionId);
+        if (!filePath) {
+          return undefined;
+        }
+        try {
+          return (await fs.stat(filePath)).mtimeMs;
+        } catch {
+          return undefined;
+        }
+      },
+      newestSessionUnderCwd: async (cwd) => {
+        const { entries } = await readClaudeSessions({});
+        let best: { sessionId: string; cwd: string } | null = null;
+        let bestMtime = Number.NEGATIVE_INFINITY;
+        for (const entry of entries) {
+          if (entry.agent === "claude" && entry.cwd === cwd && entry.modified > bestMtime) {
+            best = { sessionId: entry.sessionId, cwd: entry.cwd };
+            bestMtime = entry.modified;
+          }
+        }
+        return best;
+      },
+    };
   }
 
   /**

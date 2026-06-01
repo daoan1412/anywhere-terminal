@@ -10,10 +10,13 @@ import { WebLinksAddon } from "@xterm/addon-web-links";
 import { WebglAddon } from "@xterm/addon-webgl";
 import { Terminal } from "@xterm/xterm";
 import type { HoverPreviewSettings, TerminalConfig } from "../../types/messages";
+import type { VaultSessionDetail } from "../../vault/types";
 import { type ClipboardProvider, createKeyEventHandler } from "../InputHandler";
 import { FilePathLinkProvider } from "../links/FilePathLinkProvider";
 import { HoverPreviewController, type HoverPreviewThemeKind } from "../links/HoverPreviewController";
 import { HoverPreviewPopup } from "../links/HoverPreviewPopup";
+import { SubagentLinkProvider } from "../links/SubagentLinkProvider";
+import { SubagentPreviewPopup } from "../links/SubagentPreviewPopup";
 import { createMarkdownRenderer } from "../links/markdownRenderer";
 import { createSyntaxRenderer, isHighlighterReady, whenHighlighterReady } from "../links/syntaxRenderer";
 import { fitTerminal as fitTerminalCore } from "../resize/XtermFitService";
@@ -58,6 +61,12 @@ export interface TerminalFactoryDeps {
 export class TerminalFactory {
   /** Whether WebGL initialization has failed — prevents retrying on subsequent terminals. */
   private webglFailed = false;
+
+  /** Monotonic counter for subagent-preview request-correlation ids. */
+  private subagentReqSeq = 0;
+
+  /** The single, factory-owned subagent preview popup (at most one open; D7). */
+  private readonly subagentPopup = new SubagentPreviewPopup();
 
   private readonly themeManager: ThemeManager;
   private readonly store: WebviewStateStore;
@@ -350,6 +359,16 @@ export class TerminalFactory {
       }),
     );
 
+    // Second link provider (additive): make Claude CLI subagent (Task) header
+    // lines clickable → preview the sub-session transcript in a floating popup.
+    // xterm allows multiple providers; file-path links are unaffected (D1).
+    terminal.registerLinkProvider(
+      new SubagentLinkProvider({
+        terminal,
+        onActivate: (agentType, description, x, y) => this.handleSubagentClick(id, agentType, description, x, y),
+      }),
+    );
+
     // Open terminal in container. When `options.deferOpen === true`, the
     // caller is responsible for invoking `instance.terminal.open(container)`
     // later (used by the session-restore router which writes the persisted
@@ -594,6 +613,35 @@ export class TerminalFactory {
       }
       this.hoverControllers.delete(sessionId);
     }
+  }
+
+  /**
+   * A subagent (Task) header link was clicked: open the single popup at the click
+   * in a loading state (replacing any prior one) and post `requestSubagentPreview`
+   * for the host to resolve. The matching `subagentPreviewResponse` fills the
+   * popup via {@link fillSubagentPreview}, correlated by `requestId` (D3, D7).
+   */
+  private handleSubagentClick(
+    terminalId: string,
+    agentType: string,
+    description: string,
+    x: number,
+    y: number,
+  ): void {
+    const requestId = `subagent-${++this.subagentReqSeq}`;
+    // agentType is webview-display only (header badge); the host resolves by description.
+    this.subagentPopup.open(requestId, agentType, description, x, y);
+    this.postMessage({ type: "requestSubagentPreview", terminalId, requestId, description, x, y });
+  }
+
+  /** Fill the open subagent popup with the host's response (matched by requestId). */
+  fillSubagentPreview(requestId: string, detail?: VaultSessionDetail, error?: string): void {
+    this.subagentPopup.setContent(requestId, detail, error);
+  }
+
+  /** Dispose the subagent popup. Idempotent; called on every terminal teardown (D7). */
+  disposeSubagentPopup(): void {
+    this.subagentPopup.dispose();
   }
 
   /** Get the terminal instance for the active pane in the current tab. */

@@ -410,6 +410,27 @@ export interface RequestVaultContextCwdMessage {
 }
 
 /**
+ * Webview → Extension: the user clicked a Claude subagent (Task) invocation line
+ * in live terminal output. The host resolves the terminal's running Claude
+ * session and the clicked subagent (by `description` prefix) entirely from
+ * `terminalId` — it never trusts a webview-supplied path — and replies with a
+ * `subagentPreviewResponse` echoing `requestId`. See:
+ * asimov/changes/preview-subagent-popup/design.md D3.
+ */
+export interface RequestSubagentPreviewMessage {
+  type: "requestSubagentPreview";
+  /** Source terminal pane (session) id, used to resolve the running session. */
+  terminalId: string;
+  /** Correlation id — echoed in `SubagentPreviewResponseMessage.requestId`. */
+  requestId: string;
+  /** The subagent description captured verbatim from the terminal header line. */
+  description: string;
+  /** Click viewport coordinates — the popup anchor (`event.clientX/clientY`). */
+  x: number;
+  y: number;
+}
+
+/**
  * All messages that can be sent from the WebView to the Extension Host.
  * Use msg.type as the discriminant in switch/case for exhaustive handling.
  */
@@ -447,7 +468,8 @@ export type WebViewToExtensionMessage =
   | VaultOpenWorkingDirMessage
   | VaultCopyResumeCommandMessage
   | VaultCopyFilePathMessage
-  | RequestVaultContextCwdMessage;
+  | RequestVaultContextCwdMessage
+  | RequestSubagentPreviewMessage;
 
 /**
  * Webview → Extension. Sent by the editor webview after it has merged the
@@ -930,6 +952,28 @@ export interface VaultContextCwdMessage {
 }
 
 /**
+ * Extension → Webview: reply to `requestSubagentPreview`. Echoes `requestId` so
+ * the webview can drop a response for a popup that has since been dismissed or
+ * replaced by a newer click. EXACTLY one of `detail` / `error` is present:
+ * `detail` carries the subagent's bounded transcript; `error` is a short marker
+ * (`"notFound"` | `"noSession"` | a read-error message) the popup renders as an
+ * empty state. See: asimov/changes/preview-subagent-popup/design.md D3.
+ */
+interface SubagentPreviewResponseBase {
+  type: "subagentPreviewResponse";
+  requestId: string;
+}
+
+/**
+ * Discriminated XOR — EXACTLY one of `detail` / `error` is present, so a producer
+ * cannot compile while sending both or neither and consumers narrow without
+ * ambiguity (mirrors `VaultSessionDetailResponseMessage`).
+ */
+export type SubagentPreviewResponseMessage =
+  | (SubagentPreviewResponseBase & { detail: VaultSessionDetail; error?: never })
+  | (SubagentPreviewResponseBase & { error: string; detail?: never });
+
+/**
  * Extension → Webview: open/focus the vault panel. The `openVault` command
  * posts this; the webview expands the vault section (stacked above the file
  * tree) and re-requests the session list.
@@ -978,6 +1022,7 @@ export type ExtensionToWebViewMessage =
   | VaultSessionsResponseMessage
   | VaultSessionDetailResponseMessage
   | VaultContextCwdMessage
+  | SubagentPreviewResponseMessage
   | OpenVaultMessage;
 
 /**

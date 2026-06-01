@@ -1,0 +1,82 @@
+// src/session/resolveClaudeSession.ts — Map a terminal pane to the Claude
+// `sessionId` it is showing. Resolution order (design.md D4 / spec "Map a
+// terminal to its Claude session"):
+//   1. process subtree of the pane's pty ∩ running PID registry (exact pid;
+//      tie-break newest <sessionId>.jsonl mtime when >1);
+//   2. running registry entries whose cwd equals the pane's live cwd (newest mtime);
+//   3. newest Claude session recorded under that cwd (even if already exited).
+//
+// SessionManager + reader access is injected via `deps` so the algorithm is
+// unit-tested without the host. The host (TerminalViewProvider) wires the real
+// implementations; on Windows `descendantPids` is `[]` so only the cwd fallbacks run.
+
+import type { RunningClaudeSession } from "../vault/readers/runningSessions";
+
+export interface ResolveClaudeSessionDeps {
+  /** The pane's pty pid (subtree root), or undefined when the session is unknown. */
+  getPtyPid(terminalId: string): number | undefined;
+  /** The pane's best-available cwd (live → tracked → initial), or undefined. */
+  getCwd(terminalId: string): Promise<string | undefined>;
+  /** Live, liveness-probed PID registry entries (runningSessions.ts). */
+  listRunning(): Promise<RunningClaudeSession[]>;
+  /** Descendant pids of a root pid (processTree.ts); [] on Windows / error. */
+  descendantPids(rootPid: number): Promise<number[]>;
+  /** mtime (epoch ms) of `<sessionId>.jsonl`, or undefined when unresolved. */
+  sessionMtime(sessionId: string): Promise<number | undefined>;
+  /** Newest Claude session (running or exited) recorded under `cwd`, or null. */
+  newestSessionUnderCwd(cwd: string): Promise<{ sessionId: string; cwd: string } | null>;
+}
+
+/** Among candidates, the one with the newest `<sessionId>.jsonl` mtime (current
+ *  activity beats launch order); first candidate wins when all mtimes are equal. */
+async function pickNewest(
+  candidates: RunningClaudeSession[],
+  sessionMtime: ResolveClaudeSessionDeps["sessionMtime"],
+): Promise<RunningClaudeSession> {
+  let best = candidates[0];
+  let bestMtime = Number.NEGATIVE_INFINITY;
+  for (const candidate of candidates) {
+    const mtime = (await sessionMtime(candidate.sessionId)) ?? 0;
+    // Stable secondary key (lexical sessionId) so equal mtimes resolve the same
+    // way regardless of readdir/scan order.
+    if (mtime > bestMtime || (mtime === bestMtime && candidate.sessionId < best.sessionId)) {
+      best = candidate;
+      bestMtime = mtime;
+    }
+  }
+  return best;
+}
+
+export async function resolveClaudeSession(
+  terminalId: string,
+  deps: ResolveClaudeSessionDeps,
+): Promise<{ sessionId: string; cwd: string } | null> {
+  const running = await deps.listRunning();
+
+  // Step 1 — exact: the claude node pid is a descendant of the pane's pty shell.
+  const ptyPid = deps.getPtyPid(terminalId);
+  if (ptyPid !== undefined) {
+    const subtree = new Set(await deps.descendantPids(ptyPid));
+    const inTree = running.filter((r) => subtree.has(r.pid));
+    if (inTree.length === 1) {
+      return { sessionId: inTree[0].sessionId, cwd: inTree[0].cwd };
+    }
+    if (inTree.length > 1) {
+      const best = await pickNewest(inTree, deps.sessionMtime);
+      return { sessionId: best.sessionId, cwd: best.cwd };
+    }
+  }
+
+  // Steps 2 & 3 — cwd fallbacks. The pane's live cwd is the SHELL's cwd and may
+  // differ from a registry launch cwd if the shell cd'd; a miss degrades to step 3.
+  const cwd = await deps.getCwd(terminalId);
+  if (cwd === undefined) {
+    return null;
+  }
+  const byCwd = running.filter((r) => r.cwd === cwd);
+  if (byCwd.length > 0) {
+    const best = await pickNewest(byCwd, deps.sessionMtime);
+    return { sessionId: best.sessionId, cwd: best.cwd };
+  }
+  return deps.newestSessionUnderCwd(cwd);
+}

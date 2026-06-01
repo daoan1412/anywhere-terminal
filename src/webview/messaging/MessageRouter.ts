@@ -32,6 +32,7 @@ import type {
   SplitPaneAtMessage,
   SplitPaneCreatedMessage,
   SplitPaneMessage,
+  SubagentPreviewResponseMessage,
   TabCreatedMessage,
   TabRemovedMessage,
   TabRenamedMessage,
@@ -95,6 +96,9 @@ export interface MessageHandlers {
   onVaultSessionDetailResponse?(msg: VaultSessionDetailResponseMessage): void;
   onVaultContextCwd?(msg: VaultContextCwdMessage): void;
   onOpenVault?(msg: OpenVaultMessage): void;
+  // ── Subagent preview popup (preview-subagent-popup) ──
+  // Optional: a webview with no terminal factory mounted safely ignores it.
+  onSubagentPreviewResponse?(msg: SubagentPreviewResponseMessage): void;
 }
 
 // ─── Factory ────────────────────────────────────────────────────────
@@ -216,6 +220,9 @@ export function createMessageRouter(handlers: MessageHandlers): (msg: ExtensionT
         break;
       case "openVault":
         handlers.onOpenVault?.(msg);
+        break;
+      case "subagentPreviewResponse":
+        handlers.onSubagentPreviewResponse?.(msg);
         break;
       case "init":
         // init is handled directly by main.ts — not routed

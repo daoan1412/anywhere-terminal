@@ -1,27 +1,37 @@
-// Pure builder for the floating preview's header (badge + title + action buttons
-// + meta). Stateless: the caller passes callbacks and the current maximized flag,
-// and owns the returned tooltip disposers (the header is rebuilt every render).
+// Pure builder for the floating preview's header (badge + optional agent chip +
+// title + action buttons + optional meta). Stateless and consumer-agnostic: the
+// caller passes a normalized model + callbacks, so the vault session preview and
+// the subagent popup render through ONE builder and cannot drift. Vault-only
+// actions (prev/next-user, resume) render only when their callback is supplied.
 
-import type { VaultSessionDetail, VaultSessionEntry } from "../../vault/types";
-import { getAgentIcon } from "./agentIcons";
-import { agentLabel } from "./format";
+import type { AgentIcon } from "./agentIcons";
 import { ICON_CLOSE, ICON_MAXIMIZE, ICON_NAV_NEXT, ICON_NAV_PREV, ICON_RESTORE, ICON_RESUME } from "./icons";
-import { buildPreviewMeta } from "./renderAtoms";
 import { attachTooltip } from "../ui/Tooltip";
+
+export interface PreviewHeaderModel {
+  /** Brand badge: the resolved icon, or a text fallback when none. */
+  badge: { icon?: AgentIcon; ariaLabel?: string; fallbackText?: string };
+  /** Optional chip between badge and title (subagent `@agentType`). */
+  chip?: { text: string; className: string };
+  title: string;
+  /** Pre-built meta block (vault Folder/Modified/Activity, or subagent Activity). */
+  meta?: HTMLElement;
+}
 
 export interface PreviewHeaderCallbacks {
   isMaximized: () => boolean;
   onMovePointerDown: (ev: PointerEvent) => void;
-  onPrevUser: () => void;
-  onNextUser: () => void;
-  onResume: () => void;
   onToggleMaximize: () => void;
   onClose: () => void;
+  /** Render prev/next-user nav only when both are provided (vault only). */
+  onPrevUser?: () => void;
+  onNextUser?: () => void;
+  /** Render the Resume button only when provided (vault only). */
+  onResume?: () => void;
 }
 
 export function buildPreviewHeader(
-  entry: VaultSessionEntry,
-  detail: VaultSessionDetail | undefined,
+  model: PreviewHeaderModel,
   cb: PreviewHeaderCallbacks,
 ): { element: HTMLElement; disposers: Array<() => void> } {
   const header = document.createElement("header");
@@ -31,73 +41,91 @@ export function buildPreviewHeader(
 
   const titleRow = document.createElement("div");
   titleRow.className = "vault-preview-title-row";
+
   const badge = document.createElement("span");
   badge.className = "vault-badge";
-  badge.setAttribute("aria-label", agentLabel(entry.agent));
-  const icon = getAgentIcon(entry.agent);
-  if (icon) {
-    badge.classList.add(`vault-badge--${icon.accent}`);
-    badge.innerHTML = icon.svg;
-  } else {
-    badge.textContent = agentLabel(entry.agent).slice(0, 2);
+  if (model.badge.ariaLabel) {
+    badge.setAttribute("aria-label", model.badge.ariaLabel);
   }
+  if (model.badge.icon) {
+    badge.classList.add(`vault-badge--${model.badge.icon.accent}`);
+    badge.innerHTML = model.badge.icon.svg;
+  } else {
+    badge.textContent = model.badge.fallbackText ?? "";
+  }
+
   const titleEl = document.createElement("h3");
   titleEl.className = "vault-preview-title";
-  titleEl.textContent = entry.title || "(untitled session)";
+  titleEl.textContent = model.title;
 
   const actions = document.createElement("div");
   actions.className = "vault-preview-title-actions";
-  const prevBtn = document.createElement("button");
-  prevBtn.type = "button";
-  prevBtn.className = "vault-preview-icon-btn vault-preview-nav-prev";
-  prevBtn.title = "Jump to previous user message";
-  prevBtn.setAttribute("aria-label", "Jump to previous user message");
-  prevBtn.innerHTML = ICON_NAV_PREV;
-  prevBtn.addEventListener("click", () => cb.onPrevUser());
-  const nextBtn = document.createElement("button");
-  nextBtn.type = "button";
-  nextBtn.className = "vault-preview-icon-btn vault-preview-nav-next";
-  nextBtn.title = "Jump to next user message";
-  nextBtn.setAttribute("aria-label", "Jump to next user message");
-  nextBtn.innerHTML = ICON_NAV_NEXT;
-  nextBtn.addEventListener("click", () => cb.onNextUser());
-  const resumeBtn = document.createElement("button");
-  resumeBtn.type = "button";
-  resumeBtn.className = "vault-preview-resume";
-  resumeBtn.title = "Resume session";
-  resumeBtn.setAttribute("aria-label", "Resume session");
-  resumeBtn.innerHTML = ICON_RESUME;
-  resumeBtn.addEventListener("click", () => cb.onResume());
+  const disposers: Array<() => void> = [];
+
+  // Vault-only prev/next-user nav (both or neither).
+  if (cb.onPrevUser && cb.onNextUser) {
+    const prevBtn = iconButton("vault-preview-nav-prev", "Jump to previous user message", ICON_NAV_PREV, cb.onPrevUser);
+    const nextBtn = iconButton("vault-preview-nav-next", "Jump to next user message", ICON_NAV_NEXT, cb.onNextUser);
+    actions.append(prevBtn, nextBtn);
+    disposers.push(attachTooltip(prevBtn), attachTooltip(nextBtn));
+  }
+  // Vault-only Resume (a subagent is not independently launchable).
+  if (cb.onResume) {
+    const resumeBtn = document.createElement("button");
+    resumeBtn.type = "button";
+    resumeBtn.className = "vault-preview-resume";
+    resumeBtn.title = "Resume session";
+    resumeBtn.setAttribute("aria-label", "Resume session");
+    resumeBtn.innerHTML = ICON_RESUME;
+    resumeBtn.addEventListener("click", () => cb.onResume?.());
+    actions.appendChild(resumeBtn);
+    disposers.push(attachTooltip(resumeBtn));
+  }
+
+  const maximized = cb.isMaximized();
   const maximizeBtn = document.createElement("button");
   maximizeBtn.type = "button";
   maximizeBtn.className = "vault-preview-icon-btn vault-preview-maximize";
-  const maxLabel = cb.isMaximized() ? "Restore size" : "Expand to full size";
+  const maxLabel = maximized ? "Restore size" : "Expand to full size";
   maximizeBtn.title = maxLabel;
   maximizeBtn.setAttribute("aria-label", maxLabel);
-  maximizeBtn.setAttribute("aria-pressed", cb.isMaximized() ? "true" : "false");
-  maximizeBtn.innerHTML = cb.isMaximized() ? ICON_RESTORE : ICON_MAXIMIZE;
+  maximizeBtn.setAttribute("aria-pressed", maximized ? "true" : "false");
+  maximizeBtn.innerHTML = maximized ? ICON_RESTORE : ICON_MAXIMIZE;
   maximizeBtn.addEventListener("click", () => cb.onToggleMaximize());
-  const closeBtn = document.createElement("button");
-  closeBtn.type = "button";
-  closeBtn.className = "vault-preview-icon-btn vault-preview-close";
-  closeBtn.title = "Close preview";
-  closeBtn.setAttribute("aria-label", "Close preview");
-  closeBtn.innerHTML = ICON_CLOSE;
-  closeBtn.addEventListener("click", () => cb.onClose());
-  actions.append(prevBtn, nextBtn, resumeBtn, maximizeBtn, closeBtn);
+
+  const closeBtn = iconButton("vault-preview-close", "Close preview", ICON_CLOSE, cb.onClose);
+  actions.append(maximizeBtn, closeBtn);
 
   // Custom hover tooltips (native `title` is slow/unreliable in webviews). Maximize
   // uses getText since its label flips with state. Disposers returned to the caller.
-  const disposers = [
-    attachTooltip(prevBtn),
-    attachTooltip(nextBtn),
-    attachTooltip(resumeBtn),
+  disposers.push(
     attachTooltip(maximizeBtn, { getText: () => (cb.isMaximized() ? "Restore size" : "Expand to full size") }),
     attachTooltip(closeBtn),
-  ];
+  );
 
-  titleRow.append(badge, titleEl, actions);
+  titleRow.appendChild(badge);
+  if (model.chip) {
+    const chip = document.createElement("span");
+    chip.className = model.chip.className;
+    chip.textContent = model.chip.text;
+    titleRow.appendChild(chip);
+  }
+  titleRow.append(titleEl, actions);
   header.appendChild(titleRow);
-  header.appendChild(buildPreviewMeta(entry, detail));
+  if (model.meta) {
+    header.appendChild(model.meta);
+  }
   return { element: header, disposers };
+}
+
+/** A `.vault-preview-icon-btn` with svg + aria/title; click wired. */
+function iconButton(cls: string, label: string, svg: string, onClick: () => void): HTMLButtonElement {
+  const btn = document.createElement("button");
+  btn.type = "button";
+  btn.className = `vault-preview-icon-btn ${cls}`;
+  btn.title = label;
+  btn.setAttribute("aria-label", label);
+  btn.innerHTML = svg;
+  btn.addEventListener("click", () => onClick());
+  return btn;
 }

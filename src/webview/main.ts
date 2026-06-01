@@ -364,6 +364,11 @@ function switchTab(newTabId: string): void {
     return;
   }
 
+  // A keyboard-driven tab switch would otherwise leave the body-mounted subagent
+  // popup overlaying the newly active tab (mouse switches dismiss it via the
+  // outside-click listener, but key shortcuts don't). Dismiss it on any switch.
+  factory.disposeSubagentPopup();
+
   // Hide current tab
   if (store.activeTabId && store.activeTabId !== newTabId) {
     splitRenderer.hideTabContainer(store.activeTabId);
@@ -397,6 +402,11 @@ function removeTerminal(id: string): void {
   if (!instance) {
     return;
   }
+
+  // The subagent-preview popup is a factory singleton mounted on document.body —
+  // dispose it on every teardown path so it can't outlive the terminal that
+  // spawned it (it is NOT tied to the per-session hover controller; D7).
+  factory.disposeSubagentPopup();
 
   // Dispose hover-preview controller BEFORE the terminal goes away so its
   // DOM listeners detach while the terminal's element still exists.
@@ -531,6 +541,7 @@ const routeMessage = createMessageRouter({
     if (closed) {
       factory.disposeHoverController(closed);
     }
+    factory.disposeSubagentPopup(); // closing any pane dismisses the singleton popup (D7)
   },
   onCloseSplitPaneById(msg) {
     if (msg.sessionId) {
@@ -538,6 +549,7 @@ const routeMessage = createMessageRouter({
       if (closed) {
         factory.disposeHoverController(closed);
       }
+      factory.disposeSubagentPopup(); // closing any pane dismisses the singleton popup (D7)
     }
   },
   onSplitPaneAt(msg) {
@@ -644,6 +656,10 @@ const routeMessage = createMessageRouter({
   },
   onVaultSessionDetailResponse(msg) {
     vaultPanel?.handleSessionDetailResponse(msg);
+  },
+  onSubagentPreviewResponse(msg) {
+    // Fill the (factory-owned) subagent popup; matched by requestId, stale drops.
+    factory.fillSubagentPreview(msg.requestId, msg.detail, msg.error);
   },
   onVaultContextCwd(msg) {
     // Drop a reply for a pane that is no longer active (stale-guard): the user

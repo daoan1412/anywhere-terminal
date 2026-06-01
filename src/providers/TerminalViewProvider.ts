@@ -1,8 +1,14 @@
+import * as fs from "node:fs/promises";
 import * as vscode from "vscode";
+import { descendantPids } from "../pty/processTree";
 import type { SessionManager } from "../session/SessionManager";
+import { resolveClaudeSession, type ResolveClaudeSessionDeps } from "../session/resolveClaudeSession";
 import { readTerminalConfig, readTerminalSettings } from "../settings/SettingsReader";
 import type { ThemeChangedMessage, WebViewToExtensionMessage } from "../types/messages";
 import { buildResumeCommandString, type LaunchMode } from "../vault/LaunchBuilder";
+import { readClaudeSessions, resolveClaudeSessionPath } from "../vault/readers/claudeReader";
+import { listRunningClaudeSessions } from "../vault/readers/runningSessions";
+import { resolveSubagentDetail } from "../vault/readers/subagentLookup";
 import type { VaultSessionEntry } from "../vault/types";
 import type { VaultLauncher } from "../vault/VaultLauncher";
 import type { VaultService } from "../vault/VaultService";
@@ -462,6 +468,77 @@ export class TerminalViewProvider implements vscode.WebviewViewProvider {
   }
 
   /**
+   * Resolve a clicked subagent (Task) line in a running Claude terminal to its
+   * sub-session transcript: map the terminal to its live Claude `sessionId`
+   * (process-tree ∩ PID registry, cwd/mtime fallback), then prefix-match the
+   * clicked `description` against that session's subagent stubs. Replies with a
+   * `subagentPreviewResponse` echoing `requestId`; a missing session / no match /
+   * read error becomes an `error` marker — it never throws (design.md D3).
+   */
+  private async handleRequestSubagentPreview(
+    message: Extract<WebViewToExtensionMessage, { type: "requestSubagentPreview" }>,
+    webview: vscode.Webview,
+  ): Promise<void> {
+    const { terminalId, requestId, description } = message;
+    try {
+      const session = await resolveClaudeSession(terminalId, this.subagentResolveDeps());
+      if (!session) {
+        void this.safeSendWithRetry(webview, { type: "subagentPreviewResponse", requestId, error: "noSession" });
+        return;
+      }
+      const detail = await resolveSubagentDetail(session.sessionId, description);
+      void this.safeSendWithRetry(
+        webview,
+        detail
+          ? { type: "subagentPreviewResponse", requestId, detail }
+          : { type: "subagentPreviewResponse", requestId, error: "notFound" },
+      );
+    } catch (err) {
+      void this.safeSendWithRetry(webview, {
+        type: "subagentPreviewResponse",
+        requestId,
+        error: err instanceof Error ? err.message : "Failed to read subagent transcript",
+      });
+    }
+  }
+
+  /** Wire SessionManager + Claude readers into the `resolveClaudeSession` deps. */
+  private subagentResolveDeps(): ResolveClaudeSessionDeps {
+    return {
+      getPtyPid: (id) => this.sessionManager.getSession(id)?.pty.pid,
+      getCwd: async (id) =>
+        (await this.sessionManager.getLiveCwd(id)) ??
+        this.sessionManager.getCurrentCwd(id) ??
+        this.sessionManager.getInitialCwd(id),
+      listRunning: () => listRunningClaudeSessions(),
+      descendantPids: (pid) => descendantPids(pid),
+      sessionMtime: async (sessionId) => {
+        const filePath = await resolveClaudeSessionPath(sessionId);
+        if (!filePath) {
+          return undefined;
+        }
+        try {
+          return (await fs.stat(filePath)).mtimeMs;
+        } catch {
+          return undefined;
+        }
+      },
+      newestSessionUnderCwd: async (cwd) => {
+        const { entries } = await readClaudeSessions({});
+        let best: { sessionId: string; cwd: string } | null = null;
+        let bestMtime = Number.NEGATIVE_INFINITY;
+        for (const entry of entries) {
+          if (entry.agent === "claude" && entry.cwd === cwd && entry.modified > bestMtime) {
+            best = { sessionId: entry.sessionId, cwd: entry.cwd };
+            bestMtime = entry.modified;
+          }
+        }
+        return best;
+      },
+    };
+  }
+
+  /**
    * Resolve a vault entry from its id for a (rare) context-menu action. Uses the
    * same list-and-find path as `VaultLauncher.resolve` so the host derives every
    * path/cwd/command itself — the webview never sends a path to act on (D9).
@@ -658,6 +735,10 @@ export class TerminalViewProvider implements vscode.WebviewViewProvider {
           if (typeof message.sessionId === "string") {
             void this.handleRequestVaultContextCwd(message.sessionId, webviewView.webview);
           }
+          break;
+
+        case "requestSubagentPreview":
+          void this.handleRequestSubagentPreview(message, webviewView.webview);
           break;
 
         case "vaultRevealInOS":
