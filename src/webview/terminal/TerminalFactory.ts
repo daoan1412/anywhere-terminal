@@ -15,9 +15,11 @@ import { type ClipboardProvider, createKeyEventHandler } from "../InputHandler";
 import { FilePathLinkProvider } from "../links/FilePathLinkProvider";
 import { HoverPreviewController, type HoverPreviewThemeKind } from "../links/HoverPreviewController";
 import { HoverPreviewPopup } from "../links/HoverPreviewPopup";
+import { ImagePlaceholderLinkProvider } from "../links/ImagePlaceholderLinkProvider";
+import { createMarkdownRenderer } from "../links/markdownRenderer";
+import { PastedImageStore } from "../links/PastedImageStore";
 import { SubagentLinkProvider } from "../links/SubagentLinkProvider";
 import { SubagentPreviewPopup } from "../links/SubagentPreviewPopup";
-import { createMarkdownRenderer } from "../links/markdownRenderer";
 import { createSyntaxRenderer, isHighlighterReady, whenHighlighterReady } from "../links/syntaxRenderer";
 import { fitTerminal as fitTerminalCore } from "../resize/XtermFitService";
 import { createLeaf, getAllSessionIds } from "../SplitModel";
@@ -81,6 +83,14 @@ export class TerminalFactory {
    * `filePreviewResult` to `controllers.get(sessionId).onMessage(msg)`.
    */
   readonly hoverControllers = new Map<string, HoverPreviewController>();
+
+  /**
+   * Per-terminal cache of images pasted into each session, indexed by session
+   * id. The document-level paste listener writes here; the placeholder link
+   * provider reads here. Disposed alongside the hover controller so its object
+   * URLs are revoked on every teardown path (preview-pasted-images D2).
+   */
+  private readonly pastedImageStores = new Map<string, PastedImageStore>();
 
   constructor(deps: TerminalFactoryDeps) {
     this.themeManager = deps.themeManager;
@@ -345,6 +355,12 @@ export class TerminalFactory {
     });
     this.hoverControllers.set(id, hoverController);
 
+    // Per-terminal pasted-image cache. The placeholder link provider resolves a
+    // hovered [Image #N] against it; the document-level paste listener (main.ts)
+    // fills it at paste time. See preview-pasted-images D2/D4.
+    const pastedImageStore = new PastedImageStore();
+    this.pastedImageStores.set(id, pastedImageStore);
+
     // Register a custom link provider for file paths in terminal output.
     // Underlines + cursor:pointer come from xterm's built-in link decorations;
     // activation posts an `openFile` message that the extension host resolves
@@ -366,6 +382,16 @@ export class TerminalFactory {
       new SubagentLinkProvider({
         terminal,
         onActivate: (agentType, description, x, y) => this.handleSubagentClick(id, agentType, description, x, y),
+      }),
+    );
+
+    // Third link provider (additive): make [Image #N] / [Image N] placeholders
+    // hoverable → preview the image captured at paste time. See D4/D5.
+    terminal.registerLinkProvider(
+      new ImagePlaceholderLinkProvider({
+        terminal,
+        store: pastedImageStore,
+        hoverController,
       }),
     );
 
@@ -613,6 +639,27 @@ export class TerminalFactory {
       }
       this.hoverControllers.delete(sessionId);
     }
+    // The pasted-image cache shares the controller's lifetime — dispose it on
+    // every teardown path (tab + split close) so its object URLs are revoked.
+    this.disposePastedImageStore(sessionId);
+  }
+
+  /** This terminal's pasted-image cache, for the document-level paste capture. */
+  getPastedImageStore(sessionId: string): PastedImageStore | undefined {
+    return this.pastedImageStores.get(sessionId);
+  }
+
+  /** Dispose + drop a session's pasted-image cache (revokes its object URLs). Idempotent. */
+  disposePastedImageStore(sessionId: string): void {
+    const store = this.pastedImageStores.get(sessionId);
+    if (store) {
+      try {
+        store.dispose();
+      } catch {
+        // Best-effort.
+      }
+      this.pastedImageStores.delete(sessionId);
+    }
   }
 
   /**
@@ -621,13 +668,7 @@ export class TerminalFactory {
    * for the host to resolve. The matching `subagentPreviewResponse` fills the
    * popup via {@link fillSubagentPreview}, correlated by `requestId` (D3, D7).
    */
-  private handleSubagentClick(
-    terminalId: string,
-    agentType: string,
-    description: string,
-    x: number,
-    y: number,
-  ): void {
+  private handleSubagentClick(terminalId: string, agentType: string, description: string, x: number, y: number): void {
     const requestId = `subagent-${++this.subagentReqSeq}`;
     // agentType is webview-display only (header badge); the host resolves by description.
     this.subagentPopup.open(requestId, agentType, description, x, y);

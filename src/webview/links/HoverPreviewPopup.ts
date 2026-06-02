@@ -13,6 +13,7 @@
 
 import type { FilePreviewResultMessage, HoverPreviewSettings } from "../../types/messages";
 import type { HoverPreviewPopupHost, HoverPreviewThemeKind } from "./HoverPreviewController";
+import type { PastedImagePreview } from "./PastedImageStore";
 
 /** Pixel offset from the hover anchor to the popup's top-left corner (below). */
 const ANCHOR_OFFSET_Y = 12;
@@ -300,78 +301,94 @@ export class HoverPreviewPopup implements HoverPreviewPopupHost {
     if (this.disposed) {
       return;
     }
-    const terminalElement = this.findTerminalElement(anchor);
-    if (!terminalElement) {
+    const header = this.buildFileHeader(result);
+    const body = this.buildFileBody(result, theme);
+    // Line-focus scroll MUST run after the popup is in the DOM AND positioned —
+    // scrollIntoView no-ops on detached elements (the body is the scroll
+    // container). The active-line class was set during renderOkBody.
+    this.renderShell(anchor, header, body, () => {
+      if (this.el) {
+        this.scrollToActiveLine(this.el);
+      }
+    });
+  }
+
+  /**
+   * Show a pasted-image preview. Reuses the same shell (positioning, drag/
+   * resize, dismissal) as the file preview; the body is just an `<img>` bound
+   * to the cached `blob:` object URL — resolved entirely webview-side, no IPC.
+   * See: asimov/changes/preview-pasted-images/design.md D4.
+   */
+  showImage(anchor: MouseEvent, image: PastedImagePreview): void {
+    if (this.disposed) {
       return;
     }
-
-    // Unmount any prior — one popup at a time.
-    this.unmountElement();
-
-    const root = document.createElement("div");
-    root.className = "xterm-hover anywhere-hover-preview";
-    root.setAttribute("role", "tooltip");
-    root.style.position = "fixed";
-    // Above the vault session-preview overlay (z-index 1000) so a hover the user
-    // just triggered sits on top of it deterministically (both are body-level
-    // fixed overlays; equal z-index would order by DOM insertion).
-    root.style.zIndex = "1001";
-
-    // Every hover starts fresh: default width, anchored to the cursor. The
-    // popup deliberately remembers nothing between hovers — drag/resize affect
-    // only the live popup, and the next hover re-anchors at the default. It
-    // mounts on document.body as a `position: fixed` overlay clamped to the
-    // webview VIEWPORT (not the terminal box) so it can spill over the AI vault
-    // / file tree for more room. Height stays `auto` (capped at
-    // MAX_POPUP_HEIGHT) until the user resizes the live popup; the ACTUAL
-    // rendered height is measured after mount so the flip-above math doesn't
-    // overshoot for short content.
-    const bounds = this.computeBounds();
-    const popupWidth = clamp(DEFAULT_POPUP_WIDTH, bounds.minWidth, bounds.maxWidth);
-    const autoMaxHeight = Math.min(MAX_POPUP_HEIGHT, bounds.maxHeight);
-
-    root.style.width = `${popupWidth}px`;
-    root.style.maxWidth = `${bounds.maxWidth}px`;
-    root.style.maxHeight = `${autoMaxHeight}px`;
-    // The root is a flex column (see `.anywhere-hover-preview` CSS): the body
-    // grows to fill and scrolls within the remaining space while the footer
-    // stays pinned to the bottom — including after a resize that grows the
-    // popup taller. `overflow: hidden` makes the body the sole scroller and
-    // clips content to the rounded corners.
-    root.style.overflow = "hidden";
-    // Hide while we mount + measure so the user never sees the popup at the
-    // pre-measurement position.
-    root.style.visibility = "hidden";
-    root.style.left = "0px";
-    root.style.top = "0px";
-
-    // Build header — show absPath when resolved, otherwise fall back to the
-    // original request path (echoed back via FilePreviewResultMessage.path).
-    // Per spec "Popup header": every popup must display some path. The header
-    // is a flex row: the path text (ellipsis-truncated) on the left, the
-    // "Open" icon button on the right.
+    const labelText = `Pasted image · ${formatBytes(image.byteSize)}`;
     const header = document.createElement("div");
     header.className = "anywhere-hover-preview-header";
-    // Drag-to-move handle. Pointer capture keeps the gesture alive even when the
-    // cursor leaves the (often narrow) sidebar iframe before release.
-    header.addEventListener("pointerdown", this.onHeaderPointerDown);
+    const label = document.createElement("span");
+    label.className = "anywhere-hover-preview-header-path";
+    label.textContent = labelText;
+    label.setAttribute("title", labelText);
+    header.appendChild(label);
+
+    const body = document.createElement("div");
+    body.className = "anywhere-hover-preview-body";
+    const img = document.createElement("img");
+    img.className = "anywhere-hover-preview-image";
+    img.src = image.url;
+    img.alt = labelText;
+    body.appendChild(img);
+
+    this.renderShell(
+      anchor,
+      header,
+      body,
+      (root) => {
+        // The blob hasn't decoded at first measure, so the popup was positioned
+        // for a near-empty box (couldn't flip). Re-anchor once the image has real
+        // height — guarded on `this.el === root` so a load that resolves after the
+        // popup was replaced/dismissed doesn't move a different popup.
+        const reposition = () => {
+          if (this.el === root) {
+            this.positionPopup(root, anchor);
+          }
+        };
+        if (img.complete && img.naturalHeight > 0) {
+          reposition();
+        } else {
+          img.addEventListener("load", reposition, { once: true });
+        }
+      },
+      // Auto-grow to the image's width-scaled height (viewport-bounded), rather
+      // than the file preview's fixed height cap.
+      Number.POSITIVE_INFINITY,
+    );
+  }
+
+  /** Build the file-preview header (path label + optional Open button). */
+  private buildFileHeader(result: FilePreviewResultMessage): HTMLElement {
+    const header = document.createElement("div");
+    header.className = "anywhere-hover-preview-header";
+    // Show absPath when resolved, else the echoed request path — every popup
+    // must display some path (spec "Popup header").
     const headerPath = (hasAbsPath(result) ? result.absPath : undefined) ?? result.path;
     const pathLabel = document.createElement("span");
     pathLabel.className = "anywhere-hover-preview-header-path";
     pathLabel.textContent = headerPath;
     pathLabel.setAttribute("title", headerPath);
     header.appendChild(pathLabel);
-    // Open button — only meaningful when we have a resolvable path. Hidden for
-    // `not-found` / `error` statuses because clicking would just produce the
-    // same "File not found" toast.
+    // Open button hidden for not-found/error (clicking would only re-surface
+    // the same "File not found" toast).
     if (this.onOpenFile && this.canOpen(result)) {
       header.appendChild(this.buildOpenButton(result));
     }
-    root.appendChild(header);
+    return header;
+  }
 
-    // Build body. The `-body-numbers` class enables the CSS-counter gutter on
-    // every `.line` element. Long lines overflow horizontally — the body
-    // has overflow:auto so the user can scroll sideways. See: design.md D14.
+  /** Build the file-preview body (code/markdown when ok, else a placeholder). */
+  private buildFileBody(result: FilePreviewResultMessage, theme: HoverPreviewThemeKind): HTMLElement {
+    // `-body-numbers` enables the CSS-counter gutter on each `.line`. See D14.
     const body = document.createElement("div");
     body.className = "anywhere-hover-preview-body anywhere-hover-preview-body-numbers";
     if (result.status === "ok") {
@@ -383,17 +400,62 @@ export class HoverPreviewPopup implements HoverPreviewPopupHost {
       placeholder.textContent = renderPlaceholderText(result.status, totalBytes);
       body.appendChild(placeholder);
     }
+    return body;
+  }
+
+  /**
+   * Mount `header` + `body` as the popup shell on document.body: sizing,
+   * footer, SE-resize grip, height measure, viewport-clamped positioning, and
+   * listeners. `header` doubles as the drag handle. Shared by `show` (file) and
+   * `showImage` (image) so both inherit identical chrome + behavior. The popup
+   * remembers nothing between hovers — each call re-anchors at the default size
+   * (z-index 1001 keeps it above the vault overlay at 1000).
+   */
+  private renderShell(
+    anchor: MouseEvent,
+    header: HTMLElement,
+    body: HTMLElement,
+    afterMount?: (root: HTMLDivElement) => void,
+    maxPopupHeight: number = MAX_POPUP_HEIGHT,
+  ): void {
+    const terminalElement = this.findTerminalElement(anchor);
+    if (!terminalElement) {
+      return;
+    }
+    // Unmount any prior — one popup at a time.
+    this.unmountElement();
+
+    const root = document.createElement("div");
+    root.className = "xterm-hover anywhere-hover-preview";
+    root.setAttribute("role", "tooltip");
+    root.style.position = "fixed";
+    root.style.zIndex = "1001";
+
+    // Image previews pass Infinity so the popup auto-grows to the image's
+    // width-scaled height (capped only by the viewport) instead of the file
+    // preview's fixed cap — positionPopup reads this back off root.style.maxHeight.
+    const bounds = this.computeBounds();
+    const popupWidth = clamp(DEFAULT_POPUP_WIDTH, bounds.minWidth, bounds.maxWidth);
+    const autoMaxHeight = Math.min(maxPopupHeight, bounds.maxHeight);
+    root.style.width = `${popupWidth}px`;
+    root.style.maxWidth = `${bounds.maxWidth}px`;
+    root.style.maxHeight = `${autoMaxHeight}px`;
+    root.style.overflow = "hidden";
+    // Hide until measured + positioned so the user never sees the pre-anchor frame.
+    root.style.visibility = "hidden";
+    root.style.left = "0px";
+    root.style.top = "0px";
+
+    // The header doubles as the drag-to-move handle; pointer capture keeps the
+    // gesture alive when the cursor leaves the narrow sidebar iframe.
+    header.addEventListener("pointerdown", this.onHeaderPointerDown);
+    root.appendChild(header);
     root.appendChild(body);
 
-    // Footer toolbar — delay number input. Rendered only when both
-    // `getSettings` AND `onUpdateSetting` are wired (tests can omit them).
-    // See: design.md D17.
     if (this.getSettings && this.onUpdateSetting) {
       root.appendChild(this.buildFooter(this.getSettings(), this.onUpdateSetting));
     }
 
-    // SE-corner resize grip. Its own pointerdown starts a pointer-captured
-    // resize gesture (see onGripPointerDown).
     const grip = document.createElement("div");
     grip.className = "anywhere-hover-preview-resize-grip";
     grip.setAttribute("aria-hidden", "true");
@@ -402,35 +464,38 @@ export class HoverPreviewPopup implements HoverPreviewPopupHost {
 
     document.body.appendChild(root);
 
-    // Measure ACTUAL rendered height now that content is laid out. Fall back
-    // to autoMaxHeight when offsetHeight is 0 — jsdom returns 0 because it
-    // doesn't compute layout, and a defensive fallback also covers the rare
-    // case where the popup is detached or display:none under user CSS.
-    const measured = root.offsetHeight;
-    const actualHeight = measured > 0 ? Math.min(measured, autoMaxHeight) : autoMaxHeight;
-
-    // Anchor next to the cursor in VIEWPORT coordinates (the popup is
-    // `position: fixed`), clamped/flipped to stay inside the webview viewport —
-    // so it may spill out of the terminal over the vault / file tree but never
-    // off-screen. Always cursor-anchored — the popup keeps no remembered position.
-    const vp = this.viewportSize();
-    const pos = computePosition(anchor.clientX, anchor.clientY, popupWidth, actualHeight, vp.width, vp.height);
-    root.style.left = `${pos.left}px`;
-    root.style.top = `${pos.top}px`;
-    root.style.visibility = "";
-
     this.el = root;
-    // Mount parent for the overlay + non-null guard for the gesture handlers.
     this.host = document.body;
+
+    this.positionPopup(root, anchor);
+    root.style.visibility = "";
 
     this.attachListeners();
 
-    // Line-focus scroll MUST run after the popup is in the DOM AND positioned
-    // — scrollIntoView is a no-op on detached elements (the body is the
-    // scroll container so its scroll position is what matters). The
-    // active-line class was set during renderOkBody so we just need to scroll
-    // it into the popup's viewport now.
-    this.scrollToActiveLine(root);
+    afterMount?.(root);
+  }
+
+  /**
+   * (Re)compute the popup's viewport-clamped top-left from `anchor` and the
+   * popup's CURRENT measured height, then apply it. Called once at mount and
+   * again after an async `<img>` loads: the image has no height at first
+   * measure, so the initial placement can't decide to flip above — re-running
+   * this once the real height is known lets computePosition flip the popup
+   * upward when there isn't room below (so it isn't clipped). See showImage.
+   */
+  private positionPopup(root: HTMLDivElement, anchor: MouseEvent): void {
+    // Read width + the height cap back off the live root (renderShell set them;
+    // the cap differs for image vs file previews). Fall back to the file cap.
+    const bounds = this.computeBounds();
+    const width = this.styleNum(root.style.width) ?? clamp(DEFAULT_POPUP_WIDTH, bounds.minWidth, bounds.maxWidth);
+    const cap = this.styleNum(root.style.maxHeight) ?? Math.min(MAX_POPUP_HEIGHT, bounds.maxHeight);
+    // Fall back to the cap when offsetHeight is 0 (jsdom computes no layout).
+    const measured = root.offsetHeight;
+    const actualHeight = measured > 0 ? Math.min(measured, cap) : cap;
+    const vp = this.viewportSize();
+    const pos = computePosition(anchor.clientX, anchor.clientY, width, actualHeight, vp.width, vp.height);
+    root.style.left = `${pos.left}px`;
+    root.style.top = `${pos.top}px`;
   }
 
   /**

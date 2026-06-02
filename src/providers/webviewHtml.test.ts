@@ -22,6 +22,14 @@ describe("getTerminalHtml webview.js cache-buster (D11)", () => {
     expect((match?.[1].match(/\?/g) ?? []).length).toBe(1);
   });
 
+  it("allows blob: image sources in the CSP so pasted-image previews render (preview-pasted-images D6)", () => {
+    const html = getTerminalHtml(mockWebview(), vscode.Uri.file("/ext"), "sidebar");
+    const csp = html.match(/Content-Security-Policy"\s*content="([^"]*)"/)?.[1] ?? "";
+    // Object-URL (blob:) previews are blocked under default-src 'none' without
+    // an explicit img-src; the directive must permit blob:.
+    expect(csp).toMatch(/img-src[^;]*blob:/);
+  });
+
   it("keeps the vault panel CSS INLINE (the externalization was reverted — D15)", () => {
     const html = getTerminalHtml(mockWebview(), vscode.Uri.file("/ext"), "sidebar");
     // The vault CSS is inlined into the host <style> (regenerated per render, so it

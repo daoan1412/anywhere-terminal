@@ -2,10 +2,11 @@
 // src/webview/links/HoverPreviewController.test.ts — fake-timer driven coverage
 // for the 300ms debounce + requestId tracking + stale-response drop + dispose.
 
-import type { ILink } from "@xterm/xterm";
+import type { ILink, Terminal } from "@xterm/xterm";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { FilePreviewResultMessage } from "../../types/messages";
 import { HOVER_DEBOUNCE_MS, HoverPreviewController, type HoverPreviewPopupHost } from "./HoverPreviewController";
+import type { PastedImagePreview } from "./PastedImageStore";
 
 function makeLink(text: string, x = 1, y = 1): ILink {
   return {
@@ -67,15 +68,20 @@ function makeFakeTerminal(): { terminal: { element: HTMLElement }; element: HTML
 
 function makePopup(): HoverPreviewPopupHost & {
   showCalls: Array<{ result: FilePreviewResultMessage; theme: string }>;
+  showImageCalls: Array<{ image: PastedImagePreview }>;
   hideCalls: number;
   disposeCalls: number;
 } {
   const showCalls: Array<{ result: FilePreviewResultMessage; theme: string }> = [];
+  const showImageCalls: Array<{ image: PastedImagePreview }> = [];
   let hideCalls = 0;
   let disposeCalls = 0;
   return {
     show: (_anchor, result, theme) => {
       showCalls.push({ result, theme });
+    },
+    showImage: (_anchor, image) => {
+      showImageCalls.push({ image });
     },
     hide: () => {
       hideCalls++;
@@ -86,6 +92,9 @@ function makePopup(): HoverPreviewPopupHost & {
     get showCalls() {
       return showCalls;
     },
+    get showImageCalls() {
+      return showImageCalls;
+    },
     get hideCalls() {
       return hideCalls;
     },
@@ -94,6 +103,7 @@ function makePopup(): HoverPreviewPopupHost & {
     },
   } as HoverPreviewPopupHost & {
     showCalls: Array<{ result: FilePreviewResultMessage; theme: string }>;
+    showImageCalls: Array<{ image: PastedImagePreview }>;
     hideCalls: number;
     disposeCalls: number;
   };
@@ -109,6 +119,88 @@ beforeEach(() => {
 afterEach(() => {
   vi.useRealTimers();
   document.body.innerHTML = "";
+});
+
+describe("HoverPreviewController.attachImageHover (preview-pasted-images)", () => {
+  function setup(resolve: () => PastedImagePreview | null) {
+    const { terminal } = makeFakeTerminal();
+    const postMessage = vi.fn();
+    const popup = makePopup();
+    const controller = new HoverPreviewController({
+      terminal: terminal as unknown as Terminal,
+      sessionId: "s1",
+      postMessage,
+      getTheme: () => "dark",
+      popup,
+    });
+    const link = makeLink("[Image #1]");
+    controller.attachImageHover(link, resolve);
+    return { popup, postMessage, link };
+  }
+
+  const image: PastedImagePreview = { url: "blob:mock/1", mimeType: "image/png", byteSize: 10, index: 1 };
+
+  it("shows the resolved image after the debounce and never posts a message", () => {
+    const { popup, postMessage, link } = setup(() => image);
+    link.hover?.(makeMouseEvent(), "[Image #1]");
+    vi.advanceTimersByTime(HOVER_DEBOUNCE_MS);
+    expect(popup.showImageCalls).toHaveLength(1);
+    expect(popup.showImageCalls[0].image).toBe(image);
+    expect(postMessage).not.toHaveBeenCalled();
+  });
+
+  it("shows nothing when the resolver returns null", () => {
+    const { popup, link } = setup(() => null);
+    link.hover?.(makeMouseEvent(), "[Image #1]");
+    vi.advanceTimersByTime(HOVER_DEBOUNCE_MS);
+    expect(popup.showImageCalls).toHaveLength(0);
+  });
+
+  it("does not fire if the cursor leaves before the debounce elapses", () => {
+    const { popup, link } = setup(() => image);
+    link.hover?.(makeMouseEvent(), "[Image #1]");
+    vi.advanceTimersByTime(HOVER_DEBOUNCE_MS - 50);
+    link.leave?.(makeMouseEvent(), "[Image #1]");
+    vi.advanceTimersByTime(200);
+    expect(popup.showImageCalls).toHaveLength(0);
+  });
+
+  // Round-1 B1: an image hover must clear stale file-preview gating state so a
+  // requires-confirmation file popup can't be overridden via Cmd/Ctrl while the
+  // image popup is showing, and a late file response can't render over it.
+  it("clears stale file requires-confirmation state — Cmd/Ctrl over an image popup issues no file override", () => {
+    const { terminal } = makeFakeTerminal();
+    const postMessage = vi.fn();
+    const popup = makePopup();
+    const controller = new HoverPreviewController({
+      terminal: terminal as unknown as Terminal,
+      sessionId: "s1",
+      postMessage,
+      getTheme: () => "dark",
+      popup,
+    });
+
+    // 1. File hover → request in flight → host returns requires-confirmation.
+    const fileLink = makeLink("/abs/file.ts", 1, 1);
+    controller.attachHover(fileLink, "/abs/file.ts");
+    fileLink.hover?.(makeMouseEvent(), "/abs/file.ts");
+    vi.advanceTimersByTime(HOVER_DEBOUNCE_MS);
+    const reqId = (postMessage.mock.calls[0][0] as { requestId: string }).requestId;
+    controller.onMessage(makeRequiresConfirmationResult(reqId));
+    const callsAfterFile = postMessage.mock.calls.length;
+
+    // 2. Move to an image placeholder hover.
+    const imageLink = makeLink("[Image #1]", 1, 2);
+    controller.attachImageHover(imageLink, () => image);
+    imageLink.hover?.(makeMouseEvent(), "[Image #1]");
+    vi.advanceTimersByTime(HOVER_DEBOUNCE_MS);
+    expect(popup.showImageCalls).toHaveLength(1);
+
+    // 3. Pressing the platform modifier must NOT issue a file-preview override.
+    const key = /Mac|iPhone|iPod|iPad/i.test(navigator.platform) ? "Meta" : "Control";
+    document.dispatchEvent(new KeyboardEvent("keydown", { key }));
+    expect(postMessage.mock.calls.length).toBe(callsAfterFile);
+  });
 });
 
 describe("HoverPreviewController", () => {

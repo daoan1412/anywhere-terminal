@@ -88,6 +88,115 @@ afterEach(() => {
   setViewport(1024, 768);
 });
 
+describe("HoverPreviewPopup — showImage (preview-pasted-images)", () => {
+  it("mounts an <img> bound to the object URL with a byte-size header", () => {
+    const popup = new HoverPreviewPopup();
+    const term = makeTerminalElement();
+    popup.showImage(fakeMouseEvent(term, 40, 40), {
+      url: "blob:mock/xyz",
+      mimeType: "image/png",
+      byteSize: 2048,
+      index: 1,
+    });
+    const root = document.querySelector(".anywhere-hover-preview") as HTMLElement;
+    expect(root).toBeTruthy();
+    const img = root.querySelector("img.anywhere-hover-preview-image") as HTMLImageElement;
+    expect(img).toBeTruthy();
+    expect(img.getAttribute("src")).toBe("blob:mock/xyz");
+    const header = root.querySelector(".anywhere-hover-preview-header-path") as HTMLElement;
+    expect(header.textContent).toContain("2.0 KB");
+  });
+
+  it("re-anchors after the image loads so it can flip above when there's no room below", () => {
+    const popup = new HoverPreviewPopup();
+    const term = makeTerminalElement(800, 600);
+    // Anchor near the bottom edge so a tall popup must flip above.
+    popup.showImage(fakeMouseEvent(term, 100, 560), {
+      url: "blob:mock/x",
+      mimeType: "image/png",
+      byteSize: 1,
+      index: 1,
+    });
+    const root = document.querySelector(".anywhere-hover-preview") as HTMLElement;
+    const img = root.querySelector("img.anywhere-hover-preview-image") as HTMLImageElement;
+
+    // Simulate the browser: the decoded image now gives the popup a real height
+    // that won't fit below the anchor. jsdom computes no layout, so force it.
+    Object.defineProperty(root, "offsetHeight", { configurable: true, value: 300 });
+    img.dispatchEvent(new Event("load"));
+
+    // 560 + 12 + 300 = 872 > 600 → flips above: 560 - 12 - 300 = 248.
+    expect(Number.parseFloat(root.style.top)).toBe(248);
+  });
+
+  it("does not move a replaced popup when a stale image load resolves", () => {
+    const popup = new HoverPreviewPopup();
+    const term = makeTerminalElement(800, 600);
+    popup.showImage(fakeMouseEvent(term, 100, 560), {
+      url: "blob:mock/stale",
+      mimeType: "image/png",
+      byteSize: 1,
+      index: 1,
+    });
+    const staleRoot = document.querySelector(".anywhere-hover-preview") as HTMLElement;
+    const staleImg = staleRoot.querySelector("img.anywhere-hover-preview-image") as HTMLImageElement;
+
+    // A second preview replaces the first (unmounts staleRoot, mounts a new one).
+    popup.showImage(fakeMouseEvent(term, 100, 100), {
+      url: "blob:mock/fresh",
+      mimeType: "image/png",
+      byteSize: 1,
+      index: 2,
+    });
+    const freshRoot = document.querySelector(".anywhere-hover-preview") as HTMLElement;
+    const freshTopBefore = freshRoot.style.top;
+
+    // The stale image's late load must not reposition the fresh popup.
+    Object.defineProperty(staleRoot, "offsetHeight", { configurable: true, value: 300 });
+    staleImg.dispatchEvent(new Event("load"));
+    expect(freshRoot.style.top).toBe(freshTopBefore);
+  });
+
+  it("resizes via the SE grip without error, even if the image loads mid-gesture", () => {
+    const popup = new HoverPreviewPopup();
+    const term = makeTerminalElement(800, 600);
+    popup.showImage(fakeMouseEvent(term, 50, 50), {
+      url: "blob:mock/r",
+      mimeType: "image/png",
+      byteSize: 1,
+      index: 1,
+    });
+    const root = document.querySelector(".anywhere-hover-preview") as HTMLElement;
+    const grip = document.querySelector(".anywhere-hover-preview-resize-grip") as HTMLElement;
+    const img = root.querySelector("img.anywhere-hover-preview-image") as HTMLImageElement;
+    grip.dispatchEvent(
+      new PointerEvent("pointerdown", { bubbles: true, cancelable: true, button: 0, pointerId: 1, clientX: 200, clientY: 200 }),
+    );
+    grip.dispatchEvent(new PointerEvent("pointermove", { pointerId: 1, clientX: 260, clientY: 280 }));
+    // Image finishes loading in the middle of the resize.
+    Object.defineProperty(root, "offsetHeight", { configurable: true, value: 200 });
+    img.dispatchEvent(new Event("load"));
+    grip.dispatchEvent(new PointerEvent("pointerup", { pointerId: 1 }));
+    // Width grew (640 + 60); no exception thrown.
+    expect(root.style.width).toBe("700px");
+  });
+
+  it("reuses the shell — fixed-positioned and dismissable via hide()", () => {
+    const popup = new HoverPreviewPopup();
+    const term = makeTerminalElement();
+    popup.showImage(fakeMouseEvent(term, 10, 10), {
+      url: "blob:mock/a",
+      mimeType: "image/png",
+      byteSize: 1,
+      index: 1,
+    });
+    const root = document.querySelector(".anywhere-hover-preview") as HTMLElement;
+    expect(root.style.position).toBe("fixed");
+    popup.hide();
+    expect(document.querySelector(".anywhere-hover-preview")).toBeNull();
+  });
+});
+
 describe("formatBytes", () => {
   it("formats < 1 KiB as bytes", () => {
     expect(formatBytes(0)).toBe("0 B");

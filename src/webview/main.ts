@@ -1072,6 +1072,38 @@ function bootstrap(): void {
     }
   });
 
+  // Capture-phase paste listener: when the clipboard carries an image, snapshot
+  // it into the active pane's cache so hovering the CLI's [Image #N] placeholder
+  // can preview it. Observe-only — never preventDefault/stopPropagation, so the
+  // native paste still reaches xterm and the CLI's own out-of-band clipboard
+  // read (which renders the placeholder) is unaffected. See preview-pasted-images D1.
+  document.addEventListener(
+    "paste",
+    (e: ClipboardEvent) => {
+      const items = e.clipboardData?.items;
+      if (!items) {
+        return;
+      }
+      let blob: File | null = null;
+      for (let i = 0; i < items.length; i++) {
+        if (items[i].type.startsWith("image/")) {
+          blob = items[i].getAsFile();
+          break;
+        }
+      }
+      if (!blob) {
+        return;
+      }
+      const tabId = store.activeTabId;
+      const targetId = tabId ? (store.tabActivePaneIds.get(tabId) ?? tabId) : null;
+      if (!targetId) {
+        return;
+      }
+      factory.getPastedImageStore(targetId)?.add(blob);
+    },
+    true,
+  );
+
   // Notify Extension Host when user clicks/focuses the terminal.
   // Sends the resolved active pane session ID so "Insert Path" + the
   // title-bar "Export…" flash target the pane the user is actually on.

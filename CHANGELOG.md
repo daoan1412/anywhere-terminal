@@ -4,6 +4,12 @@ All notable changes to **AnyWhere Terminal** are documented in this file.
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.17.0] — 2026-06-02
+
+### Added
+
+- **Preview pasted images on hover.** When you paste an image into a terminal running an AI CLI (Claude Code, Codex, OpenCode), the tool renders a compact `[Image #N]` placeholder in the prompt. Hovering that placeholder now shows a preview of the image you actually pasted, so you can see what you attached at a glance. The image is captured in the terminal at paste time and rendered locally — nothing is sent anywhere, and the CLI's own paste handling is untouched. The preview fills the popup width with auto-scaled height and flips above the tag when there isn't room below it, reusing the existing floating hover-preview popup.
+
 ## [0.16.1] — 2026-05-31
 
 ### Changed

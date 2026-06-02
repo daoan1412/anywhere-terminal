@@ -76,6 +76,7 @@ export function getTerminalHtml(
         content="default-src 'none';
                  style-src ${webview.cspSource} 'unsafe-inline';
                  script-src 'nonce-${nonce}';
+                 img-src ${webview.cspSource} blob: data:;
                  font-src ${webview.cspSource} data:;">
   <link href="${styleUri}" rel="stylesheet">
   <style>
@@ -496,6 +497,15 @@ export function getTerminalHtml(
     .anywhere-hover-preview-placeholder {
       padding: 4px 0;
       color: var(--vscode-descriptionForeground, #999);
+    }
+    /* Pasted-image preview body — the blob: object URL renders here, filling the
+       popup's content width with height scaled by aspect ratio (see
+       preview-pasted-images design.md D4/D6). The popup body has overflow:auto,
+       so a tall image scrolls. CSP img-src must allow blob: for this to load. */
+    .anywhere-hover-preview-image {
+      display: block;
+      width: 100%;
+      height: auto;
     }
     .anywhere-hover-preview-truncated {
       margin-top: 6px;

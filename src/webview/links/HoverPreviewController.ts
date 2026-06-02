@@ -15,6 +15,7 @@ import type {
   ThemeChangedMessage,
   WebViewToExtensionMessage,
 } from "../../types/messages";
+import type { PastedImagePreview } from "./PastedImageStore";
 
 /** Default debounce — VSCode's editor hover uses 300 ms (`HoverOperation`). */
 export const HOVER_DEBOUNCE_MS = 300;
@@ -40,6 +41,8 @@ export type HoverPreviewThemeKind = ThemeChangedMessage["kind"];
 export interface HoverPreviewPopupHost {
   /** Render / re-render the popup for `result` at `anchor`. */
   show(anchor: MouseEvent, result: FilePreviewResultMessage, theme: HoverPreviewThemeKind): void;
+  /** Render a pasted-image preview at `anchor` (webview-local, no IPC). */
+  showImage(anchor: MouseEvent, image: PastedImagePreview): void;
   /** Remove the popup if visible; idempotent. */
   hide(): void;
   /** Tear down DOM + listeners; idempotent. */
@@ -212,6 +215,36 @@ export class HoverPreviewController {
     };
   }
 
+  /**
+   * Install hover/leave callbacks for a pasted-image placeholder link. On hover
+   * the cached image is resolved locally (no IPC) and rendered via
+   * `popup.showImage` after the shared debounce; leave/scroll/Escape dismiss
+   * reuse the same machinery as file previews. See preview-pasted-images D4.
+   */
+  attachImageHover(link: ILink, resolve: () => PastedImagePreview | null): void {
+    if (this.disposed) {
+      return;
+    }
+    const priorHover = link.hover?.bind(link);
+    const priorLeave = link.leave?.bind(link);
+    link.hover = (event, text) => {
+      try {
+        priorHover?.(event, text);
+      } catch {
+        // Defensive — other addons may attach hover callbacks too.
+      }
+      this.onImageLinkHover(event, link, resolve);
+    };
+    link.leave = (event, text) => {
+      try {
+        priorLeave?.(event, text);
+      } catch {
+        // Defensive.
+      }
+      this.onLinkLeave();
+    };
+  }
+
   /** Called by main.ts when a `filePreviewResult` message arrives. */
   onMessage(result: FilePreviewResultMessage): void {
     if (this.disposed) {
@@ -305,57 +338,106 @@ export class HoverPreviewController {
 
   // ─── Internal ────────────────────────────────────────────────────────
 
-  private onLinkHover(event: MouseEvent, link: ILink, path: string, line: number | undefined): void {
+  /**
+   * Generic hover→debounce→`fire` skeleton shared by the file-preview and the
+   * pasted-image hover paths (preview-pasted-images D4). Handles the window
+   * listeners, leave-grace cancel, the same-link guard, and the debounce timer.
+   * `opts.beforeSchedule` runs synchronously after the guard passes (the file
+   * path resets its request state there); `opts.isInFlight` lets a caller treat
+   * post-debounce work as "still busy" for the same-link guard.
+   */
+  private scheduleHover(
+    event: MouseEvent,
+    link: ILink,
+    fire: () => void,
+    opts?: { beforeSchedule?: () => void; isInFlight?: () => boolean },
+  ): void {
     if (this.disposed) {
       return;
     }
     this.ensureWindowListeners();
-    // Re-entering the link cancels any pending leave-grace dismissal — the
-    // user is back on the link, the popup should stay.
+    // Re-entering the link cancels any pending leave-grace dismissal.
     if (this.leaveGraceTimer) {
       clearTimeout(this.leaveGraceTimer);
       this.leaveGraceTimer = null;
     }
     const key = linkKey(link);
-    if (this.activeLinkKey === key && (this.pendingTimer || this.activeRequestId)) {
-      // Same link, hover continues — nothing to do.
+    if (this.activeLinkKey === key && (this.pendingTimer || (opts?.isInFlight?.() ?? false))) {
+      // Same link, work already pending/in-flight — nothing to do.
       return;
     }
-    // Different link or no in-flight — cancel anything pending, then debounce.
     if (this.pendingTimer) {
       clearTimeout(this.pendingTimer);
       this.pendingTimer = null;
     }
-    // Invalidate prior request — any stale response will be dropped.
-    this.activeRequestId = null;
     this.activeLinkKey = key;
     this.activeAnchor = event;
-    this.activePath = path;
-    this.activeLine = line;
-    this.overrideRequested = false; // fresh hover → fresh override budget
-    this.activeRequiresConfirmation = false; // fresh hover → no confirmation latched yet
-
+    // Every fresh hover — file OR image — starts from a clean file-preview
+    // gating slate: invalidate any in-flight request (so a late response is
+    // dropped) and clear the requires-confirmation/override latch so a prior
+    // file hover can't bleed into this one (e.g. a stale Cmd/Ctrl override
+    // firing while an image popup is showing). The file path re-populates
+    // activePath/activeLine in beforeSchedule.
+    this.activeRequestId = null;
+    this.activePath = null;
+    this.activeLine = undefined;
+    this.overrideRequested = false;
+    this.activeRequiresConfirmation = false;
+    opts?.beforeSchedule?.();
     this.pendingTimer = setTimeout(() => {
       this.pendingTimer = null;
       if (this.disposed) {
         return;
       }
-      const requestId = newRequestId();
-      this.activeRequestId = requestId;
-      const request: RequestFilePreviewMessage = {
-        type: "requestFilePreview",
-        requestId,
-        sessionId: this.sessionId,
-        path,
-        ...(line !== undefined ? { line } : {}),
-      };
-      try {
-        this.postMessage(request);
-      } catch (err) {
-        console.warn("[AnyWhere Terminal] postMessage(requestFilePreview) failed:", err);
-        this.activeRequestId = null;
-      }
+      fire();
     }, this.debounceMs);
+  }
+
+  private onLinkHover(event: MouseEvent, link: ILink, path: string, line: number | undefined): void {
+    this.scheduleHover(
+      event,
+      link,
+      () => {
+        const requestId = newRequestId();
+        this.activeRequestId = requestId;
+        const request: RequestFilePreviewMessage = {
+          type: "requestFilePreview",
+          requestId,
+          sessionId: this.sessionId,
+          path,
+          ...(line !== undefined ? { line } : {}),
+        };
+        try {
+          this.postMessage(request);
+        } catch (err) {
+          console.warn("[AnyWhere Terminal] postMessage(requestFilePreview) failed:", err);
+          this.activeRequestId = null;
+        }
+      },
+      {
+        isInFlight: () => this.activeRequestId !== null,
+        // scheduleHover already cleared the gating state; the file path only
+        // needs to record which path/line this hover will request.
+        beforeSchedule: () => {
+          this.activePath = path;
+          this.activeLine = line;
+        },
+      },
+    );
+  }
+
+  private onImageLinkHover(event: MouseEvent, link: ILink, resolve: () => PastedImagePreview | null): void {
+    this.scheduleHover(event, link, () => {
+      const image = resolve();
+      if (!image || !this.activeAnchor) {
+        return;
+      }
+      try {
+        this.popup.showImage(this.activeAnchor, image);
+      } catch (err) {
+        console.warn("[AnyWhere Terminal] HoverPreviewController.popup.showImage threw:", err);
+      }
+    });
   }
 
   private onLinkLeave(): void {
