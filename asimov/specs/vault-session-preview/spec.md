@@ -23,3 +23,12 @@ The preview SHALL render each `subagentSession` as a collapsed block showing its
 
 The preview overlay SHALL render all session-derived text as plain text (never as HTML), so transcript content cannot inject markup. Wrapper tokens present in raw content (e.g. `<command-message>`) SHALL be displayed literally. Agent icons in the overlay SHALL come only from the static agent-icon map, never constructed from session data. The overlay SHALL show a header (agent badge, title, Resume, Close), a meta block (folder, modified, activity summary), and body sections for First prompt, Recent activity, and Latest message; a section with no data SHALL be omitted.
 
+### Requirement: Bounded detail retains both transcript ends
+
+WHEN a session's transcript exceeds the on-demand detail read window, the per-agent read SHALL retain both the **head** and the **tail** of the transcript — never the head alone — so that `firstPrompt` (selected from the head) and the final assistant message (surfaced as `latestMessage` and as the trailing `{ kind: "message", role: "assistant" }` timeline item, selected from the tail) BOTH survive, and SHALL set `truncated: true`. For OpenCode specifically the read SHALL retain both the earliest and the most-recent `message` and `part` rows (head ASC ∪ tail DESC), de-duplicated by row id, rather than only the earliest rows.
+
+#### Scenario: Long OpenCode session surfaces both ends
+
+- **WHEN** an OpenCode session's `message`/`part` rows exceed the read window
+- **THEN** the detail's `firstPrompt` is still the first user message, `latestMessage` is the final assistant message text and the timeline includes its trailing assistant `message` item, and `truncated` is `true`
+

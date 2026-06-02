@@ -24,9 +24,15 @@ import { boundActivity, boundTimeline, MAX_MESSAGE_TEXT, truncate, truncateRich 
 /** Bound the read so the vault list stays cheap (D2). */
 const ROW_LIMIT = 500;
 
-/** Bound the per-session detail read (one conversation, ample headroom). */
-const DETAIL_MESSAGE_LIMIT = 2000;
-const DETAIL_PART_LIMIT = 5000;
+// Bound the per-session detail read by keeping BOTH the head and the tail of the
+// `message`/`part` streams (mirrors the Claude reader's head+tail buffer —
+// detail.ts createBoundedRecordBuffer). A head-only ASC read drops the tail once
+// a long session exceeds the budget — the part budget goes first (many parts per
+// turn) — which silently hid the final assistant message from the preview.
+const DETAIL_MESSAGE_HEAD = 100;
+const DETAIL_MESSAGE_TAIL = 2000;
+const DETAIL_PART_HEAD = 1000;
+const DETAIL_PART_TAIL = 4000;
 /** Bound the direct-child stubs embedded in a parent's detail timeline. */
 const CHILD_LIMIT = 100;
 
@@ -482,8 +488,13 @@ export async function readOpenCodeDetail(
 
   // `sessionId` is validated to `[A-Za-z0-9_-]+` above, so embedding it in the
   // static query introduces no injectable characters (no quotes/semicolons).
-  const messagesSql = `SELECT id, time_created, data FROM message WHERE session_id = '${sessionId}' ORDER BY time_created ASC LIMIT ${DETAIL_MESSAGE_LIMIT}`;
-  const partsSql = `SELECT message_id, time_created, data FROM part WHERE session_id = '${sessionId}' ORDER BY time_created ASC LIMIT ${DETAIL_PART_LIMIT}`;
+  // Per table a head window (ASC) preserves firstPrompt + early context and a tail
+  // window (DESC) preserves the final assistant message + recent timeline; the two
+  // are unioned and de-duplicated by row id below (they overlap on short sessions).
+  const msgHeadSql = `SELECT id, time_created, data FROM message WHERE session_id = '${sessionId}' ORDER BY time_created ASC LIMIT ${DETAIL_MESSAGE_HEAD}`;
+  const msgTailSql = `SELECT id, time_created, data FROM message WHERE session_id = '${sessionId}' ORDER BY time_created DESC LIMIT ${DETAIL_MESSAGE_TAIL}`;
+  const partHeadSql = `SELECT id, message_id, time_created, data FROM part WHERE session_id = '${sessionId}' ORDER BY time_created ASC LIMIT ${DETAIL_PART_HEAD}`;
+  const partTailSql = `SELECT id, message_id, time_created, data FROM part WHERE session_id = '${sessionId}' ORDER BY time_created DESC LIMIT ${DETAIL_PART_TAIL}`;
   // Direct children (subagents / workflow sub-sessions) of this session, with a
   // first-user-message subquery (reused from the list SQL) for the collapsed stub.
   const childrenSql = `SELECT s.id, s.title, s.agent, s.time_created, (
@@ -494,22 +505,43 @@ export async function readOpenCodeDetail(
     ) AS first_user_part
     FROM session s WHERE s.parent_id = '${sessionId}' ORDER BY s.time_created ASC LIMIT ${CHILD_LIMIT}`;
 
-  const [msgRes, partRes, childRes] = await Promise.all([
-    readSqliteFn(dbPath, messagesSql),
-    readSqliteFn(dbPath, partsSql),
+  const [msgHeadRes, msgTailRes, partHeadRes, partTailRes, childRes] = await Promise.all([
+    readSqliteFn(dbPath, msgHeadSql),
+    readSqliteFn(dbPath, msgTailSql),
+    readSqliteFn(dbPath, partHeadSql),
+    readSqliteFn(dbPath, partTailSql),
     readSqliteFn(dbPath, childrenSql),
   ]);
-  if (msgRes.status !== "ok" || partRes.status !== "ok") {
+  if (
+    msgHeadRes.status !== "ok" ||
+    msgTailRes.status !== "ok" ||
+    partHeadRes.status !== "ok" ||
+    partTailRes.status !== "ok"
+  ) {
     return null;
   }
-  if (msgRes.rows.length === 0) {
+  const msgRows = dedupeById([...msgHeadRes.rows, ...msgTailRes.rows]);
+  if (msgRows.length === 0) {
     return null; // session not found in the store
   }
+  const partRows = dedupeById([...partHeadRes.rows, ...partTailRes.rows]);
 
-  const messages = parseMessageRows(msgRes.rows);
-  const parts = parsePartRows(partRes.rows);
+  const messages = parseMessageRows(msgRows);
+  const parts = parsePartRows(partRows);
   const childStubs = childRes.status === "ok" ? buildChildStubs(childRes.rows) : [];
-  return { entryId: formatEntryId("opencode", sessionId), ...mapOpencodeRows(messages, parts, limit, childStubs) };
+  // No window overlap ⇒ the middle of a long transcript was dropped — flag it so
+  // the preview shows the truncation marker (parity with the Claude buffer).
+  const windowTruncated =
+    msgRows.length >= DETAIL_MESSAGE_HEAD + DETAIL_MESSAGE_TAIL ||
+    partRows.length >= DETAIL_PART_HEAD + DETAIL_PART_TAIL;
+  const detail: VaultSessionDetail = {
+    entryId: formatEntryId("opencode", sessionId),
+    ...mapOpencodeRows(messages, parts, limit, childStubs),
+  };
+  if (windowTruncated) {
+    detail.truncated = true;
+  }
+  return detail;
 }
 
 /** Map direct-child session rows into timestamped `subagentSession` stubs. */
@@ -559,6 +591,19 @@ function parseJsonData(raw: unknown): Record<string, unknown> | null {
   } catch {
     return null;
   }
+}
+
+/** De-duplicate raw SQL rows by their `id` column (the head ∪ tail windows
+ *  overlap on short sessions); first occurrence wins, id-less rows are dropped. */
+function dedupeById(rows: Record<string, unknown>[]): Record<string, unknown>[] {
+  const seen = new Map<string, Record<string, unknown>>();
+  for (const row of rows) {
+    const id = strField(row.id);
+    if (id && !seen.has(id)) {
+      seen.set(id, row);
+    }
+  }
+  return [...seen.values()];
 }
 
 function parseMessageRows(rows: Record<string, unknown>[]): OcMessageRow[] {

@@ -52,7 +52,9 @@ function childDetailMock(child: Record<string, unknown>) {
     if (!sql.includes("parent_id") && sql.includes("FROM part")) {
       return {
         status: "ok",
-        rows: [{ message_id: "m1", time_created: 1, data: JSON.stringify({ type: "text", text: "parent prompt" }) }],
+        rows: [
+          { id: "p1", message_id: "m1", time_created: 1, data: JSON.stringify({ type: "text", text: "parent prompt" }) },
+        ],
       };
     }
     return { status: "ok", rows: [{ time_created: 2, ...child }] };
@@ -182,7 +184,14 @@ describe("readOpenCodeDetail child sub-sessions", () => {
       if (!sql.includes("parent_id") && sql.includes("FROM part")) {
         return {
           status: "ok",
-          rows: [{ message_id: "m1", time_created: 1, data: JSON.stringify({ type: "text", text: "parent prompt" }) }],
+          rows: [
+            {
+              id: "p1",
+              message_id: "m1",
+              time_created: 1,
+              data: JSON.stringify({ type: "text", text: "parent prompt" }),
+            },
+          ],
         };
       }
       // children query (WHERE s.parent_id = ...)
@@ -202,7 +211,8 @@ describe("readOpenCodeDetail child sub-sessions", () => {
 
     const detail = await readOpenCodeDetail("ses_parent", { dataDir: "/x/oc", readSqliteFn }, undefined);
     expect(detail).not.toBeNull();
-    expect(readSqliteFn).toHaveBeenCalledTimes(3);
+    // 2 message windows (head ASC + tail DESC) + 2 part windows + 1 children query.
+    expect(readSqliteFn).toHaveBeenCalledTimes(5);
     const childSql = readSqliteFn.mock.calls.find((c) => c[1].includes("parent_id"))?.[1] ?? "";
     expect(childSql).toContain("WHERE s.parent_id = 'ses_parent'");
     const stub = detail?.timeline.find((i) => i.kind === "subagentSession");
@@ -222,7 +232,7 @@ describe("readOpenCodeDetail child sub-sessions", () => {
       if (sql.includes("FROM part") && !sql.includes("parent_id")) {
         return {
           status: "ok",
-          rows: [{ message_id: "m1", time_created: 1, data: JSON.stringify({ type: "text", text: "hi" }) }],
+          rows: [{ id: "p1", message_id: "m1", time_created: 1, data: JSON.stringify({ type: "text", text: "hi" }) }],
         };
       }
       return { status: "query-error", rows: [] }; // children query fails → degrade
@@ -282,6 +292,104 @@ describe("readOpenCodeDetail child sub-sessions", () => {
     const stub = detail?.timeline.find((i) => i.kind === "subagentSession");
     expect(stub?.kind === "subagentSession" && stub.title).toBe("find the code");
     expect(stub?.kind === "subagentSession" && stub.agent).toBe("asm-finder");
+  });
+});
+
+describe("readOpenCodeDetail head+tail windowing", () => {
+  const limitOf = (sql: string): number => Number(sql.match(/LIMIT (\d+)/)?.[1] ?? 0);
+
+  it("keeps the final assistant message from a long session (tail) AND the first prompt (head)", async () => {
+    // A head-only ASC read drops the tail of a long transcript. Simulate a long
+    // session whose first user message exists only in the head (ASC) window and
+    // whose final assistant message ("mt_final") exists only in the tail (DESC)
+    // window. Each window returns `LIMIT` rows with disjoint ids → the union
+    // saturates the budget (windowTruncated) and nothing collapses on de-dup.
+    const readSqliteFn = vi.fn(async (_db: string, sql: string): Promise<SqliteResult> => {
+      if (sql.includes("parent_id")) {
+        return { status: "ok", rows: [] }; // no children
+      }
+      const n = limitOf(sql);
+      if (sql.includes("FROM message")) {
+        if (sql.includes("DESC")) {
+          // tail (most-recent first): row 0 is the final reply (global max time)
+          const rows = Array.from({ length: n }, (_v, i) => ({
+            id: i === 0 ? "mt_final" : `mtf${i}`,
+            time_created: i === 0 ? 9_999_999 : 1_000_000 + (n - i),
+            data: JSON.stringify({ role: "assistant" }),
+          }));
+          return { status: "ok", rows };
+        }
+        // head: row 0 is the first user turn, rest filler
+        const rows = Array.from({ length: n }, (_v, i) => ({
+          id: i === 0 ? "mh_first" : `mhf${i}`,
+          time_created: i,
+          data: JSON.stringify({ role: i === 0 ? "user" : "assistant" }),
+        }));
+        return { status: "ok", rows };
+      }
+      // FROM part — text lives only on the first-user and final-assistant messages
+      if (sql.includes("DESC")) {
+        const rows = Array.from({ length: n }, (_v, i) => ({
+          id: i === 0 ? "pt_final" : `ptf${i}`,
+          message_id: i === 0 ? "mt_final" : `mtf${i}`,
+          time_created: i === 0 ? 9_999_999 : 2_000_000 + (n - i),
+          data: JSON.stringify({ type: "text", text: i === 0 ? "the final AI reply" : "" }),
+        }));
+        return { status: "ok", rows };
+      }
+      const rows = Array.from({ length: n }, (_v, i) => ({
+        id: i === 0 ? "ph_first" : `phf${i}`,
+        message_id: i === 0 ? "mh_first" : `mhf${i}`,
+        time_created: i,
+        data: JSON.stringify({ type: "text", text: i === 0 ? "first user prompt" : "" }),
+      }));
+      return { status: "ok", rows };
+    });
+
+    const detail = await readOpenCodeDetail("ses_long", { dataDir: "/x/oc", readSqliteFn }, undefined);
+    expect(detail).not.toBeNull();
+    expect(detail?.firstPrompt).toBe("first user prompt");
+    expect(detail?.latestMessage).toMatchObject({ role: "assistant", text: "the final AI reply" });
+    const last = detail?.timeline.at(-1);
+    expect(last?.kind === "message" && last.role).toBe("assistant");
+    expect(last?.kind === "message" && last.text).toContain("the final AI reply");
+    expect(detail?.truncated).toBe(true);
+  });
+
+  it("de-duplicates the overlapping head/tail windows on a short session (no double-count)", async () => {
+    // Short session: the head (ASC) and tail (DESC) windows return the SAME rows.
+    const sameRows = (sql: string): SqliteResult => {
+      if (sql.includes("FROM message")) {
+        return {
+          status: "ok",
+          rows: [
+            { id: "m1", time_created: 1, data: JSON.stringify({ role: "user" }) },
+            { id: "m2", time_created: 2, data: JSON.stringify({ role: "assistant" }) },
+          ],
+        };
+      }
+      return {
+        status: "ok",
+        rows: [
+          { id: "p1", message_id: "m1", time_created: 1, data: JSON.stringify({ type: "text", text: "hello" }) },
+          { id: "p2", message_id: "m2", time_created: 2, data: JSON.stringify({ type: "text", text: "hi there" }) },
+        ],
+      };
+    };
+    const readSqliteFn = vi.fn(async (_db: string, sql: string): Promise<SqliteResult> => {
+      if (sql.includes("parent_id")) {
+        return { status: "ok", rows: [] };
+      }
+      return sameRows(sql);
+    });
+
+    const detail = await readOpenCodeDetail("ses_short", { dataDir: "/x/oc", readSqliteFn }, undefined);
+    expect(detail).not.toBeNull();
+    expect(detail?.firstPrompt).toBe("hello");
+    expect(detail?.latestMessage).toMatchObject({ role: "assistant", text: "hi there" });
+    expect(detail?.stats.messageCount).toBe(2); // not 4 — windows de-duplicated by id
+    expect(detail?.timeline.filter((i) => i.kind === "message")).toHaveLength(2);
+    expect(detail?.truncated).toBeFalsy();
   });
 });
 
