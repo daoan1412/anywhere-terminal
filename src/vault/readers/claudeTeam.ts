@@ -13,12 +13,7 @@ import { formatEntryId, type VaultSessionDetail, type VaultTimelineItem } from "
 import { formatTeamTurnSessionId } from "./claudeChildIds";
 import { type ClaudeReaderOptions, isSafeSessionId, resolveClaudeSessionPath } from "./claudePaths";
 import { coerceTimestamp, extractUserText, rawUserText } from "./claudeRecords";
-import {
-  classifyClaudeStyleEvents,
-  createBoundedRecordBuffer,
-  finalizeDetail,
-  MAX_TIMELINE_ITEMS,
-} from "./detail";
+import { classifyClaudeStyleEvents, createBoundedRecordBuffer, finalizeDetail, MAX_TIMELINE_ITEMS } from "./detail";
 
 /**
  * The SINGLE team-member predicate (D5, review W2): a record carries a team

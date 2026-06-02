@@ -1,7 +1,7 @@
 // src/pty/processTree.test.ts — Unit tests for the pure parser/BFS + OS wrapper.
 
 import { describe, expect, it, vi } from "vitest";
-import { collectDescendants, descendantPids, parseProcessTable, type ProcessTreeDeps } from "./processTree";
+import { collectDescendants, descendantPids, type ProcessTreeDeps, parseProcessTable } from "./processTree";
 
 function makeDeps(overrides: Partial<ProcessTreeDeps> = {}): ProcessTreeDeps {
   return {

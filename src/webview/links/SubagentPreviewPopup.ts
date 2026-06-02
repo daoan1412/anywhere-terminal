@@ -16,6 +16,7 @@
 // non-expandable; oracle finding #2 / D6).
 
 import type { VaultSessionDetail } from "../../vault/types";
+import type { VaultPreviewGeometry } from "../state/WebviewState";
 import { getAgentIcon } from "../vault/agentIcons";
 import { FloatingPreviewShell } from "../vault/FloatingPreviewShell";
 import { formatStats } from "../vault/format";
@@ -23,7 +24,6 @@ import { ICON_AGENT } from "../vault/icons";
 import { buildPreviewHeader } from "../vault/previewHeader";
 import { type PreviewTimelineBag, renderNestedInto } from "../vault/previewTimeline";
 import { emptyState, loadingBody } from "../vault/renderAtoms";
-import type { VaultPreviewGeometry } from "../state/WebviewState";
 import { computePosition } from "./HoverPreviewPopup";
 
 /** Flat-render bag: every run renders in full (no "Show N more"), and nested

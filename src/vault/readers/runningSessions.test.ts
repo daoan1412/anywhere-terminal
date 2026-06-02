@@ -69,7 +69,11 @@ describe("listRunningClaudeSessions", () => {
   it("skips malformed JSON and non-<pid>.json names without failing the scan", async () => {
     await writePidFile(100, { pid: 100, sessionId: "ok", cwd: "/work/a" });
     await fs.writeFile(path.join(sessionsDir, "300.json"), "{ not json", "utf8");
-    await fs.writeFile(path.join(sessionsDir, "notes.json"), JSON.stringify({ pid: 1, sessionId: "x", cwd: "/y" }), "utf8");
+    await fs.writeFile(
+      path.join(sessionsDir, "notes.json"),
+      JSON.stringify({ pid: 1, sessionId: "x", cwd: "/y" }),
+      "utf8",
+    );
     await fs.writeFile(path.join(sessionsDir, "999.txt"), "ignored", "utf8");
 
     const result = await listRunningClaudeSessions(opts(), aliveDeps([100, 300, 1]));

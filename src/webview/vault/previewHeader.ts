@@ -4,9 +4,9 @@
 // the subagent popup render through ONE builder and cannot drift. Vault-only
 // actions (prev/next-user, resume) render only when their callback is supplied.
 
+import { attachTooltip } from "../ui/Tooltip";
 import type { AgentIcon } from "./agentIcons";
 import { ICON_CLOSE, ICON_MAXIMIZE, ICON_NAV_NEXT, ICON_NAV_PREV, ICON_RESTORE, ICON_RESUME } from "./icons";
-import { attachTooltip } from "../ui/Tooltip";
 
 export interface PreviewHeaderModel {
   /** Brand badge: the resolved icon, or a text fallback when none. */

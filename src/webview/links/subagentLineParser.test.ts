@@ -41,12 +41,22 @@ describe("parseSubagentHeader: agent headers match", () => {
 });
 
 describe("parseSubagentHeader: built-in tools + MCP excluded", () => {
-  it.each(["Read", "Bash", "Edit", "MultiEdit", "Update", "Create", "Write", "Grep", "Glob", "NotebookEdit", "Search", "Task"])(
-    "rejects built-in tool name %s",
-    (tool) => {
-      expect(parseSubagentHeader(`⏺ ${tool}(some args)`)).toBeNull();
-    },
-  );
+  it.each([
+    "Read",
+    "Bash",
+    "Edit",
+    "MultiEdit",
+    "Update",
+    "Create",
+    "Write",
+    "Grep",
+    "Glob",
+    "NotebookEdit",
+    "Search",
+    "Task",
+  ])("rejects built-in tool name %s", (tool) => {
+    expect(parseSubagentHeader(`⏺ ${tool}(some args)`)).toBeNull();
+  });
 
   it("rejects an mcp__ tool name", () => {
     expect(parseSubagentHeader("⏺ mcp__github__create_issue(args)")).toBeNull();

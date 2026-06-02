@@ -24,11 +24,7 @@ export interface VaultRowCallbacks {
  * Single-line CSS-grid row: badge | title | cwd-chip | time, with an icon-only
  * Resume revealed on hover/focus (no fork — D8).
  */
-export function renderRow(
-  entry: VaultSessionEntry,
-  opts: { hideCwd?: boolean },
-  cb: VaultRowCallbacks,
-): HTMLElement {
+export function renderRow(entry: VaultSessionEntry, opts: { hideCwd?: boolean }, cb: VaultRowCallbacks): HTMLElement {
   const row = document.createElement("div");
   row.className = "vault-row";
   row.setAttribute("role", "option");
@@ -194,7 +190,11 @@ export function buildListStatus(args: {
   query: string;
 }): HTMLElement | null {
   if (args.totalCount === 0) {
-    return emptyState(ICON_ARCHIVE, "No AI sessions yet", "Sessions appear here after you run an AI agent in a terminal.");
+    return emptyState(
+      ICON_ARCHIVE,
+      "No AI sessions yet",
+      "Sessions appear here after you run an AI agent in a terminal.",
+    );
   }
   if (args.visibleCount === 0) {
     // Distinct no-match state (NOT the empty state) — actionable hint.

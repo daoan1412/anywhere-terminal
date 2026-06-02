@@ -53,7 +53,12 @@ function childDetailMock(child: Record<string, unknown>) {
       return {
         status: "ok",
         rows: [
-          { id: "p1", message_id: "m1", time_created: 1, data: JSON.stringify({ type: "text", text: "parent prompt" }) },
+          {
+            id: "p1",
+            message_id: "m1",
+            time_created: 1,
+            data: JSON.stringify({ type: "text", text: "parent prompt" }),
+          },
         ],
       };
     }

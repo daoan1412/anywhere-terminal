@@ -699,9 +699,8 @@ export class VaultPanel {
       return null;
     }
     return (
-      Array.from(this.listEl.querySelectorAll<HTMLElement>(".vault-row")).find(
-        (r) => r.dataset.entryId === entryId,
-      ) ?? null
+      Array.from(this.listEl.querySelectorAll<HTMLElement>(".vault-row")).find((r) => r.dataset.entryId === entryId) ??
+      null
     );
   }
 

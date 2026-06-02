@@ -1,8 +1,8 @@
 import * as fs from "node:fs/promises";
 import * as vscode from "vscode";
 import { descendantPids } from "../pty/processTree";
+import { type ResolveClaudeSessionDeps, resolveClaudeSession } from "../session/resolveClaudeSession";
 import type { SessionManager } from "../session/SessionManager";
-import { resolveClaudeSession, type ResolveClaudeSessionDeps } from "../session/resolveClaudeSession";
 import { readTerminalConfig, readTerminalSettings } from "../settings/SettingsReader";
 import type { ThemeChangedMessage, WebViewToExtensionMessage } from "../types/messages";
 import { buildResumeCommandString, type LaunchMode } from "../vault/LaunchBuilder";

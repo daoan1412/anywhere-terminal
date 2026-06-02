@@ -170,7 +170,14 @@ describe("HoverPreviewPopup — showImage (preview-pasted-images)", () => {
     const grip = document.querySelector(".anywhere-hover-preview-resize-grip") as HTMLElement;
     const img = root.querySelector("img.anywhere-hover-preview-image") as HTMLImageElement;
     grip.dispatchEvent(
-      new PointerEvent("pointerdown", { bubbles: true, cancelable: true, button: 0, pointerId: 1, clientX: 200, clientY: 200 }),
+      new PointerEvent("pointerdown", {
+        bubbles: true,
+        cancelable: true,
+        button: 0,
+        pointerId: 1,
+        clientX: 200,
+        clientY: 200,
+      }),
     );
     grip.dispatchEvent(new PointerEvent("pointermove", { pointerId: 1, clientX: 260, clientY: 280 }));
     // Image finishes loading in the middle of the resize.

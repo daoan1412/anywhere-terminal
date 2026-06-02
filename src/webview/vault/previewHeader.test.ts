@@ -55,18 +55,12 @@ describe("buildPreviewHeader: vault shape", () => {
   });
 
   it("falls back to text when no icon is resolved", () => {
-    const { element } = buildPreviewHeader(
-      { badge: { fallbackText: "CX" }, title: "x" },
-      baseCb(),
-    );
+    const { element } = buildPreviewHeader({ badge: { fallbackText: "CX" }, title: "x" }, baseCb());
     expect(element.querySelector(".vault-badge")?.textContent).toBe("CX");
   });
 
   it("reflects maximized state on the maximize button", () => {
-    const { element } = buildPreviewHeader(
-      { badge: {}, title: "x" },
-      baseCb({ isMaximized: () => true }),
-    );
+    const { element } = buildPreviewHeader({ badge: {}, title: "x" }, baseCb({ isMaximized: () => true }));
     const max = element.querySelector(".vault-preview-maximize");
     expect(max?.getAttribute("aria-pressed")).toBe("true");
     expect(max?.getAttribute("aria-label")).toBe("Restore size");
@@ -106,7 +100,12 @@ describe("buildPreviewHeader: subagent shape", () => {
     );
     const row = element.querySelector(".vault-preview-title-row") as HTMLElement;
     const classes = Array.from(row.children).map((c) => c.className.split(" ")[0]);
-    expect(classes).toEqual(["vault-badge", "vault-preview-subagent-agent", "vault-preview-title", "vault-preview-title-actions"]);
+    expect(classes).toEqual([
+      "vault-badge",
+      "vault-preview-subagent-agent",
+      "vault-preview-title",
+      "vault-preview-title-actions",
+    ]);
   });
 });
 
