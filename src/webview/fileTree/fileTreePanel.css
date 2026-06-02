@@ -671,7 +671,7 @@
 }
 .webview-layout.file-tree--bottom .aux-region {
   order: 1;
-  border-top: 1px solid var(--vscode-widget-border, var(--vscode-panel-border, rgba(128, 128, 128, 0.35)));
+  border-top: 1px solid rgba(128, 128, 128, 0.5);
 }
 
 .webview-layout.file-tree--left {
@@ -768,7 +768,7 @@
 .aux-region .sash::before {
   content: "";
   position: absolute;
-  background: var(--vscode-panel-border, var(--vscode-sideBar-border, transparent));
+  background: rgba(128, 128, 128, 0.5);
   transition: background-color 0.1s ease-out;
   pointer-events: none;
 }
