@@ -4,6 +4,12 @@ All notable changes to **AnyWhere Terminal** are documented in this file.
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.17.1] — 2026-06-02
+
+### Fixed
+
+- **Pasted-image hover now previews the image you actually pasted.** The hover preview correlated the `[Image #N]` placeholder to its image by absolute paste order, but AI CLIs restart their `[Image #N]` counter every prompt while the terminal caches images for the whole session — so after your first prompt, hovering a new image showed an earlier one (e.g. paste image 1, send, paste image 2 → hover showed image 1). Placeholders now map to the most-recently pasted images by their position within the current prompt, so the newest tag always previews the newest image.
+
 ## [0.17.0] — 2026-06-02
 
 ### Added
