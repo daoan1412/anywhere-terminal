@@ -50,8 +50,16 @@ export class ImagePlaceholderLinkProvider implements ILinkProvider {
       callback(undefined);
       return;
     }
+    // The placeholders on this row are the current prompt's image batch. The
+    // CLI renumbers per prompt (and Claude shares the counter with text), so a
+    // placeholder's absolute number is not its store position. Map by RELATIVE
+    // rank (ascending number) onto the most-recently pasted images instead, so
+    // the newest placeholder resolves to the newest image. See design D3.
+    const orderedNums = matches.map((m) => m.num).sort((a, b) => a - b);
+    const batchSize = orderedNums.length;
     // xterm buffer ranges are 1-based with an INCLUSIVE end column.
     const links = matches.map((match) => {
+      const rank = orderedNums.indexOf(match.num);
       const link: ILink = {
         text: match.raw,
         range: {
@@ -62,7 +70,7 @@ export class ImagePlaceholderLinkProvider implements ILinkProvider {
         // Preview is hover-only; a click is a no-op (swallow it).
         activate: (event: MouseEvent) => event.preventDefault(),
       };
-      this.hoverController.attachImageHover(link, () => this.store.resolve(match.num));
+      this.hoverController.attachImageHover(link, () => this.store.resolveRecent(rank, batchSize));
       return link;
     });
     callback(links);

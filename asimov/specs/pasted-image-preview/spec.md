@@ -16,7 +16,7 @@ A terminal link provider SHALL treat a substring matching `/\[Image #?(\d+)\]/` 
 
 ### Requirement: Placeholder-to-Image Correlation
 
-Resolving a hovered placeholder with number `N` against a cache of images captured in paste order SHALL apply, in order: (1) if exactly one image is cached, return it; (2) else if an image exists at 1-based paste-order position `N`, return it; (3) else return the most-recently captured image; (4) if the cache is empty, return nothing and show no popup.
+A hovered placeholder's number SHALL NOT be treated as its absolute position in the cache, because the CLI restarts its `[Image #N]` counter each prompt (and Claude shares that counter with text pastes) while the cache indexes cumulatively for the terminal session. Resolution SHALL instead be anchored to recency: given the set of placeholders on the hovered input row (the current prompt's batch) ordered by ascending number, the placeholder at 0-based rank `r` within a batch of size `B` SHALL resolve to the `r`-th of the most-recently captured `B` images (so the highest-numbered placeholder resolves to the newest image). If the cache holds fewer than `B` images or the rank is out of range, resolution SHALL return the most-recently captured image; if the cache is empty, it SHALL return nothing and show no popup.
 
 ### Requirement: Hover Image Preview Rendering
 

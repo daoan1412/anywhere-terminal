@@ -37,36 +37,45 @@ describe("PastedImageStore.add", () => {
   });
 });
 
-describe("PastedImageStore.resolve (D3 rule)", () => {
+describe("PastedImageStore.resolveRecent (D3 — recency-anchored)", () => {
   it("returns null when the cache is empty", () => {
-    expect(new PastedImageStore().resolve(1)).toBeNull();
+    expect(new PastedImageStore().resolveRecent(0, 1)).toBeNull();
   });
 
-  it("returns the sole image regardless of N", () => {
+  it("returns the sole image", () => {
     const store = new PastedImageStore();
     const only = store.add(pngBlob(10));
-    expect(store.resolve(1)).toBe(only);
-    expect(store.resolve(7)).toBe(only);
-    expect(store.resolve(0)).toBe(only);
+    expect(store.resolveRecent(0, 1)).toBe(only);
   });
 
-  it("returns the image at paste position N when multiple are cached", () => {
+  it("maps a single placeholder to the MOST-RECENT image, not position 1", () => {
+    // Regression: copy img1 → paste (submit) → copy img2 → paste. The CLI shows
+    // `[Image #1]` again (counter reset), but the store is cumulative. The new
+    // prompt's lone placeholder must resolve to img2 (newest), not img1.
     const store = new PastedImageStore();
-    const first = store.add(pngBlob(1));
-    const second = store.add(pngBlob(2));
-    const third = store.add(pngBlob(3));
-    expect(store.resolve(1)).toBe(first);
-    expect(store.resolve(2)).toBe(second);
-    expect(store.resolve(3)).toBe(third);
+    store.add(pngBlob(1)); // img1, pasted in a prior prompt
+    const img2 = store.add(pngBlob(2)); // img2, pasted in the current prompt
+    // batchSize 1 = the current row shows one placeholder; rank 0 = its first.
+    expect(store.resolveRecent(0, 1)).toBe(img2);
   });
 
-  it("falls back to the most-recent image when N is out of range", () => {
+  it("maps a multi-image batch onto the most-recent images in order", () => {
+    const store = new PastedImageStore();
+    store.add(pngBlob(1)); // stale, from a prior prompt
+    const img2 = store.add(pngBlob(2)); // current prompt #1
+    const img3 = store.add(pngBlob(3)); // current prompt #2
+    // Current row shows two placeholders (batchSize 2).
+    expect(store.resolveRecent(0, 2)).toBe(img2); // lower number → older of batch
+    expect(store.resolveRecent(1, 2)).toBe(img3); // higher number → newest
+  });
+
+  it("falls back to the most-recent image when rank exceeds the cache", () => {
     const store = new PastedImageStore();
     store.add(pngBlob(1));
     const last = store.add(pngBlob(2));
-    expect(store.resolve(99)).toBe(last);
-    expect(store.resolve(0)).toBe(last);
-    expect(store.resolve(Number.NaN)).toBe(last);
+    // batchSize larger than the cache (e.g. a paste wasn't captured): clamp.
+    expect(store.resolveRecent(5, 9)).toBe(last);
+    expect(store.resolveRecent(-1, 0)).toBe(last);
   });
 });
 
@@ -79,7 +88,7 @@ describe("PastedImageStore.dispose", () => {
     expect(revokeSpy).toHaveBeenCalledWith("blob:mock/1");
     expect(revokeSpy).toHaveBeenCalledWith("blob:mock/2");
     expect(revokeSpy).toHaveBeenCalledTimes(2);
-    expect(store.resolve(1)).toBeNull();
+    expect(store.resolveRecent(0, 1)).toBeNull();
   });
 
   it("is idempotent — a second dispose revokes nothing more", () => {

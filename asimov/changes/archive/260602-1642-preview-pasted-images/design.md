@@ -16,11 +16,13 @@ New module `src/webview/links/PastedImageStore.ts`. Mirrors the `hoverController
 
 The store assigns a **1-based paste-order index** and creates an object URL per image. `dispose()` calls `URL.revokeObjectURL` on every cached URL and clears the map — this is the explicit disposal the body-overlay-disposal memory demands (must fire on split + tab close, not only root close).
 
-### D3: Recency-first correlation rule
+### D3: Recency-anchored correlation rule
 
-Placeholder numbering is not reliable across tools (Claude shares a monotonic counter with text pastes; OpenCode/Codex reset and renumber per prompt — discovery §1). `resolve(n)` therefore applies: sole-image → image-at-position-`n` → most-recent → none (see spec "Placeholder-to-Image Correlation"). This is exact for the dominant flow (paste one image, hover it immediately) and degrades predictably for multi-image/multi-prompt.
+Placeholder numbering is not reliable across tools (Claude shares a monotonic counter with text pastes; OpenCode/Codex reset and renumber per prompt — discovery §1). The store, however, indexes images **cumulatively for the whole terminal session**. So a placeholder's absolute number is NOT its store position: after the first prompt is submitted the CLI's counter resets, and an absolute-position lookup maps `#1` to the *first image ever pasted* rather than the one just pasted.
 
-Rejected: parallel monotonic counter (drifts when Claude counts text pastes); reading CLI on-disk caches by `N` (Claude-only, cross-boundary fs + session discovery — Option A).
+**Correction (post-release bugfix):** the original `resolve(n)` did sole → position-`n` → most-recent, which exhibited exactly this stale-image bug (paste img1, submit, paste img2 → hovering the new `[Image #1]` showed img1). Replaced by a recency-anchored mapping owned jointly by the provider and store: the link provider parses *all* placeholders on the hovered row (= the current prompt's image batch), orders them ascending by number, and for each computes its 0-based `rank` and the `batchSize`. `store.resolveRecent(rank, batchSize)` maps that batch onto the most-recently captured `batchSize` images — the highest-numbered placeholder always resolves to the newest image. This is exact for the dominant flow (paste one image, hover it), correct for multi-image-in-one-prompt, and ignores absolute numbers entirely (so Claude's shared counter no longer matters — only relative order + count). Degrades to most-recent when the batch exceeds the cache (a missed capture) or the input wraps across rows (single-row provider undercounts the batch).
+
+Rejected: absolute-position lookup (the released bug); parallel monotonic counter (drifts when Claude counts text pastes); reading CLI on-disk caches by `N` (Claude-only, cross-boundary fs + session discovery — Option A).
 
 ### D4: Reuse the hover controller + popup via extracted shared scaffolds (no IPC for images)
 
@@ -59,9 +61,9 @@ export interface PastedImagePreview {
   index: number;      // 1-based paste order
 }
 export class PastedImageStore {
-  add(blob: Blob): PastedImagePreview;          // assigns next index, creates object URL
-  resolve(n: number): PastedImagePreview | null; // D3 rule
-  dispose(): void;                               // revoke all URLs + clear
+  add(blob: Blob): PastedImagePreview;                            // assigns next index, creates object URL
+  resolveRecent(rank: number, batchSize: number): PastedImagePreview | null; // D3 recency-anchored
+  dispose(): void;                                                // revoke all URLs + clear
 }
 
 // src/webview/links/imagePlaceholderParser.ts

@@ -37,19 +37,34 @@ export class PastedImageStore {
   }
 
   /**
-   * Resolve placeholder number `n` to a cached image (D3): sole image →
-   * image at paste position `n` → most-recent → null. The sole-image and
-   * recency fallbacks absorb the cross-CLI numbering differences (Claude
-   * shares its counter with text pastes; OpenCode/Codex reset per prompt).
+   * Resolve a placeholder to a cached image, anchored to recency (D3).
+   *
+   * A placeholder's number is NOT its position in this store: the CLI restarts
+   * its `[Image #N]` counter every prompt (and Claude even shares the counter
+   * with text pastes), while this store indexes cumulatively for the whole
+   * terminal session. Using the absolute number would always map `#1` to the
+   * first image ever pasted — the wrong image after the first prompt.
+   *
+   * Instead the caller passes the placeholder's `rank` (0-based, ascending by
+   * number) within the current prompt's `batchSize` placeholders — the set the
+   * link provider parsed off the input row. Those map onto the most-recently
+   * pasted `batchSize` images in order, so the newest placeholder always
+   * resolves to the newest image. Out-of-range → most-recent.
+   *
+   * @param rank      0-based position within the current row's ascending batch.
+   * @param batchSize count of placeholders on the current input row (≥ 1).
    */
-  resolve(n: number): PastedImagePreview | null {
-    if (this.images.length === 0) {
+  resolveRecent(rank: number, batchSize: number): PastedImagePreview | null {
+    const len = this.images.length;
+    if (len === 0) {
       return null;
     }
-    if (this.images.length === 1) {
-      return this.images[0];
+    if (rank < 0) {
+      return this.images[len - 1];
     }
-    return this.images[n - 1] ?? this.images[this.images.length - 1];
+    const batch = batchSize > 0 ? batchSize : 1;
+    const start = Math.max(0, len - batch);
+    return this.images[start + rank] ?? this.images[len - 1];
   }
 
   /** Revoke every object URL and clear the cache. Idempotent. */
