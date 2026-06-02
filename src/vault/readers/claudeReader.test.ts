@@ -197,7 +197,7 @@ describe("workflow nesting (2_1 / 2_2 / 2_3)", () => {
     const stubs = await listClaudeWorkflowStubs("wfparent", { configDir: WF_FIXTURE_ROOT });
     expect(stubs).toHaveLength(1);
     expect(stubs[0].entryId).toBe("claude:wfparent:workflow:wf_test123");
-    expect(stubs[0].description).toBe("Workflow: design-audit · 2 agents · completed");
+    expect(stubs[0].description).toBe("Workflow: design-audit · completed");
     expect(stubs[0].isGroup).toBe(true);
     expect(stubs[0].timestamp).toBe(1780072409110); // startTime numeric string coerced
   });
@@ -236,6 +236,90 @@ describe("workflow nesting (2_1 / 2_2 / 2_3)", () => {
 
   it("2_3: rejects a workflow-agent id with a traversal stem", async () => {
     expect(await readClaudeDetail("wfparent:wfagent:wf_test123:../escape", { configDir: WF_FIXTURE_ROOT })).toBeNull();
+  });
+});
+
+describe("workflow board from manifest workflowProgress (1_2)", () => {
+  it("maps workflowProgress to a single workflowBoard item with phases, agents, and meta scalars", async () => {
+    const detail = await readClaudeDetail("wfboard:workflow:wf_board1", { configDir: WF_FIXTURE_ROOT });
+    expect(detail).not.toBeNull();
+    expect(detail?.entryId).toBe("claude:wfboard:workflow:wf_board1");
+    const items = detail?.timeline ?? [];
+    expect(items.map((i) => i.kind)).toEqual(["workflowBoard"]);
+    const board = items[0];
+    expect(board.kind).toBe("workflowBoard");
+    if (board.kind !== "workflowBoard") {
+      return;
+    }
+    expect(board.wfId).toBe("wf_board1"); // stable key for selection persistence
+    expect(board.workflowName).toBe("design-board");
+    expect(board.summary).toBe("Audit and build the board");
+    expect(board.status).toBe("completed");
+    expect(board.agentCount).toBe(2);
+    expect(board.durationMs).toBe(5000);
+    expect(board.totalTokens).toBe(12345);
+    expect(board.totalToolCalls).toBe(7);
+    expect(board.model).toBe("claude-opus-4-8[1m]");
+    expect(board.timestamp).toBe(1780072409110);
+    // phases in index order
+    expect(board.phases.map((p) => [p.index, p.title])).toEqual([
+      [1, "Plan"],
+      [2, "Build"],
+    ]);
+    // agents in progress order, with per-agent stats
+    expect(board.agents.map((a) => a.label)).toEqual(["scout", "writer"]);
+    expect(board.agents[0]).toMatchObject({ phaseIndex: 1, model: "claude-opus-4-8[1m]", tokens: 5000, toolCalls: 3 });
+    // subagentCount mirrors the agent rows
+    expect(detail?.stats.subagentCount).toBe(2);
+  });
+
+  it("resolves phase detail positionally without an off-by-one (1-based index → 0-based phases[])", async () => {
+    const detail = await readClaudeDetail("wfboard:workflow:wf_board1", { configDir: WF_FIXTURE_ROOT });
+    const board = detail?.timeline[0];
+    if (board?.kind !== "workflowBoard") {
+      throw new Error("expected a workflowBoard item");
+    }
+    const byIndex = new Map(board.phases.map((p) => [p.index, p.detail]));
+    expect(byIndex.get(1)).toBe("plan phase detail"); // phases[0], NOT phases[1]
+    expect(byIndex.get(2)).toBe("build phase detail"); // phases[1]
+  });
+
+  it("sets a drill-down entryId only for an agent whose transcript file exists", async () => {
+    const detail = await readClaudeDetail("wfboard:workflow:wf_board1", { configDir: WF_FIXTURE_ROOT });
+    const board = detail?.timeline[0];
+    if (board?.kind !== "workflowBoard") {
+      throw new Error("expected a workflowBoard item");
+    }
+    const scout = board.agents.find((a) => a.label === "scout");
+    const writer = board.agents.find((a) => a.label === "writer");
+    expect(scout?.entryId).toBe("claude:wfboard:wfagent:wf_board1:agent-aaa111"); // file present
+    expect(writer?.entryId).toBeUndefined(); // agent-bbb222.jsonl absent → non-clickable
+  });
+
+  it("falls back to the first-prompt list when workflowProgress is an empty array", async () => {
+    const detail = await readClaudeDetail("wfempty:workflow:wf_empty1", { configDir: WF_FIXTURE_ROOT });
+    expect(detail).not.toBeNull();
+    const kinds = (detail?.timeline ?? []).map((i) => i.kind);
+    expect(kinds).not.toContain("workflowBoard");
+    expect(kinds).toEqual(["subagentSession"]);
+    expect(detail?.firstPrompt).toBe("A run whose manifest has an empty workflowProgress");
+  });
+
+  it("inlines a progress-bearing run as a self-collapsing board in the PARENT timeline (one layer, #1)", async () => {
+    const detail = await readClaudeDetail("wfboard", { configDir: WF_FIXTURE_ROOT });
+    expect(detail).not.toBeNull();
+    const timeline = detail?.timeline ?? [];
+    // The board renders directly in the parent timeline (it folds itself in the webview)…
+    const board = timeline.find((i) => i.kind === "workflowBoard");
+    expect(board?.kind).toBe("workflowBoard");
+    if (board?.kind === "workflowBoard") {
+      expect(board.wfId).toBe("wf_board1");
+    }
+    // …with NO outer collapsible "Workflow:" subagentSession wrapper (no extra layer).
+    const wrapped = timeline.some((i) => i.kind === "subagentSession" && i.title.startsWith("Workflow:"));
+    expect(wrapped).toBe(false);
+    // A progress-bearing run yields no fallback group stub.
+    expect(await listClaudeWorkflowStubs("wfboard", { configDir: WF_FIXTURE_ROOT })).toEqual([]);
   });
 });
 

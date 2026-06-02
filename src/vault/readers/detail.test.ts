@@ -292,6 +292,35 @@ describe("classifyClaudeStyleEvents", () => {
     ]);
   });
 
+  it("suppresses a Workflow tool_use but keeps sibling text/tool blocks in the same message (D5)", () => {
+    const records: Rec[] = [
+      userText("kick off the workflow"),
+      {
+        type: "assistant",
+        message: {
+          role: "assistant",
+          content: [
+            { type: "text", text: "running the board workflow" },
+            { type: "tool_use", name: "Workflow", input: { script: "export const meta = {}".repeat(500) } },
+            { type: "tool_use", name: "Bash", input: { command: "echo hi" } },
+          ],
+        },
+        timestamp: "2026-05-01T01:00:00.000Z",
+      },
+    ];
+    const out = classifyClaudeStyleEvents(records);
+    // The Workflow block produces no timeline item and is not counted as a tool…
+    expect(out.timeline.some((i) => i.kind === "tool" && i.tool === "Workflow")).toBe(false);
+    expect(out.stats.toolCount).toBe(1); // only the Bash call
+    // …while the sibling text + Bash blocks in the SAME message survive.
+    expect(
+      out.timeline.some(
+        (i) => i.kind === "message" && i.role === "assistant" && i.text === "running the board workflow",
+      ),
+    ).toBe(true);
+    expect(out.timeline.some((i) => i.kind === "tool" && i.tool === "Bash" && i.detail === "echo hi")).toBe(true);
+  });
+
   it("skips isMeta records, the caveat banner, and bare commands when picking the first prompt", () => {
     const records: Rec[] = [
       userText("<local-command-caveat>Caveat: …</local-command-caveat>", { isMeta: true }),

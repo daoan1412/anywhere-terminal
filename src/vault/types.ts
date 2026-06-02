@@ -215,6 +215,40 @@ export type VaultTimelineItem =
       text: string;
       timestamp?: number;
     }
+  /**
+   * A Claude `/workflow` run, rebuilt from the run manifest's `workflowProgress`
+   * (render-vault-workflow-board D1). The sole representation of a run in the
+   * timeline — the raw `Workflow` tool call is suppressed (D5). Scalars/ids pass
+   * through raw (the webview formats them); each agent's `entryId` is a `:wfagent:`
+   * drill-down id, present ONLY when that agent's transcript file exists, and the
+   * board reuses the shared nested-detail path to render it (D3). No per-agent
+   * run-state / per-phase done-total: sessions are post-hoc, not live (D6).
+   */
+  | {
+      kind: "workflowBoard";
+      /** The run id (`wf_*`) — a stable key the webview uses to persist this board's
+       *  ephemeral selection (open phases + open agent) across a preview re-render. */
+      wfId: string;
+      workflowName: string;
+      summary?: string;
+      status?: string;
+      agentCount?: number;
+      durationMs?: number;
+      totalTokens?: number;
+      totalToolCalls?: number;
+      model?: string;
+      phases: { index: number; title: string; detail?: string }[];
+      agents: {
+        label: string;
+        phaseIndex: number;
+        entryId?: string;
+        model?: string;
+        tokens?: number;
+        toolCalls?: number;
+        durationMs?: number;
+      }[];
+      timestamp?: number;
+    }
   | VaultActivityStep;
 
 /**

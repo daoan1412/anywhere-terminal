@@ -1,0 +1,2 @@
+{"type":"user","isSidechain":true,"message":{"role":"user","content":"do the only task"},"timestamp":"2026-05-29T19:01:00.000Z"}
+{"type":"assistant","isSidechain":true,"message":{"role":"assistant","content":[{"type":"text","text":"task complete"}]},"timestamp":"2026-05-29T19:01:30.000Z"}

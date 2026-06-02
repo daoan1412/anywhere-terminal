@@ -1355,6 +1355,185 @@ describe("VaultPanel session preview (redesign 5_2)", () => {
     );
   });
 
+  it("2_4: a workflow board reuses the session-detail preview per agent; a late switch is inert", () => {
+    const host = createHost();
+    const posted: { type: string; entryId?: string }[] = [];
+    const panel = new VaultPanel({ host, postMessage: (m) => posted.push(m), getInitialCollapsed: () => false });
+    panel.render(result([entry({ id: "claude:wfp", agent: "claude" })]));
+    host.querySelector<HTMLElement>(".vault-row")?.click();
+
+    // Root detail: the run shows as one group subagentSession node (the parent timeline form).
+    panel.handleSessionDetailResponse({
+      type: "vaultSessionDetailResponse",
+      entryId: "claude:wfp",
+      detail: detail({
+        entryId: "claude:wfp",
+        timeline: [{ kind: "subagentSession", entryId: "claude:wfp:workflow:wf1", title: "Workflow: design-board" }],
+      }),
+    });
+
+    // Expanding the group lazily requests the workflow group id.
+    host.querySelector<HTMLButtonElement>(".vault-preview-subagent-head")?.click();
+    expect(posted).toContainEqual({ type: "requestVaultSessionDetail", entryId: "claude:wfp:workflow:wf1" });
+
+    // The group resolves to a single workflowBoard item → the board mounts nested.
+    const AID = "claude:wfp:wfagent:wf1:agent-aaa";
+    const BID = "claude:wfp:wfagent:wf1:agent-bbb";
+    panel.handleSessionDetailResponse({
+      type: "vaultSessionDetailResponse",
+      entryId: "claude:wfp:workflow:wf1",
+      detail: detail({
+        entryId: "claude:wfp:workflow:wf1",
+        timeline: [
+          {
+            kind: "workflowBoard",
+            wfId: "wf1",
+            workflowName: "design-board",
+            phases: [{ index: 1, title: "Plan" }],
+            agents: [
+              { label: "alpha", phaseIndex: 1, entryId: AID },
+              { label: "beta", phaseIndex: 1, entryId: BID },
+            ],
+          },
+        ],
+      }),
+    });
+    expect(host.querySelector(".vault-preview-subagent-body .vault-wfboard")).not.toBeNull();
+
+    // The board folds itself — expand it, then expand the phase → its two agent leaves.
+    host.querySelector<HTMLButtonElement>(".vault-wfboard-header")?.click();
+    host.querySelector<HTMLButtonElement>(".vault-wfboard-phase-head")?.click();
+    const leaves = () => host.querySelectorAll<HTMLButtonElement>(".vault-wfboard-leaf");
+    expect(leaves()).toHaveLength(2);
+
+    // Rapid switch: select alpha, then beta before alpha resolves. Each posts a
+    // detail request through the REAL PreviewController populateNested/pendingNested.
+    leaves()[0].click();
+    leaves()[1].click();
+    expect(posted).toContainEqual({ type: "requestVaultSessionDetail", entryId: AID });
+    expect(posted).toContainEqual({ type: "requestVaultSessionDetail", entryId: BID });
+
+    // beta resolves → its transcript renders in the visible right pane.
+    panel.handleSessionDetailResponse({
+      type: "vaultSessionDetailResponse",
+      entryId: BID,
+      detail: detail({ entryId: BID, timeline: [{ kind: "message", role: "assistant", text: "beta transcript" }] }),
+    });
+    expect(host.querySelector(".vault-wfboard-detail-body")?.textContent).toContain("beta transcript");
+
+    // alpha's LATE reply lands on its orphaned (detached) container — the visible
+    // pane still shows beta, never overwritten (D4).
+    panel.handleSessionDetailResponse({
+      type: "vaultSessionDetailResponse",
+      entryId: AID,
+      detail: detail({ entryId: AID, timeline: [{ kind: "message", role: "assistant", text: "alpha transcript" }] }),
+    });
+    const visible = host.querySelector(".vault-wfboard-detail-body")?.textContent ?? "";
+    expect(visible).toContain("beta transcript");
+    expect(visible).not.toContain("alpha transcript");
+
+    // Re-selecting alpha hits the cache (its late detail was stored, not lost).
+    leaves()[0].click();
+    expect(host.querySelector(".vault-wfboard-detail-body")?.textContent).toContain("alpha transcript");
+  });
+
+  it("2_4b: expanding a run inside an open agent transcript keeps the agent open (issue 4)", () => {
+    const host = createHost();
+    const panel = new VaultPanel({ host, postMessage: () => {}, getInitialCollapsed: () => false });
+    panel.render(result([entry({ id: "claude:wfp2", agent: "claude" })]));
+    host.querySelector<HTMLElement>(".vault-row")?.click();
+
+    // Root detail is the board itself (the run-expansion rerender rebuilds the body).
+    const AID = "claude:wfp2:wfagent:wf9:agent-aaa";
+    panel.handleSessionDetailResponse({
+      type: "vaultSessionDetailResponse",
+      entryId: "claude:wfp2",
+      detail: detail({
+        entryId: "claude:wfp2",
+        timeline: [
+          {
+            kind: "workflowBoard",
+            wfId: "wf9",
+            workflowName: "wf",
+            phases: [{ index: 1, title: "P" }],
+            agents: [{ label: "a", phaseIndex: 1, entryId: AID }],
+          },
+        ],
+      }),
+    });
+    host.querySelector<HTMLButtonElement>(".vault-wfboard-header")?.click(); // expand the board
+    host.querySelector<HTMLButtonElement>(".vault-wfboard-phase-head")?.click();
+    host.querySelector<HTMLButtonElement>(".vault-wfboard-leaf")?.click();
+
+    // The agent's transcript has a 5-step run → capped behind a "Show 2 more steps".
+    panel.handleSessionDetailResponse({
+      type: "vaultSessionDetailResponse",
+      entryId: AID,
+      detail: detail({
+        entryId: AID,
+        timeline: [1, 2, 3, 4, 5].map((n) => ({ kind: "tool", tool: "Bash", detail: `step ${n}` })),
+      }),
+    });
+    expect(host.querySelector(".vault-wfboard-detail-head")?.textContent).toBe("a");
+    const expandBtn = host.querySelector<HTMLButtonElement>(".vault-wfboard-detail-body .vault-preview-expand");
+    expect(expandBtn).not.toBeNull();
+
+    // Before the fix this rerender rebuilt the board to its hint, hiding the agent.
+    expandBtn?.click();
+    expect(host.querySelector(".vault-wfboard-detail-head")?.textContent).toBe("a"); // still open
+    expect(host.querySelector(".vault-wfboard-empty")).toBeNull(); // not reset to the hint
+    expect(host.querySelector(".vault-wfboard-leaf.sel")?.textContent).toBe("a");
+    // Fully expanded now (no remaining "Show N more").
+    expect(host.querySelectorAll(".vault-wfboard-detail-body .vault-preview-expand")).toHaveLength(0);
+  });
+
+  it("2_4c: scrolls an agent's transcript pane to the last message on open (#3)", () => {
+    const host = createHost();
+    const panel = new VaultPanel({ host, postMessage: () => {}, getInitialCollapsed: () => false });
+    panel.render(result([entry({ id: "claude:wfp3", agent: "claude" })]));
+    host.querySelector<HTMLElement>(".vault-row")?.click();
+    const AID = "claude:wfp3:wfagent:wfx:agent-aaa";
+    panel.handleSessionDetailResponse({
+      type: "vaultSessionDetailResponse",
+      entryId: "claude:wfp3",
+      detail: detail({
+        entryId: "claude:wfp3",
+        timeline: [
+          {
+            kind: "workflowBoard",
+            wfId: "wfx",
+            workflowName: "wf",
+            phases: [{ index: 1, title: "P" }],
+            agents: [{ label: "a", phaseIndex: 1, entryId: AID }],
+          },
+        ],
+      }),
+    });
+    // jsdom has no layout, so fake the pane's scroll metrics to observe the jump.
+    const pane = host.querySelector<HTMLElement>(".vault-wfboard-right");
+    if (!pane) {
+      throw new Error("missing right pane");
+    }
+    let scrolledTo = -1;
+    Object.defineProperty(pane, "scrollHeight", { value: 777, configurable: true });
+    Object.defineProperty(pane, "scrollTop", {
+      configurable: true,
+      get: () => scrolledTo,
+      set: (v: number) => {
+        scrolledTo = v;
+      },
+    });
+    host.querySelector<HTMLButtonElement>(".vault-wfboard-header")?.click(); // expand the board
+    host.querySelector<HTMLButtonElement>(".vault-wfboard-phase-head")?.click();
+    host.querySelector<HTMLButtonElement>(".vault-wfboard-leaf")?.click(); // posts the agent request
+    panel.handleSessionDetailResponse({
+      type: "vaultSessionDetailResponse",
+      entryId: AID,
+      detail: detail({ entryId: AID, timeline: [{ kind: "message", role: "assistant", text: "the conclusion" }] }),
+    });
+    expect(scrolledTo).toBe(777); // jumped to the bottom (last message)
+  });
+
   it("caps + pins the conclusion inside a nested subagent transcript (like the root)", () => {
     const host = createHost();
     const panel = new VaultPanel({ host, postMessage: () => {}, getInitialCollapsed: () => false });
@@ -1399,31 +1578,28 @@ describe("VaultPanel session preview (redesign 5_2)", () => {
     const panel = new VaultPanel({ host, postMessage: (m) => posted.push(m), getInitialCollapsed: () => false });
     panel.render(result([entry({ id: "opencode:a", agent: "opencode" })]));
     host.querySelector<HTMLElement>(".vault-row")?.click();
-    // Root references the SAME child entryId in two blocks, with a capped run between
-    // them (4 tools → "Show 1 more") so expanding the run forces a re-render.
-    panel.handleSessionDetailResponse({
-      type: "vaultSessionDetailResponse",
-      entryId: "opencode:a",
-      detail: detail({
+    // Root references the SAME child entryId in two blocks. `truncated` enables a
+    // load-more rebuild — the re-render that re-renders BOTH blocks (expansion state
+    // is keyed by entryId, so both auto-populate the one pending id).
+    const dup = () =>
+      detail({
         entryId: "opencode:a",
+        truncated: true,
         timeline: [
           { kind: "subagentSession", entryId: "opencode:ses_dup", title: "Sub A", firstMessage: "p" },
-          { kind: "tool", tool: "Bash", detail: "t1" },
-          { kind: "tool", tool: "Bash", detail: "t2" },
-          { kind: "tool", tool: "Bash", detail: "t3" },
-          { kind: "tool", tool: "Bash", detail: "t4" },
           { kind: "subagentSession", entryId: "opencode:ses_dup", title: "Sub B", firstMessage: "p" },
         ],
-      }),
-    });
+      });
+    panel.handleSessionDetailResponse({ type: "vaultSessionDetailResponse", entryId: "opencode:a", detail: dup() });
     // Expand the first block → one child request in flight, its body added to the Set.
     host.querySelectorAll<HTMLButtonElement>(".vault-preview-subagent-head")[0]?.click();
     const childReqs = (): number =>
       posted.filter((m) => m.type === "requestVaultSessionDetail" && m.entryId === "opencode:ses_dup").length;
     expect(childReqs()).toBe(1);
-    // Expanding the run re-renders; both blocks now auto-populate the SAME pending id
-    // (no second request — already in flight).
-    host.querySelector<HTMLButtonElement>(".vault-preview-expand")?.click();
+    // A load-more rebuild re-renders both blocks; both share the expanded entryId →
+    // both auto-populate the SAME pending id (no second request — already in flight).
+    host.querySelector<HTMLButtonElement>(".vault-preview-loadmore")?.click();
+    panel.handleSessionDetailResponse({ type: "vaultSessionDetailResponse", entryId: "opencode:a", detail: dup() });
     expect(childReqs()).toBe(1);
 
     panel.handleSessionDetailResponse({

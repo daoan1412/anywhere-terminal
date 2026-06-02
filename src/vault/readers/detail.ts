@@ -490,6 +490,9 @@ export function classifyClaudeStyleEvents(records: Rec[], opts: ClassifyOptions 
               activity.push(step);
               timeline.push(step);
             }
+          } else if (name === "Workflow") {
+            // Suppressed (D5): the run is surfaced as a `workflowBoard` item, so drop
+            // the raw tool_use here — don't render it or count it as a tool call.
           } else {
             toolCount++;
             const label = toolLabel(name, input);

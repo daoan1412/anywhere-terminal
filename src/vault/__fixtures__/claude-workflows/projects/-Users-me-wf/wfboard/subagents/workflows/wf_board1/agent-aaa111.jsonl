@@ -1,0 +1,2 @@
+{"type":"user","isSidechain":true,"message":{"role":"user","content":"scout the plan phase"},"timestamp":"2026-05-29T18:01:00.000Z"}
+{"type":"assistant","isSidechain":true,"message":{"role":"assistant","content":[{"type":"text","text":"plan scouted, 2 files"}]},"timestamp":"2026-05-29T18:01:30.000Z"}

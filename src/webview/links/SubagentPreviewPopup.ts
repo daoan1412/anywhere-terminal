@@ -34,6 +34,8 @@ const FLAT_BAG: PreviewTimelineBag = {
   isNestedExpanded: () => false,
   setNestedExpanded: () => {},
   populateNested: () => {},
+  getBoardSelection: () => undefined,
+  setBoardSelection: () => {},
 };
 
 /** Human copy for each error/empty marker the host can reply with. */

@@ -9,12 +9,28 @@ import { formatRelativeTime } from "./format";
 import { ICON_CHEVRON_DOWN } from "./icons";
 import { teammateAccent } from "./previewColors";
 import { activityStep, previewMessage, thinkingBlock } from "./renderAtoms";
+import { renderWorkflowBoard } from "./workflowBoard";
 
 /** A prominent node that breaks the surrounding AI-output run and renders directly
  *  (nested subagent/workflow blocks + threaded/inline teammate communications). A
  *  new prominent kind is added here ONCE, not in both run-grouping conditions. */
 function breaksRun(item: VaultTimelineItem): boolean {
-  return item.kind === "subagentSession" || item.kind === "teammateTurn" || item.kind === "teammateMessage";
+  return (
+    item.kind === "subagentSession" ||
+    item.kind === "teammateTurn" ||
+    item.kind === "teammateMessage" ||
+    item.kind === "workflowBoard"
+  );
+}
+
+/** A workflow board's ephemeral state, persisted by the owner so it survives a
+ *  preview re-render (e.g. a load-more rebuild). `expanded` is whether the board's
+ *  body (panes) is unfolded; `open` lists the expanded phase keys (`NaN` for the
+ *  "Other" bucket); `agentEntryId` is the open agent's transcript id, or null. */
+export interface BoardSelection {
+  expanded: boolean;
+  open: number[];
+  agentEntryId: string | null;
 }
 
 export interface PreviewTimelineBag {
@@ -28,6 +44,11 @@ export interface PreviewTimelineBag {
   setNestedExpanded: (entryId: string, expanded: boolean) => void;
   /** Fill a nested block's body from cache, or lazily fetch the child detail. */
   populateNested: (entryId: string, body: HTMLElement) => void;
+  /** Read a workflow board's persisted selection (keyed by run id), or undefined. */
+  getBoardSelection: (boardKey: string) => BoardSelection | undefined;
+  /** Persist a workflow board's selection (keyed by run id). Records only — must
+   *  NOT trigger a re-render (the board updates its own DOM locally, D4). */
+  setBoardSelection: (boardKey: string, selection: BoardSelection) => void;
 }
 
 /**
@@ -112,6 +133,9 @@ function renderTimelineItem(item: VaultTimelineItem, bag: PreviewTimelineBag): H
   if (item.kind === "teammateMessage") {
     return renderTeammateMessage(item);
   }
+  if (item.kind === "workflowBoard") {
+    return renderWorkflowBoard(item, bag);
+  }
   return activityStep(item);
 }
 
@@ -142,12 +166,24 @@ function renderRun(body: HTMLElement, run: VaultTimelineItem[], key: string, bag
   btn.className = "vault-preview-expand";
   btn.textContent = `Show ${hidden} more step${hidden === 1 ? "" : "s"}`;
   btn.title = "Show every step in this run";
-  btn.addEventListener("click", () => bag.onExpandRun(key));
   body.appendChild(btn);
-
-  if (pin) {
-    body.appendChild(renderTimelineItem(last, bag));
+  const pinned = pin ? renderTimelineItem(last, bag) : null;
+  if (pinned) {
+    body.appendChild(pinned);
   }
+
+  btn.addEventListener("click", () => {
+    // Reveal the hidden items right where the button sits — no preview rebuild, so
+    // the items above and the (possibly nested) scroll position stay put (#4). The
+    // revealed slice includes the conclusion at its natural index, so drop the pin.
+    const frag = document.createDocumentFragment();
+    for (let k = headCount; k < run.length; k++) {
+      frag.appendChild(renderTimelineItem(run[k], bag));
+    }
+    btn.replaceWith(frag);
+    pinned?.remove();
+    bag.onExpandRun(key); // record state so a later full rebuild stays expanded
+  });
 }
 
 /** A team-member communication turn (D13): a color-highlighted, click-to-open node

@@ -1,0 +1,9 @@
+{
+  "runId": "wf_empty1",
+  "workflowName": "empty-progress",
+  "agentCount": 1,
+  "status": "completed",
+  "startTime": "1780076000000",
+  "summary": "A run whose manifest has an empty workflowProgress",
+  "workflowProgress": []
+}

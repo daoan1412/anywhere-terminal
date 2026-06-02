@@ -15,7 +15,7 @@ import { getAgentAccent, getAgentIcon, VAULT_ACCENTS } from "./agentIcons";
 import { FloatingPreviewShell } from "./FloatingPreviewShell";
 import { agentLabel } from "./format";
 import { buildPreviewHeader as buildPreviewHeaderDom } from "./previewHeader";
-import { type PreviewTimelineBag, renderNestedInto, renderTimelineInto } from "./previewTimeline";
+import { type BoardSelection, type PreviewTimelineBag, renderNestedInto, renderTimelineInto } from "./previewTimeline";
 import { buildPreviewMeta, loadingBody } from "./renderAtoms";
 import type { VaultPanelPostMessage } from "./VaultPanel";
 
@@ -72,6 +72,11 @@ export class PreviewController {
   /** Child entryIds whose cached detail is mid-render — breaks a self-referential
    *  cycle (a child that nests its own id) before it overflows the stack. */
   private readonly renderingNested = new Set<string>();
+  /** Per-workflow-board selection (open phases + open agent), keyed by run id.
+   *  A board's selection is local DOM, so a re-render would lose it — persisting it
+   *  here lets the rebuilt board reopen the same agent (and its now-expanded run).
+   *  Reset when the preview closes. */
+  private readonly boardSelections = new Map<string, BoardSelection>();
 
   constructor(deps: PreviewControllerDeps) {
     this.deps = deps;
@@ -87,9 +92,11 @@ export class PreviewController {
     });
     this.timelineBag = {
       isRunExpanded: (key) => this.expandedRuns.has(key),
+      // Record only — `renderRun` reveals the hidden items in place (no rebuild), so
+      // the scroll position and any nested board state are untouched (#4). The flag
+      // is read on a later full rebuild (load-more / board restore) to stay expanded.
       onExpandRun: (key) => {
         this.expandedRuns.add(key);
-        this.rerenderActiveDetail();
       },
       isNestedExpanded: (entryId) => this.expandedNested.has(entryId),
       setNestedExpanded: (entryId, expanded) => {
@@ -103,6 +110,12 @@ export class PreviewController {
         }
       },
       populateNested: (entryId, body) => this.populateNested(entryId, body),
+      getBoardSelection: (boardKey) => this.boardSelections.get(boardKey),
+      // Record only — the board already updated its own DOM; a re-render here would
+      // be the very thing this persistence exists to avoid (D4).
+      setBoardSelection: (boardKey, selection) => {
+        this.boardSelections.set(boardKey, selection);
+      },
     };
   }
 
@@ -143,6 +156,7 @@ export class PreviewController {
     this.expandedNested.clear();
     this.nestedDetails.clear();
     this.pendingNested.clear();
+    this.boardSelections.clear();
     this.previewLimit = PREVIEW_LIMIT_DEFAULT;
     this.previewLoadingMore = false;
     this.previewScrollToTopPending = false;
@@ -181,6 +195,7 @@ export class PreviewController {
     this.expandedNested.clear();
     this.nestedDetails.clear();
     this.pendingNested.clear();
+    this.boardSelections.clear();
     this.previewScrollToTopPending = false;
     this.previewScrollToTopLastCount = 0;
     this.deps.syncHighlight(); // clears aria-selected (activeEntryId is now null)
@@ -211,6 +226,7 @@ export class PreviewController {
         this.nestedDetails.set(msg.entryId, msg.detail);
         for (const container of nestedContainers) {
           renderNestedInto(container, msg.detail, msg.entryId, this.timelineBag);
+          scrollBoardDetailToEnd(container);
         }
       } else {
         const text = msg.error ?? "Couldn't read this sub-session.";
@@ -349,20 +365,6 @@ export class PreviewController {
     this.shell.render(this.buildPreviewHeader(entry, detail), body);
   }
 
-  /** Re-render the active detail in place, preserving scroll — used when expanding
-   *  a run (renderPreviewDetail rebuilds from scratch, resetting scrollTop to 0). */
-  private rerenderActiveDetail(): void {
-    if (!this.activePreviewEntry || !this.activePreviewDetail) {
-      return;
-    }
-    const prevScroll = this.shell.el.querySelector<HTMLElement>(".vault-preview-body")?.scrollTop ?? 0;
-    this.renderPreviewDetail(this.activePreviewEntry, this.activePreviewDetail);
-    const newBody = this.shell.el.querySelector<HTMLElement>(".vault-preview-body");
-    if (newBody) {
-      newBody.scrollTop = prevScroll;
-    }
-  }
-
   /** Request the next-older window of timeline items (grows the limit). */
   private requestMorePreview(): void {
     if (this.previewLoadingMore || !this.activePreviewEntryId || !this.activePreviewDetail?.truncated) {
@@ -395,6 +397,7 @@ export class PreviewController {
       this.renderingNested.add(entryId);
       try {
         renderNestedInto(body, cached, entryId, this.timelineBag);
+        scrollBoardDetailToEnd(body);
       } finally {
         this.renderingNested.delete(entryId);
       }
@@ -408,5 +411,18 @@ export class PreviewController {
     if (!alreadyPending) {
       this.deps.postMessage({ type: "requestVaultSessionDetail", entryId });
     }
+  }
+}
+
+/** After a workflow-board agent's transcript renders into `container`, jump its
+ *  scroll pane to the last message so the conclusion is the immediate preview (#3).
+ *  No-op for any other nested container (or a detached one with no board pane). */
+function scrollBoardDetailToEnd(container: HTMLElement): void {
+  if (!container.classList.contains("vault-wfboard-detail-body")) {
+    return;
+  }
+  const pane = container.closest<HTMLElement>(".vault-wfboard-right");
+  if (pane) {
+    pane.scrollTop = pane.scrollHeight;
   }
 }

@@ -1,0 +1,42 @@
+{
+  "runId": "wf_board1",
+  "workflowName": "design-board",
+  "agentCount": 2,
+  "status": "completed",
+  "startTime": "1780072409110",
+  "timestamp": "2026-05-29T18:05:00.000Z",
+  "summary": "Audit and build the board",
+  "durationMs": 5000,
+  "totalTokens": 12345,
+  "totalToolCalls": 7,
+  "defaultModel": "claude-opus-4-8[1m]",
+  "phases": [{ "title": "Plan", "detail": "plan phase detail" }, { "title": "Build", "detail": "build phase detail" }],
+  "workflowProgress": [
+    { "type": "workflow_phase", "index": 1, "title": "Plan" },
+    { "type": "workflow_phase", "index": 2, "title": "Build" },
+    {
+      "type": "workflow_agent",
+      "index": 1,
+      "label": "scout",
+      "phaseIndex": 1,
+      "phaseTitle": "Plan",
+      "agentId": "aaa111",
+      "model": "claude-opus-4-8[1m]",
+      "tokens": 5000,
+      "toolCalls": 3,
+      "durationMs": 2000
+    },
+    {
+      "type": "workflow_agent",
+      "index": 2,
+      "label": "writer",
+      "phaseIndex": 2,
+      "phaseTitle": "Build",
+      "agentId": "bbb222",
+      "model": "claude-sonnet-4-6",
+      "tokens": 7345,
+      "toolCalls": 4,
+      "durationMs": 3000
+    }
+  ]
+}

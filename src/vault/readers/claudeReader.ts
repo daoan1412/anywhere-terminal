@@ -25,7 +25,7 @@ import { formatEntryId, type VaultSessionDetail, type VaultSessionEntry } from "
 import { type ClaudeChildId, parseClaudeChildId } from "./claudeChildIds";
 import {
   listClaudeSubagentStubs,
-  listClaudeWorkflowStubs,
+  listClaudeWorkflowNodes,
   readClaudeSubagentDetail,
   readClaudeWorkflowAgentDetail,
   readClaudeWorkflowDetail,
@@ -213,17 +213,21 @@ export async function readClaudeDetail(
   // their communication turns are threaded as `teammateTurn` nodes (D13/D14). A
   // member resolves an empty team set → no teammate turns under it (W3).
   const teamScanNames = ctx.selfIsMember ? new Set<string>() : ctx.teamNames;
-  const [subStubs, wfStubs, teammateTurns] = await Promise.all([
+  const [subStubs, wfNodes, teammateTurns] = await Promise.all([
     listClaudeSubagentStubs(sessionId, options),
-    listClaudeWorkflowStubs(sessionId, options),
+    listClaudeWorkflowNodes(sessionId, options),
     buildTeamThread(filePath, teamScanNames, ctx.colorByMember),
   ]);
-  const childStubs = [...subStubs, ...wfStubs];
+  // Progress-bearing runs render INLINE as self-collapsing `workflowBoard` items (no
+  // wrapper layer) — threaded with the teammate turns by timestamp below. Fallback
+  // runs fold in as lazy "Workflow:" group stubs (classify merges them).
+  const childStubs = [...subStubs, ...wfNodes.stubs];
   const detail = classifyClaudeStyleEvents(read.records, { limit, childStubs, teammateMessage: teammateMessageHook });
-  // Thread the teammate turns into the classified timeline by timestamp, then
-  // re-bound (classify already bounded its own stream-derived items) (D14).
-  if (teammateTurns.length > 0) {
-    const merged = mergeTimestampedItems(detail.timeline, teammateTurns);
+  // Thread the teammate turns + inline workflow boards into the classified timeline
+  // by timestamp, then re-bound (classify already bounded its stream-derived items) (D14).
+  const extras = [...teammateTurns, ...wfNodes.boards];
+  if (extras.length > 0) {
+    const merged = mergeTimestampedItems(detail.timeline, extras);
     const bounded = boundTimeline(merged, clampDetailLimit(limit) ?? MAX_TIMELINE_ITEMS);
     detail.timeline = bounded.timeline;
     if (bounded.truncated) {
