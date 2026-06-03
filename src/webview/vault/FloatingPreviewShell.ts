@@ -17,6 +17,8 @@ export interface FloatingPreviewShellDeps {
   classNames?: string[];
   /** Row to anchor to when no geometry is remembered (re-queried live). */
   getAnchorRow?: () => HTMLElement | null;
+  /** Lowest viewport y the card may occupy — e.g. below the terminal tab bar. */
+  getMinTop?: () => number;
   /** Resolved once at construction — seeds FloatingWindow's restore geometry. */
   initialGeometry?: () => VaultPreviewGeometry | null;
   persistGeometry?: (geometry: VaultPreviewGeometry) => void;
@@ -56,6 +58,7 @@ export class FloatingPreviewShell {
       initialGeometry: deps.initialGeometry?.() ?? null,
       persistGeometry: deps.persistGeometry,
       getAnchorRow: deps.getAnchorRow ?? (() => null),
+      getMinTop: deps.getMinTop,
     });
     this.scrollNav = new PreviewScrollNav({ el, onScrollTop: deps.onScrollTop });
   }

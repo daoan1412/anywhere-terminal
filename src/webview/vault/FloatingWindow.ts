@@ -18,6 +18,10 @@ export interface FloatingWindowDeps {
   persistGeometry?: (geometry: VaultPreviewGeometry) => void;
   /** The row to anchor to when no geometry is remembered (re-queried live). */
   getAnchorRow: () => HTMLElement | null;
+  /** Lowest viewport y the card's top may occupy — e.g. the bottom of the
+   *  terminal tab bar, so the card never covers it. Re-queried live so it tracks
+   *  the tab bar showing/hiding. Defaults to 0. */
+  getMinTop?: () => number;
 }
 
 export class FloatingWindow {
@@ -26,6 +30,7 @@ export class FloatingWindow {
   private readonly el: HTMLElement;
   private readonly persistGeometry?: (geometry: VaultPreviewGeometry) => void;
   private readonly getAnchorRow: () => HTMLElement | null;
+  private readonly getMinTop: () => number;
   /** Remembered floating size+position (null until the user resizes/maximizes). */
   private geometry: Geometry | null = null;
   private maximized = false;
@@ -36,6 +41,7 @@ export class FloatingWindow {
     this.el = deps.el;
     this.persistGeometry = deps.persistGeometry;
     this.getAnchorRow = deps.getAnchorRow;
+    this.getMinTop = deps.getMinTop ?? (() => 0);
     const seeded = deps.initialGeometry ?? null;
     if (seeded) {
       this.geometry = { top: seeded.top, left: seeded.left, width: seeded.width, height: seeded.height };
@@ -145,7 +151,7 @@ export class FloatingWindow {
       }
       moved = true;
       const l = Math.max(0, Math.min(startL + dx, window.innerWidth - 40));
-      const t = Math.max(0, Math.min(startT + dy, window.innerHeight - 40));
+      const t = Math.max(this.topFloor(), Math.min(startT + dy, window.innerHeight - 40));
       this.el.style.left = `${l}px`;
       this.el.style.top = `${t}px`;
       this.el.style.width = `${w}px`;
@@ -240,7 +246,7 @@ export class FloatingWindow {
         h = minH;
       }
       l = Math.max(0, Math.min(l, window.innerWidth - 40));
-      t = Math.max(0, Math.min(t, window.innerHeight - 40));
+      t = Math.max(this.topFloor(), Math.min(t, window.innerHeight - 40));
       this.el.style.left = `${l}px`;
       this.el.style.top = `${t}px`;
       this.el.style.width = `${w}px`;
@@ -264,6 +270,12 @@ export class FloatingWindow {
     document.addEventListener("pointerup", onUp);
   }
 
+  /** Floor for the card's top: 8px from the viewport edge, pushed down below a
+   *  shown terminal tab bar so the card never covers it. */
+  private topFloor(): number {
+    return Math.max(8, this.getMinTop());
+  }
+
   private applyGeometry(g: Geometry): void {
     // Clamp into the CURRENT viewport — a geometry saved in a larger window must
     // not place the card off-screen. Mirrors the resize/move bounds.
@@ -272,7 +284,7 @@ export class FloatingWindow {
     const width = Math.min(Math.max(280, g.width), Math.max(280, vw - 16));
     const height = Math.min(Math.max(160, g.height), Math.max(160, vh - 16));
     const left = Math.max(0, Math.min(g.left, Math.max(0, vw - 40)));
-    const top = Math.max(0, Math.min(g.top, Math.max(0, vh - 40)));
+    const top = Math.max(this.topFloor(), Math.min(g.top, Math.max(0, vh - 40)));
     this.el.style.right = "auto";
     this.el.style.left = `${left}px`;
     this.el.style.top = `${top}px`;
@@ -319,7 +331,7 @@ export class FloatingWindow {
       left = rowRect.right + 12;
     }
     left = Math.min(Math.max(8, left), Math.max(8, vw - w - 8));
-    const top = Math.max(8, Math.min(rowRect.top, vh - h - 8));
+    const top = Math.max(this.topFloor(), Math.min(rowRect.top, vh - h - 8));
     this.el.style.right = "auto";
     this.el.style.left = `${left}px`;
     this.el.style.top = `${top}px`;

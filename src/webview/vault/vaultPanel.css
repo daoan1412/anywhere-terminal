@@ -704,6 +704,12 @@
   max-height: none;
   border-radius: 0;
 }
+/* …but never the terminal tab strip (shown with 2+ terminals) — start below it so
+   its tabs stay clickable. Pure CSS so it reacts as the tab bar shows/hides. */
+body:has(#tab-bar.visible) .vault-preview--max {
+  top: var(--awt-tab-bar-height, 30px);
+  height: calc(100vh - var(--awt-tab-bar-height, 30px));
+}
 
 /* Edge/corner resize handles — thin hit-zones pinned to each side. */
 .vault-preview-resize {

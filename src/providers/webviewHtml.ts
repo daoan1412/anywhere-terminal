@@ -96,6 +96,9 @@ export function getTerminalHtml(
     ${VAULT_CSS}
     /* === End AI-vault panel styles === */
 
+    :root {
+      --awt-tab-bar-height: 30px;
+    }
     html, body {
       height: 100%;
       margin: 0;
@@ -109,7 +112,7 @@ export function getTerminalHtml(
     #tab-bar {
       flex-shrink: 0;
       display: none;
-      height: 30px;
+      height: var(--awt-tab-bar-height);
       background: var(--vscode-editorGroupHeader-tabsBackground, var(--vscode-sideBar-background));
       align-items: center;
       overflow-x: auto;

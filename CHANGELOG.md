@@ -4,6 +4,13 @@ All notable changes to **AnyWhere Terminal** are documented in this file.
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Changed
+
+- **Resuming from the session preview now closes it.** Clicking Resume in the AI Vault session preview resumes the session in a terminal and dismisses the floating preview in one step, instead of leaving it open over the terminal you just switched to.
+- **Session preview no longer covers the terminal tab bar.** Whether floating or **maximized**, the preview now stops below the terminal tab strip (shown when 2+ terminals are open) so its tabs stay clickable. The floating card's top is clamped below the strip when anchored, restored, dragged, or resized upward; the maximized card starts at the strip's bottom instead of the viewport top. Both track the tab bar showing/hiding live.
+
 ## [0.17.1] — 2026-06-02
 
 ### Fixed

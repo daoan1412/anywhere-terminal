@@ -23,6 +23,14 @@ import type { VaultPanelPostMessage } from "./VaultPanel";
 const PREVIEW_LIMIT_DEFAULT = 400;
 const PREVIEW_LIMIT_STEP = 400;
 
+/** Lowest viewport y the floating preview may occupy: the bottom of the terminal
+ *  tab bar when it's shown (2+ terminals), else 0 (its rect is empty when hidden).
+ *  Keeps the card from covering the tab strip; re-read live so it tracks toggles. */
+function terminalTabBarBottom(): number {
+  const tabBar = document.getElementById("tab-bar");
+  return tabBar ? Math.max(0, tabBar.getBoundingClientRect().bottom) : 0;
+}
+
 export interface PreviewControllerDeps {
   postMessage: VaultPanelPostMessage;
   /** Whether the row context menu is open (Esc layering — one Esc shouldn't close both). */
@@ -83,6 +91,7 @@ export class PreviewController {
     this.shell = new FloatingPreviewShell({
       ariaLabel: "Session preview",
       getAnchorRow: deps.getActiveRow,
+      getMinTop: terminalTabBarBottom,
       initialGeometry: deps.getInitialPreviewGeometry,
       persistGeometry: deps.persistPreviewGeometry,
       onScrollTop: () => this.scrollPreviewToTop(),
@@ -309,7 +318,10 @@ export class PreviewController {
         onMovePointerDown: (ev) => this.shell.floatingWindow.startMove(ev),
         onPrevUser: () => this.shell.scrollNav.scrollToAdjacentUser(-1),
         onNextUser: () => this.shell.scrollNav.scrollToAdjacentUser(1),
-        onResume: () => this.deps.postMessage({ type: "vaultResume", entryId: entry.id }),
+        onResume: () => {
+          this.deps.postMessage({ type: "vaultResume", entryId: entry.id });
+          this.closePreview();
+        },
         onToggleMaximize: () => this.shell.floatingWindow.toggleMaximize(),
         onClose: () => this.closePreview(),
       },
