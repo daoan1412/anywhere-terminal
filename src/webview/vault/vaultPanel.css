@@ -692,8 +692,12 @@
 .vault-preview.is-open {
   display: flex;
 }
-/* Maximized — fill the whole webview viewport (over vault, file tree, terminal). */
+/* Maximized — fill the whole webview viewport (over vault, file tree, terminal).
+   border-box keeps the 1px border inside 100vw/100vh so it stays visible at the
+   viewport edges (a separator against the same-coloured editor) instead of being
+   clipped off-screen. */
 .vault-preview--max {
+  box-sizing: border-box;
   top: 0;
   left: 0;
   right: 0;
