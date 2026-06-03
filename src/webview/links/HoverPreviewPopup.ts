@@ -143,7 +143,7 @@ function modifierLabel(): string {
 export function renderPlaceholderText(status: FilePreviewResultMessage["status"], totalBytes?: number): string {
   switch (status) {
     case "not-found":
-      return "File not found";
+      return "";
     case "binary":
       return `Binary file (${formatBytes(totalBytes ?? 0)})`;
     case "too-large":
@@ -301,6 +301,10 @@ export class HoverPreviewPopup implements HoverPreviewPopupHost {
     if (this.disposed) {
       return;
     }
+    if (result.status === "not-found") {
+      this.hide();
+      return;
+    }
     const header = this.buildFileHeader(result);
     const body = this.buildFileBody(result, theme);
     // Line-focus scroll MUST run after the popup is in the DOM AND positioned —
@@ -378,8 +382,8 @@ export class HoverPreviewPopup implements HoverPreviewPopupHost {
     pathLabel.textContent = headerPath;
     pathLabel.setAttribute("title", headerPath);
     header.appendChild(pathLabel);
-    // Open button hidden for not-found/error (clicking would only re-surface
-    // the same "File not found" toast).
+    // Open button hidden for error; not-found results are ignored before the
+    // popup is rendered.
     if (this.onOpenFile && this.canOpen(result)) {
       header.appendChild(this.buildOpenButton(result));
     }
@@ -500,8 +504,8 @@ export class HoverPreviewPopup implements HoverPreviewPopupHost {
 
   /**
    * True when the result carries enough info to open the file in an editor.
-   * Hidden for `not-found` / `error` because clicking would just surface the
-   * same "File not found" toast that the popup already shows.
+   * Hidden for `not-found` / `error`; not-found results are ignored before the
+   * popup is rendered.
    */
   private canOpen(result: FilePreviewResultMessage): boolean {
     if (result.status === "not-found" || result.status === "error") {

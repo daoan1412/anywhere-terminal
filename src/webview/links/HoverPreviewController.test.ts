@@ -307,6 +307,42 @@ describe("HoverPreviewController", () => {
     expect(popup.showCalls[0].theme).toBe("dark");
   });
 
+  it("silently ignores not-found results and dismisses any existing popup", () => {
+    const { terminal } = makeFakeTerminal();
+    const postMessage = vi.fn();
+    const popup = makePopup();
+    const controller = new HoverPreviewController({
+      terminal: terminal as unknown as import("@xterm/xterm").Terminal,
+      sessionId: "s1",
+      postMessage,
+      getTheme: () => "dark",
+      popup,
+    });
+
+    const liveLink = makeLink("a.ts", 1, 1);
+    controller.attachHover(liveLink, "a.ts");
+    liveLink.hover?.(makeMouseEvent(), liveLink.text);
+    vi.advanceTimersByTime(HOVER_DEBOUNCE_MS);
+    const liveId = postMessage.mock.calls[0][0].requestId;
+    controller.onMessage(makeOkResult({ requestId: liveId, absPath: "/x/a.ts" }));
+    expect(popup.showCalls).toHaveLength(1);
+
+    const missingLink = makeLink("missing.ts", 1, 2);
+    controller.attachHover(missingLink, "missing.ts");
+    missingLink.hover?.(makeMouseEvent(), missingLink.text);
+    vi.advanceTimersByTime(HOVER_DEBOUNCE_MS);
+    const missingId = postMessage.mock.calls[1][0].requestId;
+    controller.onMessage({
+      type: "filePreviewResult",
+      path: "missing.ts",
+      requestId: missingId,
+      status: "not-found",
+    });
+
+    expect(popup.showCalls).toHaveLength(1);
+    expect(popup.hideCalls).toBeGreaterThanOrEqual(1);
+  });
+
   it("hides the popup on leave", () => {
     const { terminal } = makeFakeTerminal();
     const popup = makePopup();

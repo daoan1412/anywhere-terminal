@@ -258,6 +258,10 @@ export class HoverPreviewController {
       // Anchor lost (e.g. dismissed between request + response).
       return;
     }
+    if (result.status === "not-found") {
+      this.dismiss();
+      return;
+    }
     // Latch the requires-confirmation state so the Cmd/Ctrl override gesture
     // is meaningful (and ONLY meaningful) for this exact hover. Any other
     // status clears it — otherwise a stale latch could allow an override key

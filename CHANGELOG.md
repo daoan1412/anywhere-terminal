@@ -17,6 +17,7 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ### Fixed
 
+- **Missing file links no longer interrupt the terminal.** Hovering a path that does not resolve now stays silent instead of opening an empty preview or showing "File not found", and clicking a nonexistent path now no-ops without an error toast.
 - **The final assistant message no longer disappears from a long session preview.** When a turn ended with a tool call — e.g. an `AskUserQuestion` prompt or a closing `git status` — the run's concluding message was buried behind "Show N more", so the last visible item was a tool rather than the answer. A capped run now pins its concluding assistant message so it stays in view, and ask-the-user prompts break out of the run entirely.
 
 ## [0.17.1] — 2026-06-02

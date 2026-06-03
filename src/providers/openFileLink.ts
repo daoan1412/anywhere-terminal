@@ -44,7 +44,7 @@ export interface OpenFileLinkDeps {
    * at all). Falls back to plain string glob when a workspace IS open. The
    * `token` is fired on our 2-second timeout so a slow filesystem walk
    * (e.g. accidentally rooted at `/`) doesn't keep enumerating in the
-   * background after the click handler has returned "File not found".
+   * background after the click handler has given up.
    */
   findFiles(
     include: vscode.GlobPattern,
@@ -54,7 +54,7 @@ export interface OpenFileLinkDeps {
   ): Thenable<vscode.Uri[]>;
   /** Modal warning dialog. */
   showWarning: typeof vscode.window.showWarningMessage;
-  /** Error toast (no buttons). */
+  /** Error toast (no buttons). Retained for dependency compatibility. */
   showError: typeof vscode.window.showErrorMessage;
   /** Open an editor for the given URI. */
   showTextDocument: typeof vscode.window.showTextDocument;
@@ -69,7 +69,7 @@ export interface OpenFileLinkDeps {
   getFileSearchMaxResults?(): number;
 }
 
-/** Time budget for the findFiles fallback before we give up and show the not-found toast. */
+/** Time budget for the findFiles fallback before we give up. */
 const FIND_FILES_TIMEOUT_MS = 2000;
 const FIND_FILES_EXCLUDE = "{**/node_modules/**,**/.git/**}";
 /**
@@ -250,9 +250,8 @@ export async function openFileLink(msg: OpenFileMessage, deps: OpenFileLinkDeps)
   }
 
   const { candidates, transformedPath, sourceCounts, malformed } = buildCandidates(msg, deps, liveCwd);
-  // Per-attempt diagnostics — surfaced via console.warn on failure so a user
-  // who hits "File not found" can paste the log from DevTools and we can see
-  // exactly which step failed. No PII beyond the paths the user clicked on.
+  // Per-attempt diagnostics for exceptional resolver failures. Normal misses
+  // are ignored, so this trace is only emitted when a deeper operation warns.
   const trace: string[] = [
     `msg.path=${JSON.stringify(msg.path)} sessionId=${msg.sessionId}`,
     `transformed=${JSON.stringify(transformedPath)}`,
@@ -310,7 +309,7 @@ export async function openFileLink(msg: OpenFileMessage, deps: OpenFileLinkDeps)
   // refuse to send glob patterns that try to escape).
   //
   // Match-count UX (spec terminal-clickable-file-paths step 6):
-  //   0 → fall through to "File not found"
+  //   0 → silent no-op
   //   1 → open it
   //   ≥2 → quickPick disambiguation; user-cancel is no-op (no error toast)
   // Directory click → silent abort. Skip findFiles + skip toast.
@@ -326,7 +325,7 @@ export async function openFileLink(msg: OpenFileMessage, deps: OpenFileLinkDeps)
   //  - workspace open → plain string glob (searches all workspace folders).
   //  - no workspace + has cwd → `RelativePattern` rooted at liveCwd or initialCwd
   //    (lets us still find files in the user's working tree without a folder open).
-  //  - no workspace + no cwd → skip findFiles, fall through to "File not found".
+  //  - no workspace + no cwd → skip findFiles, then silently give up.
   let searchPattern: vscode.GlobPattern | undefined;
   const hasWorkspace = (deps.workspaceFolders?.length ?? 0) > 0;
   const escapedGlob = `**/${escapeGlob(msg.path)}`;
@@ -373,8 +372,8 @@ export async function openFileLink(msg: OpenFileMessage, deps: OpenFileLinkDeps)
         : DEFAULT_FIND_FILES_MAX_RESULTS;
     // Cancel the underlying findFiles if our 2-second budget expires.
     // Without this, a slow walk (e.g. searchBase=`/`) can keep
-    // enumerating after we've already surfaced "File not found" to the
-    // user — wasting CPU and potentially blocking the extension host.
+    // enumerating after we've already given up — wasting CPU and potentially
+    // blocking the extension host.
     const cancelSource = new vscode.CancellationTokenSource();
     // Two-stage findFiles wrapped in ONE shared `withTimeout`: the basename
     // fallback (call 2) doesn't get a fresh 2s budget — it shares whatever
@@ -446,8 +445,6 @@ export async function openFileLink(msg: OpenFileMessage, deps: OpenFileLinkDeps)
   }
 
   if (resolvedFsPath === undefined) {
-    console.warn(`[AnyWhere Terminal] openFileLink could not resolve. Trace:\n  ${trace.join("\n  ")}`);
-    await deps.showError(`File not found: ${msg.path}`);
     return;
   }
 

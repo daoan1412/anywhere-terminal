@@ -237,7 +237,7 @@ describe("computePosition", () => {
 
 describe("renderPlaceholderText", () => {
   it("returns the spec strings", () => {
-    expect(renderPlaceholderText("not-found")).toBe("File not found");
+    expect(renderPlaceholderText("not-found")).toBe("");
     expect(renderPlaceholderText("binary", 12_345)).toBe("Binary file (12.1 KB)");
     expect(renderPlaceholderText("too-large", 2_000_000)).toBe("File too large (1.91 MB)");
     expect(renderPlaceholderText("ambiguous")).toBe("Multiple matches — click to choose");
@@ -282,14 +282,10 @@ describe("HoverPreviewPopup — show / hide", () => {
     expect(pathLabel?.getAttribute("title")).toBe("/very/long/path/to/foo.ts");
   });
 
-  it("renders the matching placeholder for each non-ok status", () => {
+  it("renders the matching placeholder for each visible non-ok status", () => {
     const term = makeTerminalElement();
     const popup = new HoverPreviewPopup();
     const cases: Array<{ result: FilePreviewResultMessage; expectedSubstring: string }> = [
-      {
-        result: { type: "filePreviewResult", path: "test/path", requestId: "r-x", status: "not-found" },
-        expectedSubstring: "File not found",
-      },
       {
         result: {
           type: "filePreviewResult",
@@ -331,6 +327,26 @@ describe("HoverPreviewPopup — show / hide", () => {
       const placeholder = document.querySelector(".anywhere-hover-preview-placeholder");
       expect(placeholder?.textContent).toContain(expectedSubstring);
     }
+  });
+
+  it("ignores not-found results without mounting a popup", () => {
+    const term = makeTerminalElement();
+    const popup = new HoverPreviewPopup();
+    popup.show(fakeMouseEvent(term, 50, 50), makeOkResult({ content: "x" }), "dark");
+    expect(document.querySelector(".anywhere-hover-preview")).toBeTruthy();
+
+    popup.show(
+      fakeMouseEvent(term, 50, 50),
+      {
+        type: "filePreviewResult",
+        path: "src/missing.ts",
+        requestId: "r1",
+        status: "not-found",
+      } satisfies FilePreviewResultMessage,
+      "dark",
+    );
+
+    expect(document.querySelector(".anywhere-hover-preview")).toBeNull();
   });
 
   it("clamps position when the anchor is near the right edge", () => {
@@ -439,22 +455,22 @@ describe("HoverPreviewPopup — show / hide", () => {
     // see HoverPreviewController.test.ts for that path.
   });
 
-  it("header falls back to result.path when absPath is absent (e.g. not-found)", () => {
+  it("header falls back to result.path when absPath is absent", () => {
     const term = makeTerminalElement();
     const popup = new HoverPreviewPopup();
     popup.show(
       fakeMouseEvent(term, 50, 50),
       {
         type: "filePreviewResult",
-        path: "src/missing.ts",
+        path: "src/ambiguous.ts",
         requestId: "r1",
-        status: "not-found",
+        status: "ambiguous",
       } satisfies FilePreviewResultMessage,
       "dark",
     );
     const pathLabel = document.querySelector(".anywhere-hover-preview-header-path") as HTMLElement;
-    expect(pathLabel.textContent).toBe("src/missing.ts");
-    expect(pathLabel.getAttribute("title")).toBe("src/missing.ts");
+    expect(pathLabel.textContent).toBe("src/ambiguous.ts");
+    expect(pathLabel.getAttribute("title")).toBe("src/ambiguous.ts");
   });
 
   it("Escape key triggers unmount + onDismiss", () => {
@@ -639,7 +655,7 @@ describe("HoverPreviewPopup — show / hide", () => {
     expect(document.querySelector(".anywhere-hover-preview")).toBeNull();
   });
 
-  it("hides the Open button for not-found / error statuses", () => {
+  it("hides the Open button for error statuses", () => {
     const term = makeTerminalElement();
     const onOpenFile = vi.fn();
     const popup = new HoverPreviewPopup({ onOpenFile });
@@ -647,9 +663,9 @@ describe("HoverPreviewPopup — show / hide", () => {
       fakeMouseEvent(term, 50, 50),
       {
         type: "filePreviewResult",
-        path: "src/missing.ts",
+        path: "src/failing.ts",
         requestId: "r1",
-        status: "not-found",
+        status: "error",
       } satisfies FilePreviewResultMessage,
       "dark",
     );

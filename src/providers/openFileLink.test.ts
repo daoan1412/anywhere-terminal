@@ -110,14 +110,14 @@ describe("openFileLink: resolution chain", () => {
 });
 
 describe("openFileLink: file-not-found", () => {
-  it("shows error toast and does not open when no candidate resolves", async () => {
+  it("silently does not open when no candidate resolves", async () => {
     const deps = makeDeps({
       getInitialCwd: vi.fn(() => "/cwd"),
       workspaceFolders: [{ uri: { fsPath: "/ws" } }],
       stat: makeStat(new Set()),
     });
     await openFileLink(msg({ path: "src/missing.ts" }), deps);
-    expect(deps.showError).toHaveBeenCalledWith("File not found: src/missing.ts");
+    expect(deps.showError).not.toHaveBeenCalled();
     expect(deps.showTextDocument).not.toHaveBeenCalled();
   });
 });
@@ -436,13 +436,13 @@ describe("openFileLink: findFiles fallback", () => {
     expect(calls[0][0]).toMatchObject({ fsPath: "/discovered/src/foo.ts" });
   });
 
-  it("(d) when findFiles returns 0 matches, shows 'File not found' toast", async () => {
+  it("(d) when findFiles returns 0 matches, silently does not open", async () => {
     const deps = makeDeps({
       stat: makeStat(new Set()),
       findFiles: vi.fn(async () => []),
     });
     await openFileLink(msg({ path: "src/missing.ts" }), deps);
-    expect(deps.showError).toHaveBeenCalledWith("File not found: src/missing.ts");
+    expect(deps.showError).not.toHaveBeenCalled();
     expect(deps.showTextDocument).not.toHaveBeenCalled();
   });
 
@@ -468,7 +468,7 @@ describe("openFileLink: findFiles fallback", () => {
     expect(findFiles).toHaveBeenNthCalledWith(2, "**/foo.ts", "{**/node_modules/**,**/.git/**}", 50, expect.anything());
   });
 
-  it("(f) findFiles throws → console.warn + 'File not found' toast", async () => {
+  it("(f) findFiles throws → console.warn + silent no-open", async () => {
     const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
     const deps = makeDeps({
       stat: makeStat(new Set()),
@@ -479,7 +479,7 @@ describe("openFileLink: findFiles fallback", () => {
     });
     await openFileLink(msg({ path: "src/foo.ts" }), deps);
     expect(warn).toHaveBeenCalledWith(expect.stringContaining("findFiles fallback failed"), expect.any(Error));
-    expect(deps.showError).toHaveBeenCalledWith("File not found: src/foo.ts");
+    expect(deps.showError).not.toHaveBeenCalled();
     expect(deps.showTextDocument).not.toHaveBeenCalled();
     warn.mockRestore();
   });
@@ -514,7 +514,7 @@ describe("openFileLink: findFiles fallback", () => {
     expect(escapeGlob("plain.txt")).toBe("plain.txt");
   });
 
-  it("(i) findFiles that never resolves times out at 2000ms → console.warn + not-found toast", async () => {
+  it("(i) findFiles that never resolves times out at 2000ms → console.warn + silent no-open", async () => {
     vi.useFakeTimers();
     const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
     const findFiles = vi.fn(() => new Promise<vscode.Uri[]>(() => {})); // never resolves
@@ -529,7 +529,8 @@ describe("openFileLink: findFiles fallback", () => {
     await vi.advanceTimersByTimeAsync(2000);
     await pending;
     expect(warn).toHaveBeenCalledWith(expect.stringContaining("findFiles fallback failed"), expect.any(Error));
-    expect(deps.showError).toHaveBeenCalledWith("File not found: src/never.ts");
+    expect(deps.showError).not.toHaveBeenCalled();
+    expect(deps.showTextDocument).not.toHaveBeenCalled();
     warn.mockRestore();
     vi.useRealTimers();
   });
@@ -542,7 +543,8 @@ describe("openFileLink: findFiles fallback", () => {
     });
     await openFileLink(msg({ path: "/abs/missing.ts" }), deps);
     expect(findFiles).not.toHaveBeenCalled();
-    expect(deps.showError).toHaveBeenCalledWith("File not found: /abs/missing.ts");
+    expect(deps.showError).not.toHaveBeenCalled();
+    expect(deps.showTextDocument).not.toHaveBeenCalled();
   });
 
   it("does NOT call findFiles when msg.path contains `..` traversal segments", async () => {
@@ -553,7 +555,8 @@ describe("openFileLink: findFiles fallback", () => {
     });
     await openFileLink(msg({ path: "../etc/passwd" }), deps);
     expect(findFiles).not.toHaveBeenCalled();
-    expect(deps.showError).toHaveBeenCalledWith("File not found: ../etc/passwd");
+    expect(deps.showError).not.toHaveBeenCalled();
+    expect(deps.showTextDocument).not.toHaveBeenCalled();
   });
 
   it("calls findFiles with default maxResults=50 (cap for quickPick disambiguation)", async () => {
@@ -712,7 +715,7 @@ describe("openFileLink: findFiles without a workspace open", () => {
     expect((pattern as vscode.RelativePattern).baseUri.fsPath).toBe("/Users/me/init");
   });
 
-  it("no workspace + no cwd → findFiles is NOT called, shows 'File not found'", async () => {
+  it("no workspace + no cwd → findFiles is NOT called and no toast is shown", async () => {
     const findFiles = vi.fn(async () => []);
     const deps = makeDeps({
       stat: makeStat(new Set()),
@@ -721,7 +724,8 @@ describe("openFileLink: findFiles without a workspace open", () => {
     });
     await openFileLink(msg({ path: "foo.ts" }), deps);
     expect(findFiles).not.toHaveBeenCalled();
-    expect(deps.showError).toHaveBeenCalledWith("File not found: foo.ts");
+    expect(deps.showError).not.toHaveBeenCalled();
+    expect(deps.showTextDocument).not.toHaveBeenCalled();
   });
 
   it("no workspace + liveCwd + match → opens it (modal fires if outside trust bases)", async () => {
@@ -933,15 +937,15 @@ describe("openFileLink: directory click", () => {
     expect(calls[0][0]).toMatchObject({ fsPath: "/ws/src/foo.ts" });
   });
 
-  it("file-not-found still shows toast when NO candidate (file or dir) resolves", async () => {
-    // Regression guard: ensure we didn't suppress the legitimate not-found case.
+  it("file-not-found remains silent when NO candidate (file or dir) resolves", async () => {
     const deps = makeDeps({
       getInitialCwd: vi.fn(() => "/cwd"),
       stat: makeStat(new Set()),
       findFiles: vi.fn(async () => []),
     });
     await openFileLink(msg({ path: "src/missing.ts" }), deps);
-    expect(deps.showError).toHaveBeenCalledWith("File not found: src/missing.ts");
+    expect(deps.showError).not.toHaveBeenCalled();
+    expect(deps.showTextDocument).not.toHaveBeenCalled();
   });
 });
 
@@ -1059,22 +1063,23 @@ describe("openFileLink: tilde + file:// (design D4, D5)", () => {
     expect(calls[0][0]).toMatchObject({ fsPath: "/abs/foo bar.md" });
   });
 
-  it("malformed file://garbage → 'File not found' toast (no stat, no findFiles)", async () => {
+  it("malformed file://garbage → silent no-op (no stat, no findFiles)", async () => {
     const deps = makeDeps({
       stat: makeStat(new Set()),
       workspaceFolders: [{ uri: { fsPath: "/abs" } }],
     });
     await openFileLink(msg({ path: "file://garbage" }), deps);
     // Pre-transform returned passthrough-malformed → buildCandidates returns []
-    // with malformed=true → no stat, no findFiles, straight to "File not found".
+    // with malformed=true → no stat, no findFiles, straight to silent no-op.
     // (Round-1 review W3: previously the findFiles block would enter with a
     // bogus glob like `**/file:[/][/]garbage` — fixed by the `malformed` gate.)
     expect(deps.stat).not.toHaveBeenCalled();
     expect(deps.findFiles).not.toHaveBeenCalled();
-    expect(deps.showError).toHaveBeenCalledWith("File not found: file://garbage");
+    expect(deps.showError).not.toHaveBeenCalled();
+    expect(deps.showTextDocument).not.toHaveBeenCalled();
   });
 
-  it("UNC injection blocked: file://attacker.example.com/share/x.md → 'File not found' (no SMB stat)", async () => {
+  it("UNC injection blocked: file://attacker.example.com/share/x.md → silent no-op (no SMB stat)", async () => {
     // Round-1 review W1: prevents Windows UNC SMB egress.
     const deps = makeDeps({
       stat: makeStat(new Set()),
@@ -1083,17 +1088,19 @@ describe("openFileLink: tilde + file:// (design D4, D5)", () => {
     await openFileLink(msg({ path: "file://attacker.example.com/share/x.md" }), deps);
     expect(deps.stat).not.toHaveBeenCalled();
     expect(deps.findFiles).not.toHaveBeenCalled();
-    expect(deps.showError).toHaveBeenCalledWith("File not found: file://attacker.example.com/share/x.md");
+    expect(deps.showError).not.toHaveBeenCalled();
+    expect(deps.showTextDocument).not.toHaveBeenCalled();
   });
 
-  it("file:///abs/foo.md?x=1 → 'File not found' (query rejected)", async () => {
+  it("file:///abs/foo.md?x=1 → silent no-op (query rejected)", async () => {
     const deps = makeDeps({
       stat: makeStat(new Set(["/abs/foo.md"])),
       workspaceFolders: [{ uri: { fsPath: "/abs" } }],
     });
     await openFileLink(msg({ path: "file:///abs/foo.md?x=1" }), deps);
     expect(deps.stat).not.toHaveBeenCalled();
-    expect(deps.showError).toHaveBeenCalledWith("File not found: file:///abs/foo.md?x=1");
+    expect(deps.showError).not.toHaveBeenCalled();
+    expect(deps.showTextDocument).not.toHaveBeenCalled();
   });
 });
 
@@ -1330,9 +1337,8 @@ describe("openFileLink: absolute path short-circuit (design D8)", () => {
     expect(calledPaths).toEqual(["/Users/huybuidac/Projects/gmi/arco-contract/arco-audit.md"]);
     // findFiles was skipped because msg.path is absolute (per spec).
     expect(deps.findFiles).not.toHaveBeenCalled();
-    expect(deps.showError).toHaveBeenCalledWith(
-      "File not found: /Users/huybuidac/Projects/gmi/arco-contract/arco-audit.md",
-    );
+    expect(deps.showError).not.toHaveBeenCalled();
+    expect(deps.showTextDocument).not.toHaveBeenCalled();
   });
 });
 
