@@ -3,7 +3,7 @@
 // state (`this`). Untrusted text is ALWAYS written via textContent (or the safe
 // markdown-lite renderer, which never uses innerHTML) — never raw innerHTML.
 
-import type { VaultActivityStep, VaultSessionDetail, VaultSessionEntry } from "../../vault/types";
+import type { VaultActivityStep, VaultSessionDetail, VaultSessionEntry, VaultTimelineItem } from "../../vault/types";
 import { formatRelativeTime, formatStats, leafSegment } from "./format";
 import { ICON_CHEVRON_DOWN } from "./icons";
 import { renderMarkdownLite } from "./markdownLite";
@@ -147,6 +147,99 @@ export function thinkingBlock(text: string): HTMLElement {
 
   wrap.append(head, body);
   return wrap;
+}
+
+/**
+ * An AskUserQuestion turn: each question with the user's chosen answer (or an
+ * italic "Awaiting answer" when the call was still pending). The prompt + answer
+ * always show; when the call carried options, the role line becomes a toggle that
+ * reveals the full choice list (descriptions, picked one highlighted) on click.
+ */
+export function questionBlock(item: Extract<VaultTimelineItem, { kind: "question" }>): HTMLElement {
+  const hasOptions = item.questions.some((q) => (q.options?.length ?? 0) > 0);
+  const wrap = document.createElement("div");
+  wrap.className = "vault-preview-message vault-preview-message-question";
+  const roleLabel = item.questions.length > 1 ? `Question · ${item.questions.length}` : "Question";
+
+  if (hasOptions) {
+    wrap.classList.add("is-collapsible");
+    const head = document.createElement("button");
+    head.type = "button";
+    head.className = "vault-preview-message-role vault-preview-question-head";
+    head.title = "Show the options";
+    const firstPrompt = item.questions[0]?.prompt;
+    head.setAttribute("aria-label", firstPrompt ? `Show options for: ${firstPrompt}` : "Show the options");
+    head.setAttribute("aria-expanded", "false");
+    const label = document.createElement("span");
+    label.textContent = roleLabel;
+    const chevron = document.createElement("span");
+    chevron.className = "vault-preview-question-chevron";
+    chevron.innerHTML = ICON_CHEVRON_DOWN;
+    chevron.setAttribute("aria-hidden", "true");
+    head.append(roleDot(), label, chevron);
+    head.addEventListener("click", () => {
+      const expanded = wrap.classList.toggle("is-expanded");
+      head.setAttribute("aria-expanded", expanded ? "true" : "false");
+      head.title = expanded ? "Hide the options" : "Show the options";
+    });
+    wrap.append(head);
+  } else {
+    const role = document.createElement("div");
+    role.className = "vault-preview-message-role";
+    const label = document.createElement("span");
+    label.textContent = roleLabel;
+    role.append(roleDot(), label);
+    wrap.append(role);
+  }
+
+  for (const q of item.questions) {
+    const prompt = document.createElement("p");
+    prompt.className = "vault-preview-question-prompt";
+    prompt.textContent = q.prompt;
+    const answer = document.createElement("p");
+    answer.className = "vault-preview-question-answer";
+    if (q.answer) {
+      const arrow = document.createElement("span");
+      arrow.className = "vault-preview-question-arrow";
+      arrow.textContent = "→ ";
+      arrow.setAttribute("aria-hidden", "true");
+      answer.append(arrow, document.createTextNode(q.answer));
+    } else {
+      answer.classList.add("is-pending");
+      answer.textContent = "Awaiting answer";
+    }
+    wrap.append(prompt, answer);
+    if (q.options?.length) {
+      wrap.append(questionOptions(q.options));
+    }
+  }
+  return wrap;
+}
+
+/** The collapsible option list for one question — each option's label + optional
+ *  description, with the user's pick highlighted. Hidden until the block expands. */
+function questionOptions(options: NonNullable<Extract<VaultTimelineItem, { kind: "question" }>["questions"][number]["options"]>): HTMLElement {
+  const list = document.createElement("ul");
+  list.className = "vault-preview-question-options";
+  for (const o of options) {
+    const li = document.createElement("li");
+    li.className = "vault-preview-question-option";
+    if (o.chosen) {
+      li.classList.add("is-chosen");
+    }
+    const label = document.createElement("span");
+    label.className = "vault-preview-question-option-label";
+    label.textContent = o.label;
+    li.append(label);
+    if (o.description) {
+      const desc = document.createElement("span");
+      desc.className = "vault-preview-question-option-desc";
+      desc.textContent = o.description;
+      li.append(desc);
+    }
+    list.append(li);
+  }
+  return list;
 }
 
 /** Render one recent-activity step (tool call or subagent invocation). */

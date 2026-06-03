@@ -57,6 +57,110 @@ describe("classifyCodexRolloutEvents", () => {
     const out = classifyCodexRolloutEvents([rec("event_msg", { type: "user_message", message: "hi" })]);
     expect(out.stats.tokenCount).toBeUndefined();
   });
+
+  it("maps a request_user_input call + its function_call_output into a question item", () => {
+    // Plan-mode AskUserQuestion analogue: arguments carry the questions; the answer
+    // arrives in a later function_call_output (a JSON string), keyed by question id.
+    const records = [
+      rec("event_msg", { type: "user_message", message: "plan it" }),
+      rec("response_item", {
+        type: "function_call",
+        name: "request_user_input",
+        call_id: "call_q1",
+        arguments: JSON.stringify({
+          questions: [
+            {
+              id: "dir",
+              header: "Direction",
+              question: "Which direction?",
+              options: [
+                { label: "Built-in", description: "use the built-in provider" },
+                { label: "Custom", description: "more control" },
+              ],
+            },
+          ],
+        }),
+      }),
+      rec("response_item", {
+        type: "function_call_output",
+        call_id: "call_q1",
+        output: JSON.stringify({ answers: { dir: { answers: ["Built-in"] } } }),
+      }),
+    ];
+    const out = classifyCodexRolloutEvents(records);
+    const question = out.timeline.find((t) => t.kind === "question");
+    expect(question?.kind === "question" && question.questions).toEqual([
+      {
+        prompt: "Which direction?",
+        answer: "Built-in",
+        options: [
+          { label: "Built-in", description: "use the built-in provider", chosen: true },
+          { label: "Custom", description: "more control" },
+        ],
+      },
+    ]);
+    // Counts as a tool call, not surfaced as a bare "request_user_input" chip.
+    expect(out.timeline.some((t) => t.kind === "tool" && t.tool === "request_user_input")).toBe(false);
+    expect(out.stats.toolCount).toBe(1);
+  });
+
+  it("masks a secret request_user_input answer and never reveals the picked option", () => {
+    const records = [
+      rec("response_item", {
+        type: "function_call",
+        name: "request_user_input",
+        call_id: "c",
+        arguments: JSON.stringify({
+          questions: [{ id: "tok", header: "Token", question: "Paste the API token", isSecret: true }],
+        }),
+      }),
+      rec("response_item", {
+        type: "function_call_output",
+        call_id: "c",
+        output: JSON.stringify({ answers: { tok: { answers: ["user_note: sk-supersecret"] } } }),
+      }),
+    ];
+    const out = classifyCodexRolloutEvents(records);
+    const q = out.timeline.find((t) => t.kind === "question");
+    expect(q?.kind === "question" && q.questions[0]).toEqual({ prompt: "Paste the API token", answer: "••••••" });
+    // The raw secret never appears anywhere in the rendered detail.
+    expect(JSON.stringify(out)).not.toContain("sk-supersecret");
+  });
+
+  it("strips the user_note: prefix and includes the freeform note in the answer", () => {
+    const records = [
+      rec("response_item", {
+        type: "function_call",
+        name: "request_user_input",
+        call_id: "c",
+        arguments: JSON.stringify({
+          questions: [{ id: "env", question: "Which env?", options: [{ label: "staging" }, { label: "prod" }] }],
+        }),
+      }),
+      rec("response_item", {
+        type: "function_call_output",
+        call_id: "c",
+        output: JSON.stringify({ answers: { env: { answers: ["staging", "user_note: but only after 5pm"] } } }),
+      }),
+    ];
+    const out = classifyCodexRolloutEvents(records);
+    const q = out.timeline.find((t) => t.kind === "question");
+    expect(q?.kind === "question" && q.questions[0]).toEqual({
+      prompt: "Which env?",
+      answer: "staging, but only after 5pm",
+      options: [{ label: "staging", chosen: true }, { label: "prod" }],
+    });
+  });
+
+  it("falls back to a tool chip for a request_user_input with unparseable arguments", () => {
+    const records = [
+      rec("event_msg", { type: "user_message", message: "plan it" }),
+      rec("response_item", { type: "function_call", name: "request_user_input", call_id: "c", arguments: "not json" }),
+    ];
+    const out = classifyCodexRolloutEvents(records);
+    expect(out.timeline.some((t) => t.kind === "question")).toBe(false);
+    expect(out.timeline.some((t) => t.kind === "tool" && t.tool === "request_user_input")).toBe(true);
+  });
 });
 
 describe("readCodexDetail", () => {

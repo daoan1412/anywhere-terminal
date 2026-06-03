@@ -27,9 +27,11 @@ import type { ReaderResult } from "./claudeReader";
 import {
   boundActivity,
   boundTimeline,
+  buildQuestionOptions,
   createBoundedRecordBuffer,
   finalizeDetail,
   MAX_MESSAGE_TEXT,
+  type QuestionPair,
   truncate,
   truncateRich,
 } from "./detail";
@@ -372,6 +374,117 @@ function codexFunctionLabel(args: unknown): string | undefined {
   return raw;
 }
 
+/** Parse a Codex JSON-string field (`arguments` / `output`) into an object, else undefined. */
+function parseJsonObj(v: unknown): Record<string, unknown> | undefined {
+  if (typeof v !== "string") {
+    return objField(v);
+  }
+  try {
+    return objField(JSON.parse(v));
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * Codex's `request_user_input` (Plan-mode/feature-gated AskUserQuestion analogue).
+ * The CALL `arguments` carry `{ questions: [{ id, header, question, options }] }`;
+ * the user's pick arrives in a later `function_call_output` (correlated by
+ * `call_id`) as `{ answers: { <questionId>: { answers: [label, …] } } }`. This maps
+ * the call to a question item, recovering each question's answer by its id.
+ *
+ * Source-derived shape (codex-rs request_user_input): no real session in the test
+ * corpus invokes it, so parsing is defensive — a shape mismatch degrades to an
+ * answer-less ("Awaiting answer") item rather than throwing, and a call with no
+ * parseable questions returns null so the caller falls back to a tool chip.
+ */
+function buildCodexQuestionItem(
+  args: unknown,
+  answersById: Record<string, unknown> | undefined,
+  ts: number,
+): Extract<VaultTimelineItem, { kind: "question" }> | null {
+  const questions = Array.isArray(parseJsonObj(args)?.questions) ? (parseJsonObj(args)?.questions as unknown[]) : [];
+  const pairs: QuestionPair[] = [];
+  for (const q of questions) {
+    const qObj = objField(q);
+    const prompt = asString(qObj?.question) ?? asString(qObj?.header);
+    if (!prompt) {
+      continue;
+    }
+    const id = asString(qObj?.id);
+    const { labels, note } = splitCodexAnswer(id ? codexAnswerEntries(answersById?.[id]) : []);
+    const answered = labels.length > 0 || note !== undefined;
+    // A secret answer is persisted RAW (as a user_note) — mask it and never reveal
+    // the picked option. Otherwise the answer is the picked label(s) + freeform note.
+    const secret = qObj?.isSecret === true;
+    const answer = secret
+      ? answered
+        ? "••••••"
+        : undefined
+      : [...labels, ...(note !== undefined ? [note] : [])].join(", ") || undefined;
+    const options = buildQuestionOptions(
+      Array.isArray(qObj?.options) ? (qObj?.options as unknown[]) : [],
+      secret ? new Set<string>() : new Set(labels),
+    );
+    pairs.push({
+      prompt: truncate(prompt),
+      ...(answer ? { answer: truncate(answer) } : {}),
+      ...(options.length ? { options } : {}),
+    });
+  }
+  return pairs.length > 0 ? { kind: "question", questions: pairs, timestamp: ts } : null;
+}
+
+/**
+ * Pre-scan: map each `request_user_input` call_id → its answers-by-question-id,
+ * recovered from the matching `function_call_output` (a JSON string
+ * `{ answers: { <questionId>: { answers: [...] } } }`). The output for other tools
+ * (e.g. exec_command) is plain text → no `answers` object → skipped.
+ */
+function collectCodexQuestionAnswers(records: Record<string, unknown>[]): Map<string, Record<string, unknown>> {
+  const map = new Map<string, Record<string, unknown>>();
+  for (const rec of records) {
+    const payload = objField(objField(rec)?.payload);
+    if (payload?.type !== "function_call_output") {
+      continue;
+    }
+    const callId = asString(payload.call_id);
+    const answers = objField(parseJsonObj(payload.output)?.answers);
+    if (callId && answers) {
+      map.set(callId, answers);
+    }
+  }
+  return map;
+}
+
+/** The raw answer entries for one question from a `request_user_input` answer entry
+ *  (`{ answers: [label | "user_note: …", …] }`). */
+function codexAnswerEntries(entry: unknown): string[] {
+  const list = objField(entry)?.answers;
+  if (!Array.isArray(list)) {
+    return [];
+  }
+  return list.map((a) => asString(a)).filter((s): s is string => !!s);
+}
+
+/** Split request_user_input answer entries into picked option labels + an optional
+ *  freeform note. Notes are encoded `user_note: <text>` (mirrors the Codex TUI). */
+function splitCodexAnswer(entries: string[]): { labels: string[]; note?: string } {
+  const labels: string[] = [];
+  let note: string | undefined;
+  for (const e of entries) {
+    if (e.startsWith("user_note: ")) {
+      const t = e.slice("user_note: ".length).trim();
+      if (t) {
+        note = note ? `${note} ${t}` : t;
+      }
+    } else {
+      labels.push(e);
+    }
+  }
+  return { labels, ...(note !== undefined ? { note } : {}) };
+}
+
 /** Best-effort reasoning text from a Codex `reasoning` item — only the plaintext
  *  `summary[].text` (the bulk is `encrypted_content`, which we never surface). */
 function codexReasoningText(payload: Record<string, unknown>): string | undefined {
@@ -429,6 +542,9 @@ export function classifyCodexRolloutEvents(
   let messageCount = 0;
   let toolCount = 0;
   let totalTokens: number | undefined;
+  // request_user_input answers arrive in a later function_call_output (correlated
+  // by call_id); pre-scan them so the question item can carry the answer inline.
+  const questionAnswers = collectCodexQuestionAnswers(records);
 
   for (const rec of records) {
     if (!rec || typeof rec !== "object") {
@@ -471,10 +587,21 @@ export function classifyCodexRolloutEvents(
       if (ptype === "function_call") {
         toolCount++;
         const name = asString(payload.name) ?? "tool";
-        const label = codexFunctionLabel(payload.arguments);
-        const step: VaultActivityStep = { kind: "tool", tool: name, detail: label ? truncate(label) : undefined };
-        activity.push(step);
-        timeline.push(step);
+        // request_user_input is a user decision point — surface it as a question
+        // item (Q + options + recovered answer); anything else, and an unparseable
+        // one, falls through to a generic tool step.
+        const question =
+          name === "request_user_input"
+            ? buildCodexQuestionItem(payload.arguments, questionAnswers.get(asString(payload.call_id) ?? ""), ts)
+            : null;
+        if (question) {
+          timeline.push(question);
+        } else {
+          const label = codexFunctionLabel(payload.arguments);
+          const step: VaultActivityStep = { kind: "tool", tool: name, detail: label ? truncate(label) : undefined };
+          activity.push(step);
+          timeline.push(step);
+        }
       } else if (ptype === "custom_tool_call") {
         toolCount++;
         const name = asString(payload.name) ?? "tool";

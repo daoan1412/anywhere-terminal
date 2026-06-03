@@ -165,6 +165,23 @@ export type VaultTimelineItem =
   | { kind: "message"; role: "user" | "assistant"; text: string; timestamp?: number }
   | { kind: "thinking"; text: string; timestamp?: number }
   /**
+   * An AskUserQuestion turn — a user decision point. Each pair is a question the
+   * agent asked plus the option label(s) the user picked; `answer` is absent while
+   * the call is still pending (or the session ended on the prompt). `options`, when
+   * present, is the full choice list (with descriptions, the picked one flagged
+   * `chosen`) the preview reveals on demand. Rendered as a first-class block that
+   * breaks the surrounding AI run so it never hides behind a "Show N more" cap.
+   */
+  | {
+      kind: "question";
+      questions: {
+        prompt: string;
+        answer?: string;
+        options?: { label: string; description?: string; chosen?: boolean }[];
+      }[];
+      timestamp?: number;
+    }
+  /**
    * A nested sub-session (a subagent / workflow child). A lazy stub: `title` +
    * `firstMessage` render the collapsed block; the full transcript is fetched on
    * demand via `entryId` (the resolvable `<agent>:<id>` — OpenCode children by

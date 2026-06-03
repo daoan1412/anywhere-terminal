@@ -150,6 +150,91 @@ describe("mapOpencodeRows", () => {
     });
   });
 
+  it("maps an AskUserQuestion tool into a question item (answered + pending) with options", () => {
+    const messages: OcMessageRow[] = [msg("m1", "user", 1), msg("m2", "assistant", 2)];
+    const parts: OcPartRow[] = [
+      textPart("m1", 1, "plan it"),
+      // Answered: the user's pick lives in state.metadata.answers (array per question).
+      toolPart(
+        "m2",
+        2,
+        "question",
+        {
+          questions: [
+            {
+              question: "Which direction?",
+              header: "Gate 1",
+              options: [
+                { label: "Built-in (Recommended)", description: "use the built-in provider" },
+                { label: "Custom wrapper", description: "more control, more risk" },
+              ],
+            },
+          ],
+        },
+        { answers: [["Built-in (Recommended)"]] },
+      ),
+      // Pending: no answers recorded → no `answer` field → renders "Awaiting answer".
+      toolPart("m2", 3, "question", { questions: [{ question: "Run review now?", options: [] }] }),
+    ];
+    const out = mapOpencodeRows(messages, parts);
+    const questions = out.timeline.filter(
+      (t): t is Extract<VaultTimelineItem, { kind: "question" }> => t.kind === "question",
+    );
+    expect(questions).toHaveLength(2);
+    expect(questions[0].questions).toEqual([
+      {
+        prompt: "Which direction?",
+        answer: "Built-in (Recommended)",
+        options: [
+          { label: "Built-in (Recommended)", description: "use the built-in provider", chosen: true },
+          { label: "Custom wrapper", description: "more control, more risk" },
+        ],
+      },
+    ]);
+    expect(questions[1].questions).toEqual([{ prompt: "Run review now?" }]);
+    // The question is NOT also emitted as a bare "Question" tool chip, and is not
+    // counted as a subagent — but still counts as a tool call.
+    expect(out.timeline.some((t) => t.kind === "tool" && t.tool === "Question")).toBe(false);
+    expect(out.stats.toolCount).toBe(2);
+  });
+
+  it("joins multi-select answers and falls back to the header when a question text is absent", () => {
+    const messages: OcMessageRow[] = [msg("m1", "user", 1), msg("m2", "assistant", 2)];
+    const parts: OcPartRow[] = [
+      textPart("m1", 1, "go"),
+      toolPart("m2", 2, "question", { questions: [{ header: "Pick features" }] }, { answers: [["A", "B"]] }),
+    ];
+    const out = mapOpencodeRows(messages, parts);
+    const q = out.timeline.find((t) => t.kind === "question");
+    expect(q?.kind === "question" && q.questions).toEqual([{ prompt: "Pick features", answer: "A, B" }]);
+  });
+
+  it("falls back to a generic tool chip when a question tool has no parseable questions", () => {
+    const messages: OcMessageRow[] = [msg("m1", "user", 1), msg("m2", "assistant", 2)];
+    const parts: OcPartRow[] = [textPart("m1", 1, "go"), toolPart("m2", 2, "question", {})];
+    const out = mapOpencodeRows(messages, parts);
+    expect(out.timeline.some((t) => t.kind === "question")).toBe(false);
+    expect(out.timeline.some((t) => t.kind === "tool" && t.tool === "Question")).toBe(true);
+  });
+
+  it("does not render an errored (rejected/aborted) question as 'Awaiting answer'", () => {
+    const messages: OcMessageRow[] = [msg("m1", "user", 1), msg("m2", "assistant", 2)];
+    // An aborted question keeps parseable input but status:"error" — it must NOT
+    // surface as a pending question item; it falls back to a generic tool chip.
+    const errored: OcPartRow = {
+      messageId: "m2",
+      timeCreated: 2,
+      data: {
+        type: "tool",
+        tool: "question",
+        state: { status: "error", error: "Tool execution aborted", input: { questions: [{ question: "Proceed?" }] } },
+      },
+    };
+    const out = mapOpencodeRows([...messages], [textPart("m1", 1, "go"), errored]);
+    expect(out.timeline.some((t) => t.kind === "question")).toBe(false);
+    expect(out.timeline.some((t) => t.kind === "tool" && t.tool === "Question")).toBe(true);
+  });
+
   it("omits tokenCount when no assistant tokens are present", () => {
     const out = mapOpencodeRows([msg("m1", "user", 1), msg("m2", "assistant", 2)], [textPart("m1", 1, "hi")]);
     expect(out.stats.tokenCount).toBeUndefined();

@@ -321,6 +321,166 @@ describe("classifyClaudeStyleEvents", () => {
     expect(out.timeline.some((i) => i.kind === "tool" && i.tool === "Bash" && i.detail === "echo hi")).toBe(true);
   });
 
+  it("maps an AskUserQuestion tool_use + its answer record into a question item with options", () => {
+    const records: Rec[] = [
+      userText("plan it"),
+      {
+        type: "assistant",
+        message: {
+          role: "assistant",
+          content: [
+            {
+              type: "tool_use",
+              id: "toolu_q1",
+              name: "AskUserQuestion",
+              input: {
+                questions: [
+                  {
+                    question: "Which direction?",
+                    header: "Gate 1",
+                    multiSelect: false,
+                    options: [
+                      { label: "Built-in", description: "use the built-in provider" },
+                      { label: "Custom", description: "more control" },
+                    ],
+                  },
+                ],
+              },
+            },
+          ],
+        },
+        timestamp: "2026-05-01T01:00:00.000Z",
+      },
+      // The answer arrives in a later user record's structured toolUseResult.
+      {
+        type: "user",
+        message: { role: "user", content: [{ type: "tool_result", tool_use_id: "toolu_q1", content: "answered" }] },
+        toolUseResult: { questions: [{ question: "Which direction?" }], answers: { "Which direction?": "Built-in" } },
+      },
+    ];
+    const out = classifyClaudeStyleEvents(records);
+    const question = out.timeline.find((t) => t.kind === "question");
+    expect(question?.kind === "question" && question.questions).toEqual([
+      {
+        prompt: "Which direction?",
+        answer: "Built-in",
+        options: [
+          { label: "Built-in", description: "use the built-in provider", chosen: true },
+          { label: "Custom", description: "more control" },
+        ],
+      },
+    ]);
+    // Surfaced as a question, not a bare "AskUserQuestion" tool chip; still counts as a tool.
+    expect(out.timeline.some((t) => t.kind === "tool" && t.tool === "AskUserQuestion")).toBe(false);
+    expect(out.stats.toolCount).toBe(1);
+  });
+
+  it("splits a Claude multi-select answer (comma-joined) to highlight every picked option", () => {
+    const records: Rec[] = [
+      userText("go"),
+      {
+        type: "assistant",
+        message: {
+          role: "assistant",
+          content: [
+            {
+              type: "tool_use",
+              id: "toolu_m",
+              name: "AskUserQuestion",
+              input: {
+                questions: [
+                  {
+                    question: "Pick features",
+                    multiSelect: true,
+                    options: [{ label: "A" }, { label: "B" }, { label: "C" }],
+                  },
+                ],
+              },
+            },
+          ],
+        },
+        timestamp: "2026-05-01T01:00:00.000Z",
+      },
+      {
+        type: "user",
+        message: { role: "user", content: [{ type: "tool_result", tool_use_id: "toolu_m", content: "ok" }] },
+        // Claude joins multi-select picks with ", " into one string.
+        toolUseResult: { questions: [{ question: "Pick features" }], answers: { "Pick features": "A, C" } },
+      },
+    ];
+    const out = classifyClaudeStyleEvents(records);
+    const question = out.timeline.find((t) => t.kind === "question");
+    expect(question?.kind === "question" && question.questions[0]).toEqual({
+      prompt: "Pick features",
+      answer: "A, C",
+      options: [{ label: "A", chosen: true }, { label: "B" }, { label: "C", chosen: true }],
+    });
+  });
+
+  it("matches a single-select Claude answer whole even when its label contains a comma", () => {
+    const records: Rec[] = [
+      userText("go"),
+      {
+        type: "assistant",
+        message: {
+          role: "assistant",
+          content: [
+            {
+              type: "tool_use",
+              id: "toolu_s",
+              name: "AskUserQuestion",
+              input: {
+                questions: [
+                  { question: "Proceed?", multiSelect: false, options: [{ label: "Yes, proceed" }, { label: "No" }] },
+                ],
+              },
+            },
+          ],
+        },
+        timestamp: "2026-05-01T01:00:00.000Z",
+      },
+      {
+        type: "user",
+        message: { role: "user", content: [{ type: "tool_result", tool_use_id: "toolu_s", content: "ok" }] },
+        toolUseResult: { questions: [{ question: "Proceed?" }], answers: { "Proceed?": "Yes, proceed" } },
+      },
+    ];
+    const out = classifyClaudeStyleEvents(records);
+    const question = out.timeline.find((t) => t.kind === "question");
+    // Single-select: the whole "Yes, proceed" matches its option — NOT split into "Yes"/"proceed".
+    expect(question?.kind === "question" && question.questions[0]).toEqual({
+      prompt: "Proceed?",
+      answer: "Yes, proceed",
+      options: [{ label: "Yes, proceed", chosen: true }, { label: "No" }],
+    });
+  });
+
+  it("maps an unanswered AskUserQuestion (no matching answer record) as pending", () => {
+    const records: Rec[] = [
+      userText("plan it"),
+      {
+        type: "assistant",
+        message: {
+          role: "assistant",
+          content: [
+            {
+              type: "tool_use",
+              id: "toolu_q2",
+              name: "AskUserQuestion",
+              input: { questions: [{ question: "Proceed?", options: [{ label: "Yes" }, { label: "No" }] }] },
+            },
+          ],
+        },
+        timestamp: "2026-05-01T01:00:00.000Z",
+      },
+    ];
+    const out = classifyClaudeStyleEvents(records);
+    const question = out.timeline.find((t) => t.kind === "question");
+    expect(question?.kind === "question" && question.questions).toEqual([
+      { prompt: "Proceed?", options: [{ label: "Yes" }, { label: "No" }] },
+    ]);
+  });
+
   it("skips isMeta records, the caveat banner, and bare commands when picking the first prompt", () => {
     const records: Rec[] = [
       userText("<local-command-caveat>Caveat: …</local-command-caveat>", { isMeta: true }),

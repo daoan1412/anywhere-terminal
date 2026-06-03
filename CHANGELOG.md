@@ -6,10 +6,18 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ## [Unreleased]
 
+### Added
+
+- **See the questions an agent asked you — and your answers — in the session preview.** When a session uses the ask-the-user tool (Claude Code's `AskUserQuestion`, OpenCode's `question`, Codex's `request_user_input`), the preview now renders it as a distinct block instead of a bare "Question" chip: the question, the option(s) you picked, and a **click-to-expand** list of every option with its description (your choice highlighted). The block always stays visible — it's never collapsed inside a tool run. A question the session ended on shows **Awaiting answer**, and Codex secret answers are masked.
+
 ### Changed
 
 - **Resuming from the session preview now closes it.** Clicking Resume in the AI Vault session preview resumes the session in a terminal and dismisses the floating preview in one step, instead of leaving it open over the terminal you just switched to.
 - **Session preview no longer covers the terminal tab bar.** Whether floating or **maximized**, the preview now stops below the terminal tab strip (shown when 2+ terminals are open) so its tabs stay clickable. The floating card's top is clamped below the strip when anchored, restored, dragged, or resized upward; the maximized card starts at the strip's bottom instead of the viewport top. Both track the tab bar showing/hiding live.
+
+### Fixed
+
+- **The final assistant message no longer disappears from a long session preview.** When a turn ended with a tool call — e.g. an `AskUserQuestion` prompt or a closing `git status` — the run's concluding message was buried behind "Show N more", so the last visible item was a tool rather than the answer. A capped run now pins its concluding assistant message so it stays in view, and ask-the-user prompts break out of the run entirely.
 
 ## [0.17.1] — 2026-06-02
 

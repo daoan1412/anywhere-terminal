@@ -8,7 +8,7 @@ import type { VaultSessionDetail, VaultTimelineItem } from "../../vault/types";
 import { formatRelativeTime } from "./format";
 import { ICON_CHEVRON_DOWN } from "./icons";
 import { teammateAccent } from "./previewColors";
-import { activityStep, previewMessage, thinkingBlock } from "./renderAtoms";
+import { activityStep, previewMessage, questionBlock, thinkingBlock } from "./renderAtoms";
 import { renderWorkflowBoard } from "./workflowBoard";
 
 /** A prominent node that breaks the surrounding AI-output run and renders directly
@@ -19,7 +19,8 @@ function breaksRun(item: VaultTimelineItem): boolean {
     item.kind === "subagentSession" ||
     item.kind === "teammateTurn" ||
     item.kind === "teammateMessage" ||
-    item.kind === "workflowBoard"
+    item.kind === "workflowBoard" ||
+    item.kind === "question"
   );
 }
 
@@ -124,6 +125,9 @@ function renderTimelineItem(item: VaultTimelineItem, bag: PreviewTimelineBag): H
   if (item.kind === "thinking") {
     return thinkingBlock(item.text);
   }
+  if (item.kind === "question") {
+    return questionBlock(item);
+  }
   if (item.kind === "subagentSession") {
     return renderSubagentSession(item, bag);
   }
@@ -151,10 +155,25 @@ function renderRun(body: HTMLElement, run: VaultTimelineItem[], key: string, bag
     return;
   }
 
-  // Only pin when the conclusion is genuinely the LAST item — pinning a mid-run
-  // assistant line would reorder the transcript and bury its trailing steps.
-  const last = run[run.length - 1];
-  const pin = last.kind === "message" && last.role === "assistant" && last.text.trim().length > 0;
+  // Pin the run's LAST assistant message — its concluding text — even when
+  // low-signal tool steps trail it (an agent that ends a turn with an
+  // AskUserQuestion call, or a final bookkeeping `git status`, leaves its answer
+  // second-to-last). A head-only slice would bury that conclusion behind "Show N
+  // more". Skip the pin only when the message already falls inside the head window
+  // (nothing to rescue); the trailing steps stay collapsed and reappear, in
+  // natural order, on expand.
+  let pinIndex = -1;
+  for (let k = run.length - 1; k >= 0; k--) {
+    const it = run[k];
+    if (it.kind === "message" && it.role === "assistant" && it.text.trim().length > 0) {
+      pinIndex = k;
+      break;
+    }
+  }
+  // Pin only when the conclusion would otherwise be hidden — i.e. it sits beyond
+  // the CAP-item head a non-pinned run shows. At pinIndex < CAP it's already in
+  // that head, so pinning would needlessly reorder it below the expand.
+  const pin = pinIndex >= CAP;
   const headCount = pin ? CAP - 1 : CAP;
   for (let k = 0; k < headCount; k++) {
     body.appendChild(renderTimelineItem(run[k], bag));
@@ -167,7 +186,7 @@ function renderRun(body: HTMLElement, run: VaultTimelineItem[], key: string, bag
   btn.textContent = `Show ${hidden} more step${hidden === 1 ? "" : "s"}`;
   btn.title = "Show every step in this run";
   body.appendChild(btn);
-  const pinned = pin ? renderTimelineItem(last, bag) : null;
+  const pinned = pin ? renderTimelineItem(run[pinIndex], bag) : null;
   if (pinned) {
     body.appendChild(pinned);
   }

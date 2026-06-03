@@ -1044,6 +1044,91 @@ body:has(#tab-bar.visible) .vault-preview--max {
 .vault-preview-message-subagent {
   border-left-color: var(--vault-accent-opencode);
 }
+/* AskUserQuestion — a user decision point. Breaks the AI run so it always shows;
+   the prompt is the agent's question, the answer line carries the user accent. The
+   full option list is revealed on demand when the call carried options. */
+.vault-preview-message-question {
+  margin-left: 14px;
+  border-left-color: var(--vault-user-accent);
+  background: color-mix(in srgb, var(--vault-user-accent) 8%, transparent);
+  border-radius: 0 4px 4px 0;
+  padding-right: 8px;
+}
+.vault-preview-message-question .vault-preview-message-role {
+  color: var(--vault-user-accent);
+}
+.vault-preview-question-prompt {
+  font-weight: 500;
+}
+.vault-preview-question-answer {
+  margin-bottom: 4px;
+  color: var(--vault-user-accent);
+  font-weight: 600;
+}
+.vault-preview-question-answer:last-child {
+  margin-bottom: 0;
+}
+.vault-preview-question-answer.is-pending {
+  color: var(--vscode-descriptionForeground);
+  font-weight: 400;
+  font-style: italic;
+}
+.vault-preview-question-arrow {
+  opacity: 0.7;
+}
+/* Collapsible header (only when there are options): the role line IS the toggle. */
+.vault-preview-question-head {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  width: 100%;
+  border: none;
+  background: none;
+  padding: 0;
+  cursor: pointer;
+  font: inherit;
+  text-align: left;
+}
+.vault-preview-question-chevron {
+  margin-left: auto;
+  display: inline-flex;
+  opacity: 0.7;
+  transition: transform 0.12s ease;
+}
+.vault-preview-message-question.is-expanded .vault-preview-question-chevron {
+  transform: rotate(180deg);
+}
+/* Option list — hidden until the block is expanded. */
+.vault-preview-question-options {
+  display: none;
+  list-style: none;
+  margin: 4px 0 2px;
+  padding: 0;
+}
+.vault-preview-message-question.is-expanded .vault-preview-question-options {
+  display: block;
+}
+.vault-preview-question-option {
+  padding: 3px 0 3px 8px;
+  border-left: 2px solid color-mix(in srgb, var(--vscode-foreground) 15%, transparent);
+  margin-bottom: 3px;
+}
+.vault-preview-question-option.is-chosen {
+  border-left-color: var(--vault-user-accent);
+  background: color-mix(in srgb, var(--vault-user-accent) 10%, transparent);
+}
+.vault-preview-question-option-label {
+  font-weight: 600;
+}
+.vault-preview-question-option.is-chosen .vault-preview-question-option-label {
+  color: var(--vault-user-accent);
+}
+.vault-preview-question-option-desc {
+  display: block;
+  color: var(--vscode-descriptionForeground);
+  font-size: 11px;
+  line-height: 1.4;
+}
 /* Thinking — muted + italic, clearly secondary to the answer. */
 .vault-preview-message-thinking {
   border-left-color: color-mix(in srgb, var(--vscode-foreground) 14%, transparent);

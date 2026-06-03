@@ -19,7 +19,15 @@ import {
   type VaultSessionEntry,
   type VaultTimelineItem,
 } from "../types";
-import { boundActivity, boundTimeline, MAX_MESSAGE_TEXT, truncate, truncateRich } from "./detail";
+import {
+  boundActivity,
+  boundTimeline,
+  buildQuestionOptions,
+  MAX_MESSAGE_TEXT,
+  type QuestionPair,
+  truncate,
+  truncateRich,
+} from "./detail";
 
 /** Bound the read so the vault list stays cheap (D2). */
 const ROW_LIMIT = 500;
@@ -299,6 +307,37 @@ function opencodeToolLabel(tool: string, input: Record<string, unknown>): string
   }
 }
 
+/**
+ * AskUserQuestion ("question") tool → structured Q&A pairs: each question paired
+ * with the option label(s) the user picked (`state.metadata.answers` — an array
+ * per question). `answer` is left absent while the call is still pending (status
+ * not `completed`, or no answer recorded) so the preview shows "awaiting answer".
+ */
+function opencodeQuestionPairs(state: Record<string, unknown>): QuestionPair[] {
+  const input = objField(state.input) ?? {};
+  const questions = Array.isArray(input.questions) ? input.questions : [];
+  const meta = objField(state.metadata) ?? {};
+  const answers = Array.isArray(meta.answers) ? meta.answers : [];
+  const pairs: QuestionPair[] = [];
+  for (let i = 0; i < questions.length; i++) {
+    const q = objField(questions[i]);
+    const prompt = strField(q?.question) ?? strField(q?.header);
+    if (!prompt) {
+      continue;
+    }
+    const picked = Array.isArray(answers[i])
+      ? (answers[i] as unknown[]).map((a) => strField(a)).filter((s): s is string => !!s)
+      : [];
+    const options = buildQuestionOptions(Array.isArray(q?.options) ? q.options : [], new Set(picked));
+    pairs.push({
+      prompt: truncate(prompt),
+      ...(picked.length ? { answer: truncate(picked.join(", ")) } : {}),
+      ...(options.length ? { options } : {}),
+    });
+  }
+  return pairs;
+}
+
 /** Count added/removed lines from a unified-diff string (cheap, best-effort). */
 function diffStat(metadata: unknown): { added: number; removed: number } | undefined {
   const d = objField(metadata)?.diff;
@@ -411,6 +450,18 @@ export function mapOpencodeRows(
       toolCount++;
       const tool = strField(p.data.tool) ?? "tool";
       const state = objField(p.data.state) ?? {};
+      // AskUserQuestion is a user decision point, not plumbing — surface it as a
+      // first-class question item (the Q + the user's answer) rather than a bare
+      // "Question" tool chip that would collapse inside a run. An ERRORED question
+      // (rejected/aborted) is skipped here so it falls back to a tool chip instead
+      // of misrendering as "Awaiting answer"; pending/running/completed still map.
+      if (tool === "question" && strField(state.status) !== "error") {
+        const pairs = opencodeQuestionPairs(state);
+        if (pairs.length > 0) {
+          tl.push({ ts: p.timeCreated, item: { kind: "question", questions: pairs, timestamp: p.timeCreated } });
+          continue;
+        }
+      }
       const input = objField(state.input) ?? {};
       const label = opencodeToolLabel(tool, input);
       const diff = tool === "edit" ? diffStat(state.metadata) : undefined;

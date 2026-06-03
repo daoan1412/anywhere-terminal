@@ -219,6 +219,33 @@ export function boundActivity<T>(steps: T[], max = MAX_ACTIVITY_STEPS): T[] {
   return steps.length > max ? steps.slice(steps.length - max) : steps;
 }
 
+/** One AskUserQuestion Q&A pair, shared by the per-agent question extractors. */
+export type QuestionPair = Extract<VaultTimelineItem, { kind: "question" }>["questions"][number];
+
+/**
+ * Build a question's option list from raw `{label, description}` records, flagging
+ * options whose label the user picked. Shared by the per-agent extractors (OpenCode
+ * `state.metadata.answers`, Claude `toolUseResult.answers`); both feed the same
+ * expandable question block in the preview.
+ */
+export function buildQuestionOptions(rawOptions: unknown[], picked: Set<string>): NonNullable<QuestionPair["options"]> {
+  const options: NonNullable<QuestionPair["options"]> = [];
+  for (const o of rawOptions) {
+    const opt = o && typeof o === "object" && !Array.isArray(o) ? (o as Record<string, unknown>) : undefined;
+    const label = str(opt?.label);
+    if (!label) {
+      continue;
+    }
+    const description = str(opt?.description);
+    options.push({
+      label: truncate(label),
+      ...(description ? { description: truncate(description) } : {}),
+      ...(picked.has(label) ? { chosen: true } : {}),
+    });
+  }
+  return options;
+}
+
 function str(v: unknown): string | undefined {
   return typeof v === "string" && v.trim() ? v.trim() : undefined;
 }
@@ -354,6 +381,74 @@ function lineDelta(oldStr: unknown, newStr: unknown): { added: number; removed: 
 }
 
 /**
+ * Pre-scan: map each AskUserQuestion `tool_use` id → the user's answers
+ * (question-text → chosen text), recovered from the matching `tool_result`
+ * record's structured `toolUseResult.answers`. The answer lives in a LATER record
+ * than the call, so a single forward pass collects them before the main walk.
+ */
+function collectQuestionAnswers(records: Rec[]): Map<string, Record<string, string>> {
+  const map = new Map<string, Record<string, string>>();
+  for (const rec of records) {
+    const answers = asObj(asObj(rec?.toolUseResult)?.answers);
+    const content = asObj(rec?.message)?.content;
+    if (!answers || !Array.isArray(content)) {
+      continue;
+    }
+    const norm: Record<string, string> = {};
+    for (const [q, a] of Object.entries(answers)) {
+      const s = str(a);
+      if (s) {
+        norm[q] = s;
+      }
+    }
+    for (const b of content) {
+      const id = asObj(b)?.type === "tool_result" ? str(asObj(b)?.tool_use_id) : undefined;
+      if (id) {
+        map.set(id, norm);
+      }
+    }
+  }
+  return map;
+}
+
+/**
+ * An AskUserQuestion `tool_use` → a structured question item: each question with
+ * its options and the user's recovered answer (matched by question text; absent
+ * when the call went unanswered). Returns null when nothing is parseable.
+ */
+function buildClaudeQuestionItem(
+  input: unknown,
+  answers: Record<string, string> | undefined,
+  ts: number,
+): Extract<VaultTimelineItem, { kind: "question" }> | null {
+  const questions = Array.isArray(asObj(input)?.questions) ? (asObj(input)?.questions as unknown[]) : [];
+  const pairs: QuestionPair[] = [];
+  for (const q of questions) {
+    const qObj = asObj(q);
+    const qText = str(qObj?.question);
+    const prompt = qText ?? str(qObj?.header);
+    if (!prompt) {
+      continue;
+    }
+    const answer = qText && answers ? str(answers[qText]) : undefined;
+    // Claude joins a MULTI-select answer into one ", "-string (per the AskUserQuestion
+    // source) — split it to match each picked option; a single-select answer (whose
+    // own label may contain ", ") is matched whole.
+    const picked = answer ? (qObj?.multiSelect === true ? answer.split(", ").map((s) => s.trim()) : [answer]) : [];
+    const options = buildQuestionOptions(
+      Array.isArray(qObj?.options) ? (qObj?.options as unknown[]) : [],
+      new Set(picked.filter(Boolean)),
+    );
+    pairs.push({
+      prompt: truncate(prompt),
+      ...(answer ? { answer: truncate(answer) } : {}),
+      ...(options.length ? { options } : {}),
+    });
+  }
+  return pairs.length > 0 ? { kind: "question", questions: pairs, timestamp: ts } : null;
+}
+
+/**
  * Classify Claude-style mixed-event records into bounded session detail.
  * Records are the parsed JSONL objects (each with `type`, `message`,
  * `isSidechain?`, `timestamp?`). Only `user`/`assistant`, non-sidechain records
@@ -367,6 +462,9 @@ export function classifyClaudeStyleEvents(records: Rec[], opts: ClassifyOptions 
   // description); whatever is left is appended after the walk.
   const stubs = [...(opts.childStubs ?? [])];
   const totalStubs = opts.childStubs?.length ?? 0;
+  // AskUserQuestion answers live in a later record than the call (the tool_result);
+  // pre-scan them so the question item can carry the answer inline.
+  const questionAnswers = collectQuestionAnswers(records);
   let firstPrompt: string | undefined;
   const activity: VaultActivityStep[] = [];
   let timeline: VaultTimelineItem[] = [];
@@ -494,19 +592,31 @@ export function classifyClaudeStyleEvents(records: Rec[], opts: ClassifyOptions 
             // Suppressed (D5): the run is surfaced as a `workflowBoard` item, so drop
             // the raw tool_use here — don't render it or count it as a tool call.
           } else {
+            // AskUserQuestion is a user decision point — surface the Q + options +
+            // recovered answer as a first-class question item (parity with the
+            // OpenCode reader). An unparseable one, and every other tool, falls
+            // through to a generic tool step rather than vanishing.
+            const question =
+              name === "AskUserQuestion"
+                ? buildClaudeQuestionItem(input, questionAnswers.get(str(block.id) ?? ""), ts)
+                : null;
             toolCount++;
-            const label = toolLabel(name, input);
-            const inObj = asObj(input) ?? {};
-            const diff =
-              name === "Edit" || name === "MultiEdit" ? lineDelta(inObj.old_string, inObj.new_string) : undefined;
-            const step: VaultActivityStep = {
-              kind: "tool",
-              tool: name,
-              detail: label ? truncate(label) : undefined,
-              diff,
-            };
-            activity.push(step);
-            timeline.push(step);
+            if (question) {
+              timeline.push(question);
+            } else {
+              const label = toolLabel(name, input);
+              const inObj = asObj(input) ?? {};
+              const diff =
+                name === "Edit" || name === "MultiEdit" ? lineDelta(inObj.old_string, inObj.new_string) : undefined;
+              const step: VaultActivityStep = {
+                kind: "tool",
+                tool: name,
+                detail: label ? truncate(label) : undefined,
+                diff,
+              };
+              activity.push(step);
+              timeline.push(step);
+            }
           }
         }
       }

@@ -1251,13 +1251,14 @@ describe("VaultPanel session preview (redesign 5_2)", () => {
     );
   });
 
-  it("does NOT pin a mid-run assistant line when steps follow it (no reorder)", () => {
+  it("pins the run's last assistant message even when a tool step trails it", () => {
     const host = createHost();
     const panel = new VaultPanel({ host, postMessage: () => {}, getInitialCollapsed: () => false });
     panel.render(result([entry({ id: "claude:a" })]));
     host.querySelector<HTMLElement>(".vault-row")?.click();
-    // Run = 3 tools + a mid assistant line + a trailing tool (5 items > CAP). The
-    // assistant is NOT the last item, so pinning it would bury the trailing tool.
+    // Run = 3 tools + the concluding assistant line + a trailing tool (5 items > CAP).
+    // Agents that end a turn with an AskUserQuestion (or a final bookkeeping command)
+    // leave the answer second-to-last — it must still surface, not stay buried.
     panel.handleSessionDetailResponse({
       type: "vaultSessionDetailResponse",
       entryId: "claude:a",
@@ -1267,21 +1268,139 @@ describe("VaultPanel session preview (redesign 5_2)", () => {
           { kind: "tool", tool: "Bash", detail: "s1" },
           { kind: "tool", tool: "Bash", detail: "s2" },
           { kind: "tool", tool: "Bash", detail: "s3" },
-          { kind: "message", role: "assistant", text: "let me inspect" },
+          { kind: "message", role: "assistant", text: "FINAL ANSWER" },
           { kind: "tool", tool: "Bash", detail: "s4" },
         ],
       }),
     });
-    // Plain head (3 tools) + "Show 2 more"; the mid assistant stays hidden, NOT pinned.
+    // Head = CAP-1 (first 2 tools) + "Show 2 more steps" + pinned conclusion; the
+    // trailing tool stays hidden behind the expand.
     expect(host.querySelector(".vault-preview-expand")?.textContent).toBe("Show 2 more steps");
-    expect(host.querySelectorAll(".vault-preview-body .vault-preview-message-tool")).toHaveLength(3);
-    expect(host.querySelector(".vault-preview-body .vault-preview-message-assistant")).toBeNull();
-    // Expanding shows the assistant in its natural position (before the last tool).
+    expect(host.querySelectorAll(".vault-preview-body .vault-preview-message-tool")).toHaveLength(2);
+    const assistant = host.querySelector(".vault-preview-body .vault-preview-message-assistant");
+    expect(assistant?.textContent).toContain("FINAL ANSWER");
+    // The pin sits AFTER the expand button (tail position), not coincidentally in the head.
+    const children = Array.from(host.querySelectorAll(".vault-preview-body > *"));
+    const more = host.querySelector(".vault-preview-expand");
+    expect(children.indexOf(more as Element)).toBeLessThan(children.indexOf(assistant as Element));
+    // Expanding reveals every step in natural order — including the trailing tool.
     host.querySelector<HTMLButtonElement>(".vault-preview-expand")?.click();
-    expect(host.querySelector(".vault-preview-body .vault-preview-message-assistant")?.textContent).toContain(
-      "let me inspect",
-    );
     expect(host.querySelectorAll(".vault-preview-body .vault-preview-message-tool")).toHaveLength(4);
+    expect(host.querySelector(".vault-preview-body .vault-preview-message-assistant")?.textContent).toContain(
+      "FINAL ANSWER",
+    );
+  });
+
+  it("does NOT pin an assistant message that already falls inside the visible head (no reorder)", () => {
+    const host = createHost();
+    const panel = new VaultPanel({ host, postMessage: () => {}, getInitialCollapsed: () => false });
+    panel.render(result([entry({ id: "claude:a" })]));
+    host.querySelector<HTMLElement>(".vault-row")?.click();
+    // Run = 2 tools + assistant + 1 tool (4 items > CAP=3). The assistant is at index
+    // 2, inside the 3-item head a non-pinned run shows — so it must render in natural
+    // order, not be reordered below the expand button.
+    panel.handleSessionDetailResponse({
+      type: "vaultSessionDetailResponse",
+      entryId: "claude:a",
+      detail: detail({
+        timeline: [
+          { kind: "message", role: "user", text: "go" },
+          { kind: "tool", tool: "Bash", detail: "s1" },
+          { kind: "tool", tool: "Bash", detail: "s2" },
+          { kind: "message", role: "assistant", text: "MIDPOINT" },
+          { kind: "tool", tool: "Bash", detail: "s3" },
+        ],
+      }),
+    });
+    expect(host.querySelector(".vault-preview-expand")?.textContent).toBe("Show 1 more step");
+    const assistant = host.querySelector(".vault-preview-body .vault-preview-message-assistant");
+    expect(assistant?.textContent).toContain("MIDPOINT");
+    // Natural order: the assistant sits BEFORE the expand button (head), not pinned after it.
+    const children = Array.from(host.querySelectorAll(".vault-preview-body > *"));
+    const more = host.querySelector(".vault-preview-expand");
+    expect(children.indexOf(assistant as Element)).toBeLessThan(children.indexOf(more as Element));
+  });
+
+  it("renders an AskUserQuestion item with its prompt + answer, breaking the run so it always shows", () => {
+    const host = createHost();
+    const panel = new VaultPanel({ host, postMessage: () => {}, getInitialCollapsed: () => false });
+    panel.render(result([entry({ id: "opencode:a", agent: "opencode" })]));
+    host.querySelector<HTMLElement>(".vault-row")?.click();
+    // A long tool run, then the question. As a run-breaking item it renders
+    // directly — never hidden behind the run's "Show N more" cap.
+    panel.handleSessionDetailResponse({
+      type: "vaultSessionDetailResponse",
+      entryId: "opencode:a",
+      detail: detail({
+        entryId: "opencode:a",
+        timeline: [
+          { kind: "message", role: "user", text: "go" },
+          { kind: "tool", tool: "Bash", detail: "s1" },
+          { kind: "tool", tool: "Bash", detail: "s2" },
+          { kind: "tool", tool: "Bash", detail: "s3" },
+          { kind: "tool", tool: "Bash", detail: "s4" },
+          { kind: "question", questions: [{ prompt: "Approve the plan?", answer: "Approve (Recommended)" }] },
+          { kind: "question", questions: [{ prompt: "Run re-review now?" }] },
+        ],
+      }),
+    });
+    const blocks = host.querySelectorAll(".vault-preview-body .vault-preview-message-question");
+    expect(blocks).toHaveLength(2);
+    // Answered question shows the prompt + the user's pick (not pending).
+    expect(blocks[0].querySelector(".vault-preview-question-prompt")?.textContent).toBe("Approve the plan?");
+    expect(blocks[0].querySelector(".vault-preview-question-answer")?.textContent).toContain("Approve (Recommended)");
+    expect(blocks[0].querySelector(".vault-preview-question-answer.is-pending")).toBeNull();
+    // Pending question shows the prompt + an "Awaiting answer" marker.
+    expect(blocks[1].querySelector(".vault-preview-question-prompt")?.textContent).toBe("Run re-review now?");
+    expect(blocks[1].querySelector(".vault-preview-question-answer.is-pending")?.textContent).toBe("Awaiting answer");
+    // The question broke the tool run, so the run before it still caps at 3 + expand.
+    expect(host.querySelector(".vault-preview-expand")?.textContent).toBe("Show 1 more step");
+  });
+
+  it("expands an AskUserQuestion to reveal its options, highlighting the chosen one", () => {
+    const host = createHost();
+    const panel = new VaultPanel({ host, postMessage: () => {}, getInitialCollapsed: () => false });
+    panel.render(result([entry({ id: "opencode:a", agent: "opencode" })]));
+    host.querySelector<HTMLElement>(".vault-row")?.click();
+    panel.handleSessionDetailResponse({
+      type: "vaultSessionDetailResponse",
+      entryId: "opencode:a",
+      detail: detail({
+        entryId: "opencode:a",
+        timeline: [
+          { kind: "message", role: "user", text: "go" },
+          {
+            kind: "question",
+            questions: [
+              {
+                prompt: "Which direction?",
+                answer: "Built-in",
+                options: [
+                  { label: "Built-in", description: "use the built-in provider", chosen: true },
+                  { label: "Custom", description: "more control" },
+                ],
+              },
+            ],
+          },
+        ],
+      }),
+    });
+    const block = host.querySelector(".vault-preview-message-question");
+    expect(block?.classList.contains("is-collapsible")).toBe(true);
+    // Collapsed by default: options are present in the DOM but hidden via the class.
+    expect(block?.classList.contains("is-expanded")).toBe(false);
+    const options = block?.querySelectorAll(".vault-preview-question-option");
+    expect(options).toHaveLength(2);
+    expect(options?.[0].classList.contains("is-chosen")).toBe(true);
+    expect(options?.[0].querySelector(".vault-preview-question-option-desc")?.textContent).toBe(
+      "use the built-in provider",
+    );
+    expect(options?.[1].classList.contains("is-chosen")).toBe(false);
+    // Clicking the header toggles the options open.
+    const head = block?.querySelector<HTMLButtonElement>(".vault-preview-question-head");
+    head?.click();
+    expect(block?.classList.contains("is-expanded")).toBe(true);
+    expect(head?.getAttribute("aria-expanded")).toBe("true");
   });
 
   it("renders a subagentSession as a collapsed block with title + first message", () => {
