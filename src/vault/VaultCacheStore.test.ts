@@ -129,7 +129,31 @@ describe("VaultCacheStore", () => {
   });
 
   it("discards an unrecognized version (→ full rebuild)", () => {
-    harness.files.set(CACHE_FILE, JSON.stringify({ ...doc(), version: 2 }));
+    harness.files.set(CACHE_FILE, JSON.stringify({ ...doc(), version: VAULT_CACHE_VERSION + 1 }));
+    expect(store.load()).toBeNull();
+  });
+
+  it("discards stale version 1 caches that could contain old Codex root rows", () => {
+    harness.files.set(
+      CACHE_FILE,
+      JSON.stringify({
+        ...doc({
+          entries: [
+            {
+              id: "codex:child-thread",
+              agent: "codex",
+              sessionId: "child-thread",
+              title: "stale child",
+              cwd: "/work",
+              modified: 10,
+              flags: {},
+              canFork: false,
+            },
+          ],
+        }),
+        version: 1,
+      }),
+    );
     expect(store.load()).toBeNull();
   });
 

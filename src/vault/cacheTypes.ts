@@ -59,7 +59,7 @@ export type ListReader = (prev?: ReaderListCache) => Promise<ReaderResultWithSta
 
 /** Current on-disk cache schema version. Bump on any incompatible shape change;
  *  `VaultCacheStore.load` discards any other version (→ full rebuild). */
-export const VAULT_CACHE_VERSION = 1 as const;
+export const VAULT_CACHE_VERSION = 2 as const;
 
 /** The persisted cache document (design.md D4). */
 export interface VaultListCacheFileV1 {

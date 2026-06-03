@@ -31,6 +31,7 @@ import {
   createBoundedRecordBuffer,
   finalizeDetail,
   MAX_MESSAGE_TEXT,
+  mergeTimestampedItems,
   type QuestionPair,
   truncate,
   truncateRich,
@@ -43,11 +44,19 @@ const CODEX_THREAD_COLUMNS = `id, rollout_path, cwd, title, model, git_branch,
        approval_mode, sandbox_policy, reasoning_effort,
        first_user_message, updated_at_ms`;
 
-const CODEX_THREADS_SQL = `SELECT ${CODEX_THREAD_COLUMNS}
+const CODEX_THREADS_UNLIMITED_SQL = `SELECT ${CODEX_THREAD_COLUMNS}
 FROM threads
 WHERE archived = 0
-ORDER BY updated_at_ms DESC
-LIMIT ${ROW_LIMIT}`;
+ORDER BY updated_at_ms DESC`;
+
+const CODEX_THREADS_WITH_SOURCE_SQL = `SELECT ${CODEX_THREAD_COLUMNS}, source
+FROM threads
+WHERE archived = 0
+ORDER BY updated_at_ms DESC`;
+
+const CODEX_THREAD_SPAWN_EDGES_SQL = "SELECT parent_thread_id, child_thread_id, status FROM thread_spawn_edges";
+
+const SQLITE_PARENTAGE_CACHE_KEY = "__codex_sqlite_parentage_available__";
 
 /** Single-thread lookup for the single-entry resolve (readCodexEntry). `id` is
  *  validated by isSafeCodexId before this is called, so the embed is injection-safe. */
@@ -115,6 +124,196 @@ function mapThreadRow(row: Record<string, unknown>): VaultSessionEntry | null {
   };
 }
 
+interface CodexSourceMeta {
+  parentThreadId?: string;
+  agentNickname?: string;
+  agentRole?: string;
+  prompt?: string;
+  model?: string;
+  reasoningEffort?: string;
+}
+
+interface CodexJsonlMeta {
+  sessionId: string;
+  cwd?: string;
+  timestamp?: number;
+  parentThreadId?: string;
+}
+
+interface CodexThreadRowsRead {
+  status: "ok" | "no-db" | "no-sqlite3" | "query-error";
+  rows: Record<string, unknown>[];
+  hasSource: boolean;
+}
+
+interface CodexEdgesRead {
+  available: boolean;
+  childIds: Set<string>;
+  childrenByParent: Map<string, Set<string>>;
+}
+
+interface CodexChildStub {
+  childThreadId: string;
+  title?: string;
+  firstMessage?: string;
+  agent?: string;
+  timestamp: number;
+  rolloutPath?: string;
+  spawn?: {
+    prompt?: string;
+    model?: string;
+    reasoningEffort?: string;
+    status?: string;
+  };
+}
+
+function parseCodexSourceMeta(raw: unknown): CodexSourceMeta | undefined {
+  const source = parseJsonObj(raw);
+  if (!source) {
+    return undefined;
+  }
+  const subagent = objField(source.subagent);
+  const containers = [subagent, source].filter((value): value is Record<string, unknown> => !!value);
+  for (const container of containers) {
+    const spawn = objField(container.thread_spawn) ?? objField(source.thread_spawn);
+    const parentThreadId = asString(spawn?.parent_thread_id) ?? asString(spawn?.parentThreadId);
+    if (!parentThreadId) {
+      continue;
+    }
+    return {
+      parentThreadId,
+      agentNickname: asString(container.agent_nickname) ?? asString(source.agent_nickname),
+      agentRole: asString(container.agent_role) ?? asString(source.agent_role),
+      prompt: asString(spawn?.prompt) ?? asString(container.prompt) ?? asString(source.prompt),
+      model: asString(spawn?.model) ?? asString(container.model) ?? asString(source.model),
+      reasoningEffort:
+        asString(spawn?.reasoning_effort) ?? asString(container.reasoning_effort) ?? asString(source.reasoning_effort),
+    };
+  }
+  return undefined;
+}
+
+async function readCodexJsonlMeta(filePath: string): Promise<CodexJsonlMeta | null> {
+  const first = await readFirstLine(filePath);
+  if (!first) {
+    return null;
+  }
+  const obj = JSON.parse(first) as Record<string, unknown>;
+  const payload = objField(obj.payload) ?? {};
+  const sessionId = asString(payload.id) ?? path.basename(filePath, ".jsonl");
+  if (!isSafeCodexId(sessionId)) {
+    return null;
+  }
+  const source = parseCodexSourceMeta(payload.source);
+  const timestamp = parseTs(obj.timestamp) || parseTs(payload.timestamp);
+  return {
+    sessionId,
+    ...(asString(payload.cwd) ? { cwd: asString(payload.cwd) } : {}),
+    ...(timestamp ? { timestamp } : {}),
+    ...(source?.parentThreadId ? { parentThreadId: source.parentThreadId } : {}),
+  };
+}
+
+async function collectCodexJsonlParentage(sessionsDir: string): Promise<Map<string, CodexJsonlMeta>> {
+  const files = await walkJsonl(sessionsDir);
+  const children = new Map<string, CodexJsonlMeta>();
+  for (const filePath of files) {
+    try {
+      const meta = await readCodexJsonlMeta(filePath);
+      if (meta?.parentThreadId) {
+        children.set(meta.sessionId, meta);
+      }
+    } catch {
+      // Parentage fallback is best-effort; unreadable files are counted only on
+      // the primary JSONL fallback list path.
+    }
+  }
+  return children;
+}
+
+async function readCodexThreadRowsForParentage(
+  dbPath: string,
+  readSqliteFn: typeof readSqlite,
+): Promise<CodexThreadRowsRead> {
+  const withSource = await readSqliteFn(dbPath, CODEX_THREADS_WITH_SOURCE_SQL);
+  if (withSource.status === "ok") {
+    return { status: "ok", rows: withSource.rows, hasSource: true };
+  }
+  if (withSource.status !== "query-error") {
+    return { status: withSource.status, rows: [], hasSource: false };
+  }
+  const base = await readSqliteFn(dbPath, CODEX_THREADS_UNLIMITED_SQL);
+  return { status: base.status, rows: base.rows, hasSource: false };
+}
+
+async function readCodexThreadSpawnEdges(dbPath: string, readSqliteFn: typeof readSqlite): Promise<CodexEdgesRead> {
+  const result = await readSqliteFn(dbPath, CODEX_THREAD_SPAWN_EDGES_SQL);
+  const childIds = new Set<string>();
+  const childrenByParent = new Map<string, Set<string>>();
+  if (result.status !== "ok") {
+    return { available: false, childIds, childrenByParent };
+  }
+  for (const row of result.rows) {
+    const parent = asString(row.parent_thread_id);
+    const child = asString(row.child_thread_id);
+    if (!parent || !child || !isSafeCodexId(child)) {
+      continue;
+    }
+    childIds.add(child);
+    const set = childrenByParent.get(parent) ?? new Set<string>();
+    set.add(child);
+    childrenByParent.set(parent, set);
+  }
+  return { available: true, childIds, childrenByParent };
+}
+
+function collectSourceChildIds(rows: Record<string, unknown>[], parentId?: string): Set<string> {
+  const childIds = new Set<string>();
+  for (const row of rows) {
+    const childId = asString(row.id);
+    const source = parseCodexSourceMeta(row.source);
+    if (
+      childId &&
+      isSafeCodexId(childId) &&
+      source?.parentThreadId &&
+      (!parentId || source.parentThreadId === parentId)
+    ) {
+      childIds.add(childId);
+    }
+  }
+  return childIds;
+}
+
+function withSqliteParentageCacheMarker(
+  sources: Record<string, { mtimeMs: number; size: number }>,
+): Record<string, { mtimeMs: number; size: number }> {
+  return { ...sources, [SQLITE_PARENTAGE_CACHE_KEY]: { mtimeMs: 1, size: 1 } };
+}
+
+function buildRootEntries(
+  rows: Record<string, unknown>[],
+  hiddenChildIds: Set<string>,
+): { entries: VaultSessionEntry[]; unreadable: number } {
+  const entries: VaultSessionEntry[] = [];
+  let unreadable = 0;
+  for (const row of rows) {
+    const sessionId = asString(row.id);
+    if (sessionId && hiddenChildIds.has(sessionId)) {
+      continue;
+    }
+    const entry = mapThreadRow(row);
+    if (entry) {
+      entries.push(entry);
+      if (entries.length >= ROW_LIMIT) {
+        break;
+      }
+    } else {
+      unreadable++;
+    }
+  }
+  return { entries, unreadable };
+}
+
 async function walkJsonl(dir: string): Promise<string[]> {
   const out: string[] = [];
   let dirents: import("node:fs").Dirent[];
@@ -163,21 +362,19 @@ async function readFirstLine(filePath: string): Promise<string | undefined> {
  * the resume command targets the requested session even if `payload.id` is absent.
  */
 async function buildCodexJsonlEntry(filePath: string, sessionIdOverride?: string): Promise<VaultSessionEntry | null> {
-  const first = await readFirstLine(filePath);
-  if (!first) {
+  const meta = await readCodexJsonlMeta(filePath);
+  if (!meta) {
     return null;
   }
-  const obj = JSON.parse(first) as { payload?: { id?: unknown; cwd?: unknown } };
-  const payload = obj.payload ?? {};
-  const sessionId = sessionIdOverride ?? asString(payload.id) ?? path.basename(filePath, ".jsonl");
+  const sessionId = sessionIdOverride ?? meta.sessionId;
   const stat = await fs.stat(filePath);
   return {
     id: formatEntryId("codex", sessionId),
     agent: "codex",
     sessionId,
     title: "",
-    cwd: asString(payload.cwd) ?? "",
-    modified: stat.mtimeMs,
+    cwd: meta.cwd ?? "",
+    modified: meta.timestamp ?? stat.mtimeMs,
     flags: {},
     canFork: false,
     sessionPath: filePath, // the rollout jsonl backs this session (UI hint)
@@ -192,6 +389,10 @@ async function readCodexJsonlFallback(sessionsDir: string): Promise<ReaderResult
 
   for (const filePath of files) {
     try {
+      const meta = await readCodexJsonlMeta(filePath);
+      if (meta?.parentThreadId) {
+        continue;
+      }
       const entry = await buildCodexJsonlEntry(filePath);
       if (entry) {
         entries.push(entry);
@@ -203,7 +404,7 @@ async function readCodexJsonlFallback(sessionsDir: string): Promise<ReaderResult
     }
   }
   entries.sort((a, b) => b.modified - a.modified);
-  return { entries, unreadable };
+  return { entries: entries.slice(0, ROW_LIMIT), unreadable };
 }
 
 /** Trim an env-var path; treat empty/whitespace as unset. */
@@ -237,24 +438,31 @@ export async function readCodexSessions(
   // query entirely (cache-vault-load D3). Guarded on a non-empty stamp set so an
   // absent DB falls through to the query → fallback path rather than "reusing" {}.
   const sources = await stampStoreFiles([dbPath, `${dbPath}-wal`]);
-  if (prev?.kind === "store" && Object.keys(sources).length > 0 && sameStamps(prev.sources, sources)) {
+  const prevHasSqliteParentageMarker = prev?.kind === "store" && SQLITE_PARENTAGE_CACHE_KEY in prev.sources;
+  const reusableSources = prevHasSqliteParentageMarker ? withSqliteParentageCacheMarker(sources) : sources;
+  if (
+    prev?.kind === "store" &&
+    prevHasSqliteParentageMarker &&
+    Object.keys(sources).length > 0 &&
+    sameStamps(prev.sources, reusableSources)
+  ) {
     const u = prev.unreadable ?? 0;
     return {
       entries: prev.entries,
       unreadable: u,
-      cache: { kind: "store", sources, entries: prev.entries, unreadable: u },
+      cache: { kind: "store", sources: reusableSources, entries: prev.entries, unreadable: u },
     };
   }
 
-  const result = await readSqliteFn(dbPath, CODEX_THREADS_SQL);
+  const threadRead = await readCodexThreadRowsForParentage(dbPath, readSqliteFn);
 
-  if (result.status === "no-db" || result.status === "no-sqlite3") {
+  if (threadRead.status === "no-db" || threadRead.status === "no-sqlite3") {
     // Degraded JSONL scan: no cheap DB stamp, so cache empty `sources` → the next
     // refresh always re-reads (correct for the fallback's freshness semantics).
     const fb = await readCodexJsonlFallback(sessionsDir);
     return { ...fb, cache: { kind: "store", sources: {}, entries: fb.entries, unreadable: fb.unreadable } };
   }
-  if (result.status === "query-error") {
+  if (threadRead.status === "query-error") {
     // Surface, don't mask with the fallback (spec: query-error → unreadable). Cache
     // EMPTY sources so the error is NOT reused as an empty success on the next
     // refresh — it is retried until the query succeeds (oracle review).
@@ -262,17 +470,22 @@ export async function readCodexSessions(
   }
 
   // status === "ok"
-  const entries: VaultSessionEntry[] = [];
-  let unreadable = 0;
-  for (const row of result.rows) {
-    const entry = mapThreadRow(row);
-    if (entry) {
-      entries.push(entry);
-    } else {
-      unreadable++;
+  const edges = await readCodexThreadSpawnEdges(dbPath, readSqliteFn);
+  const sqliteParentageAvailable = edges.available || threadRead.hasSource;
+  const hiddenChildIds = new Set(edges.childIds);
+  if (threadRead.hasSource) {
+    for (const childId of collectSourceChildIds(threadRead.rows)) {
+      hiddenChildIds.add(childId);
     }
   }
-  return { entries, unreadable, cache: { kind: "store", sources, entries, unreadable } };
+  if (!sqliteParentageAvailable) {
+    for (const childId of (await collectCodexJsonlParentage(sessionsDir)).keys()) {
+      hiddenChildIds.add(childId);
+    }
+  }
+  const { entries, unreadable } = buildRootEntries(threadRead.rows, hiddenChildIds);
+  const cacheSources = sqliteParentageAvailable ? withSqliteParentageCacheMarker(sources) : sources;
+  return { entries, unreadable, cache: { kind: "store", sources: cacheSources, entries, unreadable } };
 }
 
 /**
@@ -534,6 +747,7 @@ function codexPatchLabel(input: unknown): string | undefined {
 export function classifyCodexRolloutEvents(
   records: Record<string, unknown>[],
   limit?: number,
+  childStubs: CodexChildStub[] = [],
 ): Omit<VaultSessionDetail, "entryId"> {
   let firstPrompt: string | undefined;
   let latestMessage: VaultSessionDetail["latestMessage"];
@@ -545,6 +759,8 @@ export function classifyCodexRolloutEvents(
   // request_user_input answers arrive in a later function_call_output (correlated
   // by call_id); pre-scan them so the question item can carry the answer inline.
   const questionAnswers = collectCodexQuestionAnswers(records);
+  const childrenById = new Map(childStubs.map((stub) => [stub.childThreadId, stub]));
+  const matchedChildren = new Set<string>();
 
   for (const rec of records) {
     if (!rec || typeof rec !== "object") {
@@ -581,6 +797,24 @@ export function classifyCodexRolloutEvents(
         const n = tot ? num(tot.total_tokens) : 0;
         if (n > 0) {
           totalTokens = n; // last token_count is the cumulative session total (D7)
+        }
+      } else if (ptype === "collab_agent_spawn_end") {
+        const childThreadId = asString(payload.new_thread_id);
+        const stub = childThreadId ? childrenById.get(childThreadId) : undefined;
+        if (childThreadId && stub) {
+          matchedChildren.add(childThreadId);
+          const item = codexChildTimelineItem(stub, {
+            timestamp: ts || undefined,
+            prompt: asString(payload.prompt),
+            agentNickname: asString(payload.agent_nickname),
+            agentRole: asString(payload.agent_role),
+          });
+          timeline.push(item);
+          activity.push({
+            kind: "subagent",
+            name: item.agent ?? "subagent",
+            ...(item.firstMessage ? { prompt: item.firstMessage } : {}),
+          });
         }
       }
     } else if (type === "response_item") {
@@ -625,7 +859,11 @@ export function classifyCodexRolloutEvents(
     }
   }
 
-  const bounded = boundTimeline(timeline, limit);
+  const unmatchedChildren = childStubs
+    .filter((stub) => !matchedChildren.has(stub.childThreadId))
+    .map((stub) => codexChildTimelineItem(stub));
+
+  const bounded = boundTimeline(mergeTimestampedItems(timeline, unmatchedChildren), limit);
   return {
     firstPrompt,
     recentActivity: boundActivity(activity),
@@ -635,7 +873,7 @@ export function classifyCodexRolloutEvents(
     stats: {
       messageCount,
       toolCount,
-      subagentCount: 0,
+      subagentCount: childStubs.length,
       ...(totalTokens !== undefined ? { tokenCount: totalTokens } : {}),
     },
   };
@@ -726,6 +964,143 @@ async function queryCodexThread(
   return { rolloutPath: asString(row.rollout_path), firstUserMessage: asString(row.first_user_message) };
 }
 
+async function readCodexThreadRowsForDetailChildren(
+  dbPath: string,
+  readSqliteFn: typeof readSqlite,
+): Promise<CodexThreadRowsRead> {
+  const withCreated = await readSqliteFn(
+    dbPath,
+    `SELECT ${CODEX_THREAD_COLUMNS}, source, created_at_ms
+FROM threads
+WHERE archived = 0
+ORDER BY updated_at_ms DESC`,
+  );
+  if (withCreated.status === "ok") {
+    return { status: "ok", rows: withCreated.rows, hasSource: true };
+  }
+  return readCodexThreadRowsForParentage(dbPath, readSqliteFn);
+}
+
+function codexChildStubFromRow(row: Record<string, unknown>): CodexChildStub | null {
+  const childThreadId = asString(row.id);
+  if (!childThreadId || !isSafeCodexId(childThreadId)) {
+    return null;
+  }
+  const source = parseCodexSourceMeta(row.source);
+  const firstMessage = asString(row.first_user_message);
+  const title = asString(row.title);
+  const timestamp = parseTs(row.created_at_ms) || parseTs(row.updated_at_ms);
+  return {
+    childThreadId,
+    ...(title ? { title: boundedPreview(title) } : {}),
+    ...(firstMessage ? { firstMessage: truncate(firstMessage) } : {}),
+    agent: source?.agentNickname ?? source?.agentRole ?? "subagent",
+    timestamp,
+    ...(asString(row.rollout_path) ? { rolloutPath: asString(row.rollout_path) } : {}),
+    ...(source
+      ? {
+          spawn: {
+            ...(source.prompt ? { prompt: source.prompt } : {}),
+            ...(source.model ? { model: source.model } : {}),
+            ...(source.reasoningEffort ? { reasoningEffort: source.reasoningEffort } : {}),
+          },
+        }
+      : {}),
+  };
+}
+
+async function readCodexChildJsonlMeta(
+  childThreadId: string,
+  sessionsDir: string,
+  rolloutPath?: string,
+): Promise<CodexJsonlMeta | null> {
+  if (rolloutPath && isUnder(rolloutPath, sessionsDir)) {
+    try {
+      return await readCodexJsonlMeta(rolloutPath);
+    } catch {
+      // Fall back to filename lookup below.
+    }
+  }
+  const foundRolloutPath = await findCodexRolloutByFilename(childThreadId, sessionsDir);
+  if (!foundRolloutPath) {
+    return null;
+  }
+  try {
+    return await readCodexJsonlMeta(foundRolloutPath);
+  } catch {
+    return null;
+  }
+}
+
+async function queryCodexDirectChildStubs(
+  parentThreadId: string,
+  dbPath: string,
+  sessionsDir: string,
+  readSqliteFn: typeof readSqlite,
+): Promise<CodexChildStub[]> {
+  const stubs = new Map<string, CodexChildStub>();
+  const threadRead = await readCodexThreadRowsForDetailChildren(dbPath, readSqliteFn);
+  let sqliteParentageAvailable = false;
+  if (threadRead.status === "ok") {
+    const edges = await readCodexThreadSpawnEdges(dbPath, readSqliteFn);
+    sqliteParentageAvailable = edges.available || threadRead.hasSource;
+    const directChildIds = new Set(edges.childrenByParent.get(parentThreadId) ?? []);
+    if (threadRead.hasSource) {
+      for (const childId of collectSourceChildIds(threadRead.rows, parentThreadId)) {
+        directChildIds.add(childId);
+      }
+    }
+    for (const row of threadRead.rows) {
+      const childThreadId = asString(row.id);
+      if (!childThreadId || !directChildIds.has(childThreadId)) {
+        continue;
+      }
+      const stub = codexChildStubFromRow(row);
+      if (stub) {
+        stubs.set(childThreadId, stub);
+      }
+    }
+  }
+
+  if (sqliteParentageAvailable) {
+    for (const stub of stubs.values()) {
+      const meta = await readCodexChildJsonlMeta(stub.childThreadId, sessionsDir, stub.rolloutPath);
+      if (meta?.timestamp) {
+        stub.timestamp = meta.timestamp;
+      }
+    }
+  } else if (threadRead.status !== "query-error") {
+    for (const meta of (await collectCodexJsonlParentage(sessionsDir)).values()) {
+      if (meta.parentThreadId !== parentThreadId || stubs.has(meta.sessionId)) {
+        continue;
+      }
+      stubs.set(meta.sessionId, {
+        childThreadId: meta.sessionId,
+        agent: "subagent",
+        timestamp: meta.timestamp ?? 0,
+      });
+    }
+  }
+
+  return [...stubs.values()].sort((a, b) => a.timestamp - b.timestamp);
+}
+
+function codexChildTimelineItem(
+  stub: CodexChildStub,
+  overrides: { timestamp?: number; prompt?: string; agentNickname?: string; agentRole?: string } = {},
+): Extract<VaultTimelineItem, { kind: "subagentSession" }> {
+  const title = stub.title || stub.firstMessage || overrides.prompt || stub.spawn?.prompt || "Subagent";
+  const agent = overrides.agentNickname ?? overrides.agentRole ?? stub.agent ?? "subagent";
+  return {
+    kind: "subagentSession",
+    entryId: formatEntryId("codex", stub.childThreadId),
+    title: truncate(title),
+    ...(stub.firstMessage ? { firstMessage: truncate(stub.firstMessage) } : {}),
+    agent,
+    timestamp: overrides.timestamp ?? stub.timestamp,
+  };
+}
+
 /**
  * On-demand detail for a Codex session: classify the rollout jsonl when one can
  * be located (full detail); otherwise return a labeled partial detail from the
@@ -743,6 +1118,7 @@ export async function readCodexDetail(
   const readSqliteFn = options.readSqliteFn ?? readSqlite;
 
   const thread = await queryCodexThread(sessionId, dbPath, readSqliteFn);
+  const childStubs = await queryCodexDirectChildStubs(sessionId, dbPath, sessionsDir, readSqliteFn);
 
   // Prefer the index's rollout_path (containment-checked); else scan by filename.
   let rolloutPath = thread?.rolloutPath && isUnder(thread.rolloutPath, sessionsDir) ? thread.rolloutPath : undefined;
@@ -753,22 +1129,32 @@ export async function readCodexDetail(
   if (rolloutPath) {
     const read = await streamCodexRecords(rolloutPath);
     if (read && read.records.length > 0) {
-      const detail = classifyCodexRolloutEvents(read.records, limit);
+      const detail = classifyCodexRolloutEvents(read.records, limit, childStubs);
       return finalizeDetail(formatEntryId("codex", sessionId), detail, read.truncated);
     }
   }
 
-  if (thread?.firstUserMessage) {
+  if (thread?.firstUserMessage || childStubs.length > 0) {
+    const promptItem = thread?.firstUserMessage
+      ? {
+          kind: "message" as const,
+          role: "user" as const,
+          text: truncateRich(thread.firstUserMessage, MAX_MESSAGE_TEXT),
+          timestamp: 0,
+        }
+      : undefined;
+    const childItems = childStubs.map((stub) => codexChildTimelineItem(stub));
+    const timeline = mergeTimestampedItems(promptItem ? [promptItem] : [], childItems);
     return {
       entryId: formatEntryId("codex", sessionId),
-      firstPrompt: truncate(thread.firstUserMessage),
+      ...(thread?.firstUserMessage ? { firstPrompt: truncate(thread.firstUserMessage) } : {}),
       recentActivity: [],
-      latestMessage: { role: "user", text: truncate(thread.firstUserMessage), timestamp: 0 },
-      timeline: [
-        { kind: "message", role: "user", text: truncateRich(thread.firstUserMessage, MAX_MESSAGE_TEXT), timestamp: 0 },
-      ],
+      ...(thread?.firstUserMessage
+        ? { latestMessage: { role: "user" as const, text: truncate(thread.firstUserMessage), timestamp: 0 } }
+        : {}),
+      timeline,
       // The index-only fallback surfaces exactly the one indexed prompt (s3 — was 0).
-      stats: { messageCount: 1, toolCount: 0, subagentCount: 0 },
+      stats: { messageCount: thread?.firstUserMessage ? 1 : 0, toolCount: 0, subagentCount: childStubs.length },
       partial: true,
       limitedReason: PARTIAL_LIMITED_REASON,
     };

@@ -161,6 +161,65 @@ describe("classifyCodexRolloutEvents", () => {
     expect(out.timeline.some((t) => t.kind === "question")).toBe(false);
     expect(out.timeline.some((t) => t.kind === "tool" && t.tool === "request_user_input")).toBe(true);
   });
+
+  it("places a Codex child stub at the matching spawn event", () => {
+    const out = classifyCodexRolloutEvents(
+      [
+        rec("event_msg", { type: "user_message", message: "delegate this" }, "2026-03-14T04:55:30.000Z"),
+        rec(
+          "event_msg",
+          {
+            type: "collab_agent_spawn_end",
+            new_thread_id: "child-thread",
+            agent_nickname: "reviewer",
+            prompt: "review the implementation",
+          },
+          "2026-03-14T04:56:00.000Z",
+        ),
+      ],
+      undefined,
+      [
+        {
+          childThreadId: "child-thread",
+          title: "Child review",
+          firstMessage: "check the diff",
+          timestamp: Date.parse("2026-03-14T04:57:00.000Z"),
+        },
+      ],
+    );
+
+    const child = out.timeline.find((item) => item.kind === "subagentSession");
+    expect(child).toEqual({
+      kind: "subagentSession",
+      entryId: "codex:child-thread",
+      title: "Child review",
+      firstMessage: "check the diff",
+      agent: "reviewer",
+      timestamp: Date.parse("2026-03-14T04:56:00.000Z"),
+    });
+    expect(out.stats.subagentCount).toBe(1);
+  });
+
+  it("uses the parent spawn prompt before the generic child title fallback", () => {
+    const out = classifyCodexRolloutEvents(
+      [
+        rec(
+          "event_msg",
+          {
+            type: "collab_agent_spawn_end",
+            new_thread_id: "child-thread",
+            prompt: "review the implementation",
+          },
+          "2026-03-14T04:56:00.000Z",
+        ),
+      ],
+      undefined,
+      [{ childThreadId: "child-thread", timestamp: Date.parse("2026-03-14T04:57:00.000Z") }],
+    );
+
+    const child = out.timeline.find((item) => item.kind === "subagentSession");
+    expect(child?.kind === "subagentSession" && child.title).toBe("review the implementation");
+  });
 });
 
 describe("readCodexDetail", () => {
@@ -206,6 +265,101 @@ describe("readCodexDetail", () => {
     expect(detail?.limitedReason).toBeTruthy();
     // The index-only fallback surfaces exactly the one indexed prompt (s3).
     expect(detail?.stats.messageCount).toBe(1);
+  });
+
+  it("includes discoverable child stubs in a partial parent detail", async () => {
+    const parentId = "parent-thread";
+    const childId = "child-thread";
+    const readSqliteFn = async (_dbPath: string, sql: string): Promise<SqliteResult> => {
+      if (sql.includes("thread_spawn_edges")) {
+        return { status: "ok", rows: [{ parent_thread_id: parentId, child_thread_id: childId }] };
+      }
+      if (sql.includes("WHERE id = 'parent-thread'")) {
+        return { status: "ok", rows: [{ rollout_path: null, first_user_message: "parent prompt" }] };
+      }
+      return {
+        status: "ok",
+        rows: [
+          {
+            id: childId,
+            title: "Child task",
+            first_user_message: "child prompt",
+            updated_at_ms: 1234,
+          },
+        ],
+      };
+    };
+
+    const detail = await readCodexDetail(parentId, { codexDir, readSqliteFn });
+
+    expect(detail?.partial).toBe(true);
+    expect(detail?.timeline).toContainEqual({
+      kind: "subagentSession",
+      entryId: `codex:${childId}`,
+      title: "Child task",
+      firstMessage: "child prompt",
+      agent: "subagent",
+      timestamp: 1234,
+    });
+    expect(detail?.stats.subagentCount).toBe(1);
+  });
+
+  it("uses child JSONL session metadata timestamp before SQLite timestamps for unmatched child stubs", async () => {
+    const parentId = "parent-thread";
+    const childId = "child-thread";
+    const dir = path.join(codexDir, "sessions", "2026", "03", "14");
+    await fs.mkdir(dir, { recursive: true });
+    const childRolloutPath = path.join(dir, "child-meta.jsonl");
+    await fs.writeFile(
+      childRolloutPath,
+      `${JSON.stringify({
+        type: "session_meta",
+        timestamp: "2026-03-14T04:57:00.000Z",
+        payload: { id: childId, source: { subagent: { thread_spawn: { parent_thread_id: parentId } } } },
+      })}\n`,
+    );
+    const readSqliteFn = async (_dbPath: string, sql: string): Promise<SqliteResult> => {
+      if (sql.includes("thread_spawn_edges")) {
+        return { status: "ok", rows: [{ parent_thread_id: parentId, child_thread_id: childId }] };
+      }
+      if (sql.includes("WHERE id = 'parent-thread'")) {
+        return { status: "ok", rows: [{ rollout_path: null, first_user_message: "parent prompt" }] };
+      }
+      return {
+        status: "ok",
+        rows: [
+          {
+            id: childId,
+            rollout_path: childRolloutPath,
+            title: "Child task",
+            first_user_message: "child prompt",
+            created_at_ms: Date.parse("2026-03-14T05:00:00.000Z"),
+            updated_at_ms: Date.parse("2026-03-14T05:01:00.000Z"),
+          },
+        ],
+      };
+    };
+
+    const detail = await readCodexDetail(parentId, { codexDir, readSqliteFn });
+    const child = detail?.timeline.find((item) => item.kind === "subagentSession");
+
+    expect(child?.kind === "subagentSession" && child.timestamp).toBe(Date.parse("2026-03-14T04:57:00.000Z"));
+  });
+
+  it("opens a Codex child id through the normal detail path", async () => {
+    const childId = "child-thread";
+    const dir = path.join(codexDir, "sessions", "2026", "03", "14");
+    await fs.mkdir(dir, { recursive: true });
+    await fs.writeFile(
+      path.join(dir, `rollout-2026-03-14T11-54-28-${childId}.jsonl`),
+      jsonl([rec("event_msg", { type: "user_message", message: "child work" })]),
+    );
+    const noSqlite = async (): Promise<SqliteResult> => ({ rows: [], status: "no-db" });
+
+    const detail = await readCodexDetail(childId, { codexDir, readSqliteFn: noSqlite });
+
+    expect(detail?.entryId).toBe(`codex:${childId}`);
+    expect(detail?.firstPrompt).toBe("child work");
   });
 
   it("returns null when neither a rollout nor an index row exists", async () => {

@@ -5,6 +5,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { VAULT_CACHE_VERSION } from "../cacheTypes";
 import type { SqliteResult } from "../sqlite";
 import { readCodexEntry, readCodexSessions } from "./codexReader";
 
@@ -13,6 +14,10 @@ const FIXTURE_CODEX_DIR = path.join(here, "..", "__fixtures__", "codex");
 
 function stubSqlite(result: SqliteResult) {
   return vi.fn(async (_dbPath: string, _sql: string) => result);
+}
+
+function stubSqliteBySql(handler: (sql: string) => SqliteResult) {
+  return vi.fn(async (_dbPath: string, sql: string) => handler(sql));
 }
 
 const SAMPLE_ROWS: Record<string, unknown>[] = [
@@ -77,6 +82,100 @@ describe("readCodexSessions: SQLite path", () => {
     expect(entries).toHaveLength(1);
     expect(unreadable).toBe(1);
   });
+
+  it("hides child threads linked by thread_spawn_edges without counting them unreadable", async () => {
+    const rows = [
+      { id: "child", title: "child", updated_at_ms: 3000 },
+      { id: "root", title: "root", updated_at_ms: 2000 },
+    ];
+    const fn = stubSqliteBySql((sql) =>
+      sql.includes("thread_spawn_edges")
+        ? { status: "ok", rows: [{ parent_thread_id: "root", child_thread_id: "child", status: "completed" }] }
+        : { status: "ok", rows },
+    );
+
+    const { entries, unreadable } = await readCodexSessions({ codexDir: "/x/.codex", readSqliteFn: fn });
+
+    expect(entries.map((entry) => entry.sessionId)).toEqual(["root"]);
+    expect(unreadable).toBe(0);
+  });
+
+  it("hides child threads linked by threads.source subagent metadata", async () => {
+    const rows = [
+      {
+        id: "child",
+        title: "child",
+        updated_at_ms: 3000,
+        source: JSON.stringify({ subagent: { thread_spawn: { parent_thread_id: "root" } } }),
+      },
+      { id: "root", title: "root", updated_at_ms: 2000 },
+    ];
+    const fn = stubSqliteBySql((sql) =>
+      sql.includes("thread_spawn_edges")
+        ? { status: "query-error", rows: [], error: "no such table" }
+        : { status: "ok", rows },
+    );
+
+    const { entries } = await readCodexSessions({ codexDir: "/x/.codex", readSqliteFn: fn });
+
+    expect(entries.map((entry) => entry.sessionId)).toEqual(["root"]);
+  });
+
+  it("uses first-line JSONL metadata to hide children when SQLite lacks parentage metadata", async () => {
+    const dir = await fsp.mkdtemp(path.join(os.tmpdir(), "vault-codex-jsonl-parentage-"));
+    try {
+      await fsp.mkdir(path.join(dir, "sessions", "2026", "06", "01"), { recursive: true });
+      await fsp.writeFile(
+        path.join(dir, "sessions", "2026", "06", "01", "rollout-child.jsonl"),
+        `${JSON.stringify({
+          type: "session_meta",
+          timestamp: "2026-06-01T00:00:00.000Z",
+          payload: {
+            id: "child",
+            source: { subagent: { thread_spawn: { parent_thread_id: "root" } } },
+          },
+        })}\n`,
+      );
+      const rows = [
+        { id: "child", title: "child", updated_at_ms: 3000 },
+        { id: "root", title: "root", updated_at_ms: 2000 },
+      ];
+      const fn = stubSqliteBySql((sql) => {
+        if (sql.includes("source") || sql.includes("thread_spawn_edges")) {
+          return { status: "query-error", rows: [], error: "optional schema missing" };
+        }
+        return { status: "ok", rows };
+      });
+
+      const { entries } = await readCodexSessions({ codexDir: dir, readSqliteFn: fn });
+
+      expect(entries.map((entry) => entry.sessionId)).toEqual(["root"]);
+    } finally {
+      await fsp.rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("applies the root limit after filtering child rows", async () => {
+    const childRows = Array.from({ length: 500 }, (_, index) => ({
+      id: `child-${index}`,
+      title: `child ${index}`,
+      updated_at_ms: 10_000 - index,
+    }));
+    const rootRow = { id: "root-after-children", title: "root", updated_at_ms: 1 };
+    const fn = stubSqliteBySql((sql) => {
+      if (sql.includes("thread_spawn_edges")) {
+        return {
+          status: "ok",
+          rows: childRows.map((row) => ({ parent_thread_id: "root-after-children", child_thread_id: row.id })),
+        };
+      }
+      return { status: "ok", rows: sql.includes("LIMIT 500") ? childRows : [...childRows, rootRow] };
+    });
+
+    const { entries } = await readCodexSessions({ codexDir: "/x/.codex", readSqliteFn: fn });
+
+    expect(entries.map((entry) => entry.sessionId)).toEqual(["root-after-children"]);
+  });
 });
 
 describe("readCodexSessions: fallback + errors", () => {
@@ -106,6 +205,43 @@ describe("readCodexSessions: fallback + errors", () => {
     const { entries, unreadable } = await readCodexSessions({ codexDir: "/nonexistent/.codex", readSqliteFn: fn });
     expect(entries).toEqual([]);
     expect(unreadable).toBe(0);
+  });
+
+  it("omits JSONL fallback children from the top-level list", async () => {
+    const dir = await fsp.mkdtemp(path.join(os.tmpdir(), "vault-codex-jsonl-fallback-"));
+    try {
+      const sessionsDir = path.join(dir, "sessions", "2026", "06", "02");
+      await fsp.mkdir(sessionsDir, { recursive: true });
+      await fsp.writeFile(
+        path.join(sessionsDir, "rollout-root.jsonl"),
+        `${JSON.stringify({ type: "session_meta", payload: { id: "root", cwd: "/repo" } })}\n`,
+      );
+      await fsp.writeFile(
+        path.join(sessionsDir, "rollout-child.jsonl"),
+        `${JSON.stringify({
+          type: "session_meta",
+          payload: {
+            id: "child",
+            cwd: "/repo",
+            source: { subagent: { thread_spawn: { parent_thread_id: "root" } } },
+          },
+        })}\n`,
+      );
+      const fn = stubSqlite({ status: "no-db", rows: [] });
+
+      const { entries, unreadable } = await readCodexSessions({ codexDir: dir, readSqliteFn: fn });
+
+      expect(entries.map((entry) => entry.sessionId)).toEqual(["root"]);
+      expect(unreadable).toBe(0);
+    } finally {
+      await fsp.rm(dir, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("readCodexSessions: cache schema", () => {
+  it("bumps the persisted vault list cache version for child filtering", () => {
+    expect(VAULT_CACHE_VERSION).toBe(2);
   });
 });
 
@@ -204,12 +340,12 @@ describe("readCodexSessions: incremental store stamp", () => {
     const dir = await makeDb();
     const fn = stubSqlite({ status: "ok", rows: SAMPLE_ROWS });
     const first = await readCodexSessions({ codexDir: dir, readSqliteFn: fn }, undefined);
-    expect(fn).toHaveBeenCalledTimes(1);
+    expect(fn).toHaveBeenCalledTimes(2);
     expect(first.entries).toHaveLength(2);
     expect(first.cache.kind).toBe("store");
 
     const second = await readCodexSessions({ codexDir: dir, readSqliteFn: fn }, first.cache);
-    expect(fn).toHaveBeenCalledTimes(1); // unchanged store → no re-query
+    expect(fn).toHaveBeenCalledTimes(2); // unchanged store → no re-query
     expect(second.entries).toHaveLength(2);
   });
 
@@ -220,7 +356,7 @@ describe("readCodexSessions: incremental store stamp", () => {
     const future = new Date(Date.now() + 60_000);
     await fsp.utimes(path.join(dir, "state_5.sqlite"), future, future);
     await readCodexSessions({ codexDir: dir, readSqliteFn: fn }, first.cache);
-    expect(fn).toHaveBeenCalledTimes(2);
+    expect(fn).toHaveBeenCalledTimes(4);
   });
 
   it("preserves the unreadable count on reuse (no silent reset to 0)", async () => {
@@ -230,8 +366,24 @@ describe("readCodexSessions: incremental store stamp", () => {
     const first = await readCodexSessions({ codexDir: dir, readSqliteFn: fn }, undefined);
     expect(first.unreadable).toBe(1);
     const second = await readCodexSessions({ codexDir: dir, readSqliteFn: fn }, first.cache);
-    expect(fn).toHaveBeenCalledTimes(1); // reused
+    expect(fn).toHaveBeenCalledTimes(2); // reused
     expect(second.unreadable).toBe(1); // carried, not reset
+  });
+
+  it("does not reuse DB cache when SQLite parentage is unavailable and JSONL fallback may participate", async () => {
+    const dir = await makeDb();
+    const fn = stubSqliteBySql((sql) => {
+      if (sql.includes("source") || sql.includes("thread_spawn_edges")) {
+        return { status: "query-error", rows: [], error: "optional parentage missing" };
+      }
+      return { status: "ok", rows: SAMPLE_ROWS };
+    });
+    const first = await readCodexSessions({ codexDir: dir, readSqliteFn: fn }, undefined);
+    expect(first.entries).toHaveLength(2);
+
+    await readCodexSessions({ codexDir: dir, readSqliteFn: fn }, first.cache);
+
+    expect(fn).toHaveBeenCalledTimes(6);
   });
 
   it("retries a query-error instead of reusing it as an empty success", async () => {
@@ -241,7 +393,7 @@ describe("readCodexSessions: incremental store stamp", () => {
     expect(first.unreadable).toBe(1);
     // Empty sources cached → next refresh must re-query (not reuse the error as ok).
     const second = await readCodexSessions({ codexDir: dir, readSqliteFn: fn }, first.cache);
-    expect(fn).toHaveBeenCalledTimes(2);
+    expect(fn).toHaveBeenCalledTimes(4);
     expect(second.unreadable).toBe(1);
   });
 });
