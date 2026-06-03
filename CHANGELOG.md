@@ -4,10 +4,12 @@ All notable changes to **AnyWhere Terminal** are documented in this file.
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.17.2] — 2026-06-04
 
 ### Added
 
+- **Right-click a file-tree row for path actions.** A real file or folder row now opens an in-webview context menu: **Reveal in Finder / File Explorer**, **Copy Path**, **Copy Relative Path**, and **Delete** (moves to trash after a confirm dialog). Synthetic rows (search overflow/error, empty/loading states) and the root header don't open it. All actions are validated host-side against the active tree root and generation; relative paths use forward slashes on every platform.
+- **Codex subagent sessions now nest inside their parent.** Codex stores each subagent run as a separate thread, so the vault listed them as standalone top-level sessions. Child threads are now hidden from the index and surfaced as expandable nested sub-sessions inside the parent's preview — matching how Claude Code and OpenCode sub-agents already appear. Parentage is read from Codex's SQLite graph metadata, falling back to JSONL session metadata, and degrades to the old flat behavior when neither is available.
 - **See the questions an agent asked you — and your answers — in the session preview.** When a session uses the ask-the-user tool (Claude Code's `AskUserQuestion`, OpenCode's `question`, Codex's `request_user_input`), the preview now renders it as a distinct block instead of a bare "Question" chip: the question, the option(s) you picked, and a **click-to-expand** list of every option with its description (your choice highlighted). The block always stays visible — it's never collapsed inside a tool run. A question the session ended on shows **Awaiting answer**, and Codex secret answers are masked.
 
 ### Changed
@@ -18,6 +20,7 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 ### Fixed
 
 - **Missing file links no longer interrupt the terminal.** Hovering a path that does not resolve now stays silent instead of opening an empty preview or showing "File not found", and clicking a nonexistent path now no-ops without an error toast.
+- **Maximized session preview keeps a visible border.** When maximized, the preview filled the whole editor with a matching background and its 1px separator was clipped past the viewport edge, so it blended into the editor. The border now renders inside the viewport (`box-sizing: border-box`) as a clear separator.
 - **The final assistant message no longer disappears from a long session preview.** When a turn ended with a tool call — e.g. an `AskUserQuestion` prompt or a closing `git status` — the run's concluding message was buried behind "Show N more", so the last visible item was a tool rather than the answer. A capped run now pins its concluding assistant message so it stays in view, and ask-the-user prompts break out of the run entirely.
 
 ## [0.17.1] — 2026-06-02
