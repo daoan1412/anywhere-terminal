@@ -12,6 +12,10 @@
 import { beforeAll, describe, expect, it, vi } from "vitest";
 import type {
   CancelFileTreeSearchMessage,
+  FileTreeCopyPathMessage,
+  FileTreeCopyRelativePathMessage,
+  FileTreeDeleteMessage,
+  FileTreeRevealInOsMessage,
   OpenFileMessage,
   RequestFileTreeSearchMessage,
   RequestReadDirectoryMessage,
@@ -47,6 +51,10 @@ type AnyMsg =
   | import("../../types/messages").RequestOpenFolderMessage
   | RequestFileTreeSearchMessage
   | CancelFileTreeSearchMessage
+  | FileTreeRevealInOsMessage
+  | FileTreeCopyPathMessage
+  | FileTreeCopyRelativePathMessage
+  | FileTreeDeleteMessage
   | import("../../types/messages").RequestSubscribeFsChangesMessage
   | import("../../types/messages").RequestUnsubscribeFsChangesMessage;
 
@@ -173,6 +181,112 @@ describe("FileTreePanel", () => {
     expect(host.querySelector(".file-tree-empty")).toBeNull();
     // Header strip with the move button should be present alongside the body.
     expect(host.querySelector(".file-tree-header__btn")).not.toBeNull();
+
+    panel.dispose();
+  });
+
+  it("opens row context menu and posts file-tree action messages without a root/header menu", async () => {
+    const host = createHost();
+    const posted: AnyMsg[] = [];
+    const panel = new FileTreePanel({
+      host,
+      workspaceRoot: "/workspace",
+      rootGeneration: 7,
+      getActiveSessionId: () => "sess-A",
+      postMessage: (m) => posted.push(m),
+    });
+    const dataSource = (panel as unknown as { dataSource: { handleResponse(m: unknown): void } | null }).dataSource;
+    if (!dataSource) {
+      throw new Error("panel.dataSource was null after mount");
+    }
+    const initial = posted.filter((m): m is RequestReadDirectoryMessage => m.type === "request-read-directory");
+    dataSource.handleResponse({
+      type: "read-directory-response",
+      requestId: initial[0].requestId,
+      rootGeneration: 7,
+      entries: [{ name: "a.ts", path: "/workspace/a.ts", kind: "file" }],
+    });
+    await Promise.resolve();
+    await Promise.resolve();
+    panel.layout(300, 200);
+
+    const rootHeader = host.querySelector<HTMLElement>(".file-tree-header__root");
+    rootHeader?.dispatchEvent(new MouseEvent("contextmenu", { bubbles: true, cancelable: true }));
+    expect(document.querySelector(".file-tree-context-menu")).toBeNull();
+
+    const row = host.querySelector<HTMLElement>(".file-tree-row");
+    expect(row).not.toBeNull();
+    row?.dispatchEvent(new MouseEvent("contextmenu", { bubbles: true, cancelable: true, clientX: 12, clientY: 18 }));
+    expect(document.querySelector(".file-tree-context-menu")).not.toBeNull();
+
+    const clickItem = (label: string) => {
+      const item = [...document.querySelectorAll<HTMLButtonElement>(".file-tree-context-menu [role='menuitem']")].find(
+        (button) => button.textContent === label,
+      );
+      expect(item).not.toBeNull();
+      item?.click();
+    };
+
+    clickItem("Copy Path");
+    row?.dispatchEvent(new MouseEvent("contextmenu", { bubbles: true, cancelable: true, clientX: 12, clientY: 18 }));
+    clickItem("Copy Relative Path");
+    row?.dispatchEvent(new MouseEvent("contextmenu", { bubbles: true, cancelable: true, clientX: 12, clientY: 18 }));
+    clickItem("Delete");
+
+    const actionMessages = posted.filter(
+      (m): m is FileTreeCopyPathMessage | FileTreeCopyRelativePathMessage | FileTreeDeleteMessage =>
+        m.type === "file-tree-copy-path" || m.type === "file-tree-copy-relative-path" || m.type === "file-tree-delete",
+    );
+    expect(actionMessages).toEqual([
+      { type: "file-tree-copy-path", rootGeneration: 7, path: "/workspace/a.ts" },
+      { type: "file-tree-copy-relative-path", rootGeneration: 7, path: "/workspace/a.ts" },
+      { type: "file-tree-delete", rootGeneration: 7, path: "/workspace/a.ts" },
+    ]);
+
+    panel.dispose();
+  });
+
+  it("closes open row context menu on remount and keeps actions pinned to the open generation", async () => {
+    const host = createHost();
+    const posted: AnyMsg[] = [];
+    const panel = new FileTreePanel({
+      host,
+      workspaceRoot: "/workspace",
+      rootGeneration: 7,
+      getActiveSessionId: () => "sess-A",
+      postMessage: (m) => posted.push(m),
+    });
+    const dataSource = (panel as unknown as { dataSource: { handleResponse(m: unknown): void } | null }).dataSource;
+    if (!dataSource) {
+      throw new Error("panel.dataSource was null after mount");
+    }
+    const initial = posted.filter((m): m is RequestReadDirectoryMessage => m.type === "request-read-directory");
+    dataSource.handleResponse({
+      type: "read-directory-response",
+      requestId: initial[0].requestId,
+      rootGeneration: 7,
+      entries: [{ name: "a.ts", path: "/workspace/a.ts", kind: "file" }],
+    });
+    await Promise.resolve();
+    await Promise.resolve();
+    panel.layout(300, 200);
+
+    const row = host.querySelector<HTMLElement>(".file-tree-row");
+    expect(row).not.toBeNull();
+    row?.dispatchEvent(new MouseEvent("contextmenu", { bubbles: true, cancelable: true, clientX: 12, clientY: 18 }));
+    expect(document.querySelector(".file-tree-context-menu")).not.toBeNull();
+
+    (panel as unknown as { currentRootGeneration: number }).currentRootGeneration = 8;
+    const copyPath = [
+      ...document.querySelectorAll<HTMLButtonElement>(".file-tree-context-menu [role='menuitem']"),
+    ].find((button) => button.textContent === "Copy Path");
+    copyPath?.click();
+    expect(posted).toContainEqual({ type: "file-tree-copy-path", rootGeneration: 7, path: "/workspace/a.ts" });
+
+    row?.dispatchEvent(new MouseEvent("contextmenu", { bubbles: true, cancelable: true, clientX: 12, clientY: 18 }));
+    expect(document.querySelector(".file-tree-context-menu")).not.toBeNull();
+    panel.handleRootChanged({ rootPath: "/other", rootGeneration: 9 });
+    expect(document.querySelector(".file-tree-context-menu")).toBeNull();
 
     panel.dispose();
   });

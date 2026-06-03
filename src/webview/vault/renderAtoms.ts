@@ -218,7 +218,9 @@ export function questionBlock(item: Extract<VaultTimelineItem, { kind: "question
 
 /** The collapsible option list for one question — each option's label + optional
  *  description, with the user's pick highlighted. Hidden until the block expands. */
-function questionOptions(options: NonNullable<Extract<VaultTimelineItem, { kind: "question" }>["questions"][number]["options"]>): HTMLElement {
+function questionOptions(
+  options: NonNullable<Extract<VaultTimelineItem, { kind: "question" }>["questions"][number]["options"]>,
+): HTMLElement {
   const list = document.createElement("ul");
   list.className = "vault-preview-question-options";
   for (const o of options) {

@@ -905,6 +905,10 @@ export class TerminalViewProvider implements vscode.WebviewViewProvider {
         case "cancel-file-tree-search":
         case "request-subscribe-fs-changes":
         case "request-unsubscribe-fs-changes":
+        case "file-tree-reveal-in-os":
+        case "file-tree-copy-path":
+        case "file-tree-copy-relative-path":
+        case "file-tree-delete":
           // File-tree messages are dispatched by FileTreeHost so the
           // sidebar / panel / editor providers share one wiring. See
           // providers/fileTreeHost.ts.

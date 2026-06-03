@@ -63,6 +63,7 @@ vi.mock("./openFileLink", () => ({
 }));
 
 import { SessionManager } from "../session/SessionManager";
+import { FileTreeHost } from "./fileTreeHost";
 import { openFileLink } from "./openFileLink";
 import { TerminalEditorProvider } from "./TerminalEditorProvider";
 
@@ -273,6 +274,35 @@ describe("TerminalEditorProvider.createPanel", () => {
         showQuickPick: expect.any(Function),
       }),
     );
+
+    sm.dispose();
+  });
+
+  it("delegates all file-tree path action messages to FileTreeHost", async () => {
+    const spy = vi.spyOn(FileTreeHost.prototype, "handleMessage").mockReturnValue(true);
+    const ctx = createMockContext();
+    const sm = new SessionManager();
+    const vscode = await import("vscode");
+    const createSpy = vi.spyOn(vscode.window, "createWebviewPanel");
+
+    TerminalEditorProvider.createPanel(ctx, sm);
+    const panel = createSpy.mock.results[0].value;
+
+    const messages = [
+      { type: "file-tree-reveal-in-os", rootGeneration: 0, path: "/mock/workspace/a.ts" },
+      { type: "file-tree-copy-path", rootGeneration: 0, path: "/mock/workspace/a.ts" },
+      { type: "file-tree-copy-relative-path", rootGeneration: 0, path: "/mock/workspace/a.ts" },
+      { type: "file-tree-delete", rootGeneration: 0, path: "/mock/workspace/a.ts" },
+    ] as const;
+
+    for (const msg of messages) {
+      for (const handler of panel.__messageHandlers) {
+        handler(msg);
+      }
+    }
+
+    expect(spy).toHaveBeenCalledTimes(4);
+    expect(spy.mock.calls.map(([msg]) => (msg as { type: string }).type)).toEqual(messages.map((msg) => msg.type));
 
     sm.dispose();
   });

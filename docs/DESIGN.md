@@ -146,7 +146,7 @@ Detailed data flow diagrams are documented in separate files for maintainability
 
 > Full specification: [design/message-protocol.md](design/message-protocol.md)
 
-The extension and webview communicate via `postMessage` using discriminated union types. 8 message types flow from WebView → Extension (`ready`, `input`, `resize`, `createTab`, `switchTab`, `closeTab`, `clear`, `ack`) and 8 from Extension → WebView (`init`, `output`, `exit`, `tabCreated`, `tabRemoved`, `restore`, `configUpdate`, `error`).
+The extension and webview communicate via `postMessage` using discriminated union types. Core terminal messages cover ready/init, input/output, tabs, splits, resize, restore, config, and errors. File-tree messages share the same bridge and route directory reads, search, watching, reveal, path copy, and confirmed delete actions through the extension host.
 
 ---
 

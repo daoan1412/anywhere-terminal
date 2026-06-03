@@ -19,6 +19,7 @@
 //
 // See: review round-1 follow-up — Oracle #3 (extension RPC layer).
 
+import * as nodePath from "node:path";
 import * as vscode from "vscode";
 import type {
   FileTreeSearchResponseMessage,
@@ -36,6 +37,8 @@ import { handleRequestReadDirectory, type RootProvider, readEnabledExcludePatter
 import { createDefaultSearchVscodeApi, FileTreeSearchHandler } from "./fileTreeSearchHandler";
 import type { WatcherPool } from "./fsWatcherPool";
 import type { GitDecorationProvider } from "./gitDecorationProvider";
+
+type PathApi = Pick<typeof nodePath, "basename" | "dirname" | "isAbsolute" | "relative">;
 
 /**
  * Init-message fields the host contributes. Providers spread this into their
@@ -59,6 +62,9 @@ export interface FileTreeInitPayload {
  */
 export class FileTreeHost implements RootProvider {
   public rootGeneration = 0;
+
+  /** Host-owned root currently rendered by this webview's file tree. */
+  private activeFileTreeRoot: string | null;
 
   /**
    * Stateful search handler — owns at most one in-flight enumeration.
@@ -106,7 +112,9 @@ export class FileTreeHost implements RootProvider {
   constructor(
     private readonly gitDecorationProvider: GitDecorationProvider | null = null,
     private readonly watcherPool: WatcherPool | null = null,
-  ) {}
+  ) {
+    this.activeFileTreeRoot = this.workspaceRoot;
+  }
 
   /** Absolute path of the first workspace folder, or null when no workspace is open. */
   get workspaceRoot(): string | null {
@@ -145,6 +153,7 @@ export class FileTreeHost implements RootProvider {
         | FsRehydrateMessage,
     ) => void;
   }): vscode.Disposable {
+    this.activeFileTreeRoot = this.workspaceRoot;
     this.attachPost = deps.post;
     this.attachReady = deps.isReady;
     const workspaceFolderSub = vscode.workspace.onDidChangeWorkspaceFolders(() => {
@@ -156,6 +165,7 @@ export class FileTreeHost implements RootProvider {
       // that message, which is what evicts any phantom decorations from
       // the previous workspace state.
       this.rootGeneration += 1;
+      this.activeFileTreeRoot = this.workspaceRoot;
       if (!deps.isReady()) {
         return;
       }
@@ -340,6 +350,7 @@ export class FileTreeHost implements RootProvider {
               );
               return;
             }
+            this.activeFileTreeRoot = picked[0].fsPath;
             this.attachPost({
               type: "reveal-in-file-tree",
               absPath: picked[0].fsPath,
@@ -351,8 +362,150 @@ export class FileTreeHost implements RootProvider {
           }
         })();
         return true;
+      case "file-tree-reveal-in-os":
+        void this.handleRevealInOs(msg);
+        return true;
+      case "file-tree-copy-path":
+        void this.handleCopyPath(msg);
+        return true;
+      case "file-tree-copy-relative-path":
+        void this.handleCopyRelativePath(msg);
+        return true;
+      case "file-tree-delete":
+        void this.handleDelete(msg);
+        return true;
       default:
         return false;
     }
   }
+
+  private async handleRevealInOs(msg: { rootGeneration: number; path: string }): Promise<void> {
+    if (!this.validatePathAction(msg.rootGeneration, msg.path)) {
+      return;
+    }
+    try {
+      await vscode.commands.executeCommand("revealFileInOS", vscode.Uri.file(msg.path));
+    } catch {
+      await vscode.window.showErrorMessage("AnyWhere Terminal could not reveal the selected item.");
+    }
+  }
+
+  private async handleCopyPath(msg: { rootGeneration: number; path: string }): Promise<void> {
+    if (!this.validatePathAction(msg.rootGeneration, msg.path)) {
+      return;
+    }
+    try {
+      await vscode.env.clipboard.writeText(msg.path);
+    } catch {
+      await vscode.window.showErrorMessage("AnyWhere Terminal could not copy the selected path.");
+    }
+  }
+
+  private async handleCopyRelativePath(msg: { rootGeneration: number; path: string }): Promise<void> {
+    const root = this.validatePathAction(msg.rootGeneration, msg.path);
+    if (!root) {
+      return;
+    }
+    const pathApi = pathApiFor(root, msg.path);
+    const rel = pathApi.relative(root, msg.path) || ".";
+    try {
+      await vscode.env.clipboard.writeText(toForwardSlash(rel));
+    } catch {
+      await vscode.window.showErrorMessage("AnyWhere Terminal could not copy the selected path.");
+    }
+  }
+
+  private async handleDelete(msg: { rootGeneration: number; path: string }): Promise<void> {
+    const root = this.validatePathAction(msg.rootGeneration, msg.path, { rejectRootTarget: true });
+    if (!root) {
+      return;
+    }
+
+    let stat: vscode.FileStat;
+    try {
+      stat = await vscode.workspace.fs.stat(vscode.Uri.file(msg.path));
+    } catch {
+      await vscode.window.showErrorMessage("AnyWhere Terminal could not delete the selected item.");
+      return;
+    }
+
+    const isDirectory = (stat.type & vscode.FileType.Directory) !== 0;
+    const isFile = (stat.type & vscode.FileType.File) !== 0;
+    if (!isDirectory && !isFile) {
+      await vscode.window.showErrorMessage("AnyWhere Terminal could not delete the selected item.");
+      return;
+    }
+
+    const pathApi = pathApiFor(msg.path);
+    const basename = pathApi.basename(msg.path);
+    const message = isDirectory ? `Delete folder "${basename}"?` : `Delete "${basename}"?`;
+    const detail = isDirectory
+      ? `The folder and its contents at ${msg.path} will be moved to the trash.`
+      : `The item at ${msg.path} will be moved to the trash.`;
+    const choice = await vscode.window.showWarningMessage(message, { modal: true, detail }, "Delete");
+    if (choice !== "Delete") {
+      return;
+    }
+
+    if (!this.validatePathAction(msg.rootGeneration, msg.path, { rejectRootTarget: true })) {
+      return;
+    }
+
+    try {
+      await vscode.workspace.fs.delete(vscode.Uri.file(msg.path), { recursive: isDirectory, useTrash: true });
+    } catch {
+      await vscode.window.showErrorMessage("AnyWhere Terminal could not delete the selected item.");
+      return;
+    }
+
+    if (this.attachPost && this.attachReady?.()) {
+      this.attachPost({
+        type: "fs-changes-invalidated",
+        rootGeneration: this.rootGeneration,
+        parent: pathApi.dirname(msg.path),
+      });
+    }
+  }
+
+  private validatePathAction(
+    rootGeneration: number,
+    targetPath: string,
+    opts: { rejectRootTarget?: boolean } = {},
+  ): string | null {
+    const targetPathApi = pathApiFor(targetPath);
+    if (rootGeneration !== this.rootGeneration || !targetPathApi.isAbsolute(targetPath)) {
+      return null;
+    }
+    const root = this.activeFileTreeRoot ?? this.workspaceRoot;
+    const pathApi = pathApiFor(targetPath, root ?? "");
+    if (!root || !pathApi.isAbsolute(root) || !isSameOrInside(targetPath, root)) {
+      return null;
+    }
+    if (opts.rejectRootTarget && samePath(targetPath, root)) {
+      return null;
+    }
+    return root;
+  }
+}
+
+function samePath(a: string, b: string): boolean {
+  return pathApiFor(a, b).relative(b, a) === "";
+}
+
+function isSameOrInside(targetPath: string, rootPath: string): boolean {
+  const pathApi = pathApiFor(targetPath, rootPath);
+  const rel = pathApi.relative(rootPath, targetPath);
+  return rel === "" || (!isParentTraversal(rel) && !pathApi.isAbsolute(rel));
+}
+
+function toForwardSlash(value: string): string {
+  return value.replace(/\\/g, "/");
+}
+
+function pathApiFor(...paths: string[]): PathApi {
+  return paths.some((p) => /^[a-zA-Z]:[\\/]/.test(p) || /^\\\\/.test(p)) ? nodePath.win32 : nodePath;
+}
+
+function isParentTraversal(rel: string): boolean {
+  return rel === ".." || rel.startsWith("../") || rel.startsWith("..\\");
 }

@@ -13,6 +13,10 @@ import * as path from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import * as vscode from "vscode";
 import type {
+  FileTreeCopyPathMessage,
+  FileTreeCopyRelativePathMessage,
+  FileTreeDeleteMessage,
+  FileTreeRevealInOsMessage,
   GitStatus,
   ReadDirectoryResponseMessage,
   RequestFileTreeSearchMessage,
@@ -145,6 +149,361 @@ describe("FileTreeHost.handleMessage", () => {
       dialogSpy.mockRestore();
       errorSpy.mockRestore();
     }
+  });
+});
+
+describe("FileTreeHost — file-tree path actions", () => {
+  const setWorkspaceFolders = (folders: Array<{ uri: { fsPath: string } }> | undefined) => {
+    (
+      vscode as unknown as { __setWorkspaceFolders(folders: Array<{ uri: { fsPath: string } }> | undefined): void }
+    ).__setWorkspaceFolders(folders);
+  };
+
+  beforeEach(() => {
+    setWorkspaceFolders([{ uri: { fsPath: "/workspace" } }]);
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+    setWorkspaceFolders(undefined);
+    delete (vscode.workspace.fs as unknown as { delete?: unknown }).delete;
+    (vscode.workspace.fs as unknown as { stat: unknown }).stat = async () => ({
+      type: vscode.FileType.File,
+      ctime: 0,
+      mtime: 0,
+      size: 1,
+    });
+  });
+
+  function attachActionHost(host = new FileTreeHost(), isReady = true) {
+    const posted: Array<{ type: string; rootGeneration?: number; parent?: string }> = [];
+    const sub = host.attach({
+      isReady: () => isReady,
+      post: (m) => posted.push(m as { type: string; rootGeneration?: number; parent?: string }),
+    });
+    return { host, posted, sub };
+  }
+
+  function installClipboard() {
+    const writeText = vi.fn(async (_text: string) => undefined);
+    (vscode.env as unknown as { clipboard: { writeText: typeof writeText } }).clipboard = { writeText };
+    return writeText;
+  }
+
+  it("copies absolute and relative paths under the host-owned workspace root", async () => {
+    const { host, sub } = attachActionHost();
+    const writeText = installClipboard();
+
+    const copyPath: FileTreeCopyPathMessage = {
+      type: "file-tree-copy-path",
+      rootGeneration: 0,
+      path: "/workspace/src/a.ts",
+    };
+    const copyRelative: FileTreeCopyRelativePathMessage = {
+      type: "file-tree-copy-relative-path",
+      rootGeneration: 0,
+      path: "/workspace/src/a.ts",
+    };
+
+    expect(host.handleMessage(copyPath, vi.fn())).toBe(true);
+    expect(host.handleMessage(copyRelative, vi.fn())).toBe(true);
+    await Promise.resolve();
+
+    expect(writeText).toHaveBeenNthCalledWith(1, "/workspace/src/a.ts");
+    expect(writeText).toHaveBeenNthCalledWith(2, "src/a.ts");
+    sub.dispose();
+  });
+
+  it("updates the host-owned active root from Open Folder before copy-relative", async () => {
+    const { host, sub } = attachActionHost();
+    const writeText = installClipboard();
+    vi.spyOn(vscode.window, "showOpenDialog").mockResolvedValue([{ fsPath: "/external/root" } as vscode.Uri]);
+
+    expect(host.handleMessage({ type: "request-open-folder" }, vi.fn())).toBe(true);
+    await new Promise((r) => setTimeout(r, 0));
+
+    expect(
+      host.handleMessage(
+        { type: "file-tree-copy-relative-path", rootGeneration: 0, path: "/external/root/nested/a.ts" },
+        vi.fn(),
+      ),
+    ).toBe(true);
+    await Promise.resolve();
+
+    expect(writeText).toHaveBeenCalledWith("nested/a.ts");
+    sub.dispose();
+  });
+
+  it("does not adopt an Open Folder root when the reveal cannot be delivered", async () => {
+    const { host, sub } = attachActionHost(new FileTreeHost(), false);
+    const writeText = installClipboard();
+    vi.spyOn(vscode.window, "showOpenDialog").mockResolvedValue([{ fsPath: "/external/root" } as vscode.Uri]);
+
+    expect(host.handleMessage({ type: "request-open-folder" }, vi.fn())).toBe(true);
+    await new Promise((r) => setTimeout(r, 0));
+
+    expect(
+      host.handleMessage(
+        { type: "file-tree-copy-relative-path", rootGeneration: 0, path: "/external/root/nested/a.ts" },
+        vi.fn(),
+      ),
+    ).toBe(true);
+    expect(
+      host.handleMessage({ type: "file-tree-copy-relative-path", rootGeneration: 0, path: "/workspace/a.ts" }, vi.fn()),
+    ).toBe(true);
+    await Promise.resolve();
+
+    expect(writeText).toHaveBeenCalledTimes(1);
+    expect(writeText).toHaveBeenCalledWith("a.ts");
+    sub.dispose();
+  });
+
+  it("resets the host-owned active root on attach to match the init workspace root", async () => {
+    const host = new FileTreeHost();
+    const first = attachActionHost(host);
+    const writeText = installClipboard();
+    vi.spyOn(vscode.window, "showOpenDialog").mockResolvedValue([{ fsPath: "/external/root" } as vscode.Uri]);
+
+    expect(host.handleMessage({ type: "request-open-folder" }, vi.fn())).toBe(true);
+    await new Promise((r) => setTimeout(r, 0));
+    first.sub.dispose();
+
+    const second = attachActionHost(host);
+    expect(
+      host.handleMessage(
+        { type: "file-tree-copy-relative-path", rootGeneration: 0, path: "/external/root/nested/a.ts" },
+        vi.fn(),
+      ),
+    ).toBe(true);
+    expect(
+      host.handleMessage({ type: "file-tree-copy-relative-path", rootGeneration: 0, path: "/workspace/a.ts" }, vi.fn()),
+    ).toBe(true);
+    await Promise.resolve();
+
+    expect(writeText).toHaveBeenCalledTimes(1);
+    expect(writeText).toHaveBeenCalledWith("a.ts");
+    second.sub.dispose();
+  });
+
+  it("reveals contained targets through VS Code's revealFileInOS command", async () => {
+    const { host, sub } = attachActionHost();
+    const commandSpy = vi.spyOn(vscode.commands, "executeCommand").mockResolvedValue(undefined);
+    const msg: FileTreeRevealInOsMessage = {
+      type: "file-tree-reveal-in-os",
+      rootGeneration: 0,
+      path: "/workspace/src/a.ts",
+    };
+
+    expect(host.handleMessage(msg, vi.fn())).toBe(true);
+    await Promise.resolve();
+
+    expect(commandSpy).toHaveBeenCalledWith(
+      "revealFileInOS",
+      expect.objectContaining({ fsPath: "/workspace/src/a.ts" }),
+    );
+    sub.dispose();
+  });
+
+  it("surfaces reveal and copy failures as user-visible errors", async () => {
+    const { host, sub } = attachActionHost();
+    const errorSpy = vi.spyOn(vscode.window, "showErrorMessage").mockResolvedValue(undefined);
+    vi.spyOn(vscode.commands, "executeCommand").mockRejectedValue(new Error("reveal failed"));
+    (vscode.env as unknown as { clipboard: { writeText: (text: string) => Promise<void> } }).clipboard = {
+      writeText: vi.fn(async () => {
+        throw new Error("copy failed");
+      }),
+    };
+
+    expect(
+      host.handleMessage({ type: "file-tree-reveal-in-os", rootGeneration: 0, path: "/workspace/src/a.ts" }, vi.fn()),
+    ).toBe(true);
+    expect(
+      host.handleMessage({ type: "file-tree-copy-path", rootGeneration: 0, path: "/workspace/src/a.ts" }, vi.fn()),
+    ).toBe(true);
+    expect(
+      host.handleMessage(
+        { type: "file-tree-copy-relative-path", rootGeneration: 0, path: "/workspace/src/a.ts" },
+        vi.fn(),
+      ),
+    ).toBe(true);
+    await new Promise((r) => setTimeout(r, 0));
+
+    expect(errorSpy).toHaveBeenCalledWith("AnyWhere Terminal could not reveal the selected item.");
+    expect(errorSpy).toHaveBeenCalledWith("AnyWhere Terminal could not copy the selected path.");
+    sub.dispose();
+  });
+
+  it("rejects stale-generation and outside-root path actions", async () => {
+    const { host, sub } = attachActionHost();
+    const writeText = installClipboard();
+    host.rootGeneration = 2;
+
+    expect(
+      host.handleMessage({ type: "file-tree-copy-path", rootGeneration: 1, path: "/workspace/src/a.ts" }, vi.fn()),
+    ).toBe(true);
+    expect(host.handleMessage({ type: "file-tree-copy-path", rootGeneration: 2, path: "/outside/a.ts" }, vi.fn())).toBe(
+      true,
+    );
+    await Promise.resolve();
+
+    expect(writeText).not.toHaveBeenCalled();
+    sub.dispose();
+  });
+
+  it("allows contained paths when the first relative segment starts with two dots", async () => {
+    const { host, sub } = attachActionHost();
+    const writeText = installClipboard();
+
+    expect(
+      host.handleMessage(
+        { type: "file-tree-copy-relative-path", rootGeneration: 0, path: "/workspace/..data/a.ts" },
+        vi.fn(),
+      ),
+    ).toBe(true);
+    await Promise.resolve();
+
+    expect(writeText).toHaveBeenCalledWith("..data/a.ts");
+    sub.dispose();
+  });
+
+  it("cancels delete when the modal is dismissed", async () => {
+    const { host, sub } = attachActionHost();
+    const deleteSpy = vi.fn(async () => undefined);
+    (vscode.workspace.fs as unknown as { delete: typeof deleteSpy }).delete = deleteSpy;
+    vi.spyOn(vscode.window, "showWarningMessage").mockResolvedValue(undefined);
+
+    expect(host.handleMessage({ type: "file-tree-delete", rootGeneration: 0, path: "/workspace/a.ts" }, vi.fn())).toBe(
+      true,
+    );
+    await new Promise((r) => setTimeout(r, 0));
+
+    expect(deleteSpy).not.toHaveBeenCalled();
+    sub.dispose();
+  });
+
+  it("deletes files and invalidates the parent after confirmation", async () => {
+    const { host, posted, sub } = attachActionHost();
+    const deleteSpy = vi.fn(async () => undefined);
+    (vscode.workspace.fs as unknown as { delete: typeof deleteSpy }).delete = deleteSpy;
+    vi.spyOn(vscode.window, "showWarningMessage").mockResolvedValue("Delete" as never);
+
+    const msg: FileTreeDeleteMessage = { type: "file-tree-delete", rootGeneration: 0, path: "/workspace/src/a.ts" };
+    expect(host.handleMessage(msg, vi.fn())).toBe(true);
+    await new Promise((r) => setTimeout(r, 0));
+
+    expect(deleteSpy).toHaveBeenCalledWith(expect.objectContaining({ fsPath: "/workspace/src/a.ts" }), {
+      recursive: false,
+      useTrash: true,
+    });
+    expect(posted).toContainEqual({ type: "fs-changes-invalidated", rootGeneration: 0, parent: "/workspace/src" });
+    sub.dispose();
+  });
+
+  it("deletes folders recursively only after folder-specific confirmation", async () => {
+    const { host, sub } = attachActionHost();
+    const deleteSpy = vi.fn(async () => undefined);
+    (vscode.workspace.fs as unknown as { stat: unknown; delete: typeof deleteSpy }).stat = async () => ({
+      type: vscode.FileType.Directory,
+      ctime: 0,
+      mtime: 0,
+      size: 0,
+    });
+    (vscode.workspace.fs as unknown as { delete: typeof deleteSpy }).delete = deleteSpy;
+    const warningSpy = vi.spyOn(vscode.window, "showWarningMessage").mockResolvedValue("Delete" as never);
+
+    expect(host.handleMessage({ type: "file-tree-delete", rootGeneration: 0, path: "/workspace/src" }, vi.fn())).toBe(
+      true,
+    );
+    await new Promise((r) => setTimeout(r, 0));
+
+    expect(warningSpy).toHaveBeenCalledWith(
+      'Delete folder "src"?',
+      expect.objectContaining({
+        modal: true,
+        detail: "The folder and its contents at /workspace/src will be moved to the trash.",
+      }),
+      "Delete",
+    );
+    expect(deleteSpy).toHaveBeenCalledWith(expect.objectContaining({ fsPath: "/workspace/src" }), {
+      recursive: true,
+      useTrash: true,
+    });
+    sub.dispose();
+  });
+
+  it("rejects root delete and re-validates generation after confirmation", async () => {
+    const { host, sub } = attachActionHost();
+    const deleteSpy = vi.fn(async () => undefined);
+    (vscode.workspace.fs as unknown as { delete: typeof deleteSpy }).delete = deleteSpy;
+    vi.spyOn(vscode.window, "showWarningMessage").mockImplementation(async () => {
+      host.rootGeneration = 1;
+      return "Delete" as never;
+    });
+
+    expect(host.handleMessage({ type: "file-tree-delete", rootGeneration: 0, path: "/workspace" }, vi.fn())).toBe(true);
+    expect(host.handleMessage({ type: "file-tree-delete", rootGeneration: 0, path: "/workspace/a.ts" }, vi.fn())).toBe(
+      true,
+    );
+    await new Promise((r) => setTimeout(r, 0));
+
+    expect(deleteSpy).not.toHaveBeenCalled();
+    sub.dispose();
+  });
+
+  it("rejects active root delete when Windows path casing differs", async () => {
+    setWorkspaceFolders([{ uri: { fsPath: "C:\\Root" } }]);
+    const { host, sub } = attachActionHost();
+    const statSpy = vi.fn(async () => ({
+      type: vscode.FileType.Directory,
+      ctime: 0,
+      mtime: 0,
+      size: 0,
+    }));
+    const deleteSpy = vi.fn(async () => undefined);
+    (vscode.workspace.fs as unknown as { stat: typeof statSpy; delete: typeof deleteSpy }).stat = statSpy;
+    (vscode.workspace.fs as unknown as { delete: typeof deleteSpy }).delete = deleteSpy;
+    const warningSpy = vi.spyOn(vscode.window, "showWarningMessage").mockResolvedValue("Delete" as never);
+
+    expect(host.handleMessage({ type: "file-tree-delete", rootGeneration: 0, path: "c:\\root" }, vi.fn())).toBe(true);
+    await new Promise((r) => setTimeout(r, 0));
+
+    expect(statSpy).not.toHaveBeenCalled();
+    expect(warningSpy).not.toHaveBeenCalled();
+    expect(deleteSpy).not.toHaveBeenCalled();
+    sub.dispose();
+  });
+
+  it("surfaces stat and delete failures as user-visible errors", async () => {
+    const { host, sub } = attachActionHost();
+    const errorSpy = vi.spyOn(vscode.window, "showErrorMessage").mockResolvedValue(undefined);
+    (vscode.workspace.fs as unknown as { stat: unknown }).stat = async () => {
+      throw new Error("stat failed");
+    };
+
+    expect(host.handleMessage({ type: "file-tree-delete", rootGeneration: 0, path: "/workspace/a.ts" }, vi.fn())).toBe(
+      true,
+    );
+    await new Promise((r) => setTimeout(r, 0));
+    expect(errorSpy).toHaveBeenCalledWith("AnyWhere Terminal could not delete the selected item.");
+
+    errorSpy.mockClear();
+    (vscode.workspace.fs as unknown as { stat: unknown; delete: unknown }).stat = async () => ({
+      type: vscode.FileType.File,
+      ctime: 0,
+      mtime: 0,
+      size: 1,
+    });
+    (vscode.workspace.fs as unknown as { delete: unknown }).delete = async () => {
+      throw new Error("delete failed");
+    };
+    vi.spyOn(vscode.window, "showWarningMessage").mockResolvedValue("Delete" as never);
+
+    expect(host.handleMessage({ type: "file-tree-delete", rootGeneration: 0, path: "/workspace/a.ts" }, vi.fn())).toBe(
+      true,
+    );
+    await new Promise((r) => setTimeout(r, 0));
+    expect(errorSpy).toHaveBeenCalledWith("AnyWhere Terminal could not delete the selected item.");
+    sub.dispose();
   });
 });
 

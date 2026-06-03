@@ -68,6 +68,18 @@ switch (msg.type) {
 | `requestCloseSplitPane` | User requested closing a split pane | `{ sessionId }` | On close split pane action |
 | `clear` | Clear terminal scrollback | `{ tabId }` | On clear command |
 | `ack` | Flow control acknowledgment | `{ charCount, tabId }` | After xterm.write() callback, batched per 5K chars |
+| `request-read-directory` | Read file-tree directory entries | `{ requestId, path, rootGeneration }` | When the file-tree expands or refreshes a directory |
+| `request-file-tree-search` | Start file-tree search | `{ requestId, scope, rootGeneration, mode }` | When the file-tree search UI requests host enumeration |
+| `cancel-file-tree-search` | Cancel in-flight file-tree search | *(none)* | When search closes or a newer search supersedes the active one |
+| `request-open-folder` | Open a folder in the file tree | *(none)* | When the user invokes the file-tree Open Folder action |
+| `request-subscribe-fs-changes` | Subscribe to file-tree filesystem changes | `{ rootGeneration, path }` | When the file tree starts watching a directory |
+| `request-unsubscribe-fs-changes` | Unsubscribe from file-tree filesystem changes | `{ rootGeneration, paths }` | When watched directories are no longer needed |
+| `file-tree-reveal-in-os` | Reveal a file-tree row target in the OS file manager | `{ rootGeneration, path }` | From the file-tree row context menu |
+| `file-tree-copy-path` | Copy a file-tree row target's absolute path | `{ rootGeneration, path }` | From the file-tree row context menu |
+| `file-tree-copy-relative-path` | Copy a file-tree row target relative to the host-owned active file-tree root | `{ rootGeneration, path }` | From the file-tree row context menu |
+| `file-tree-delete` | Delete a file-tree row target after host confirmation | `{ rootGeneration, path }` | From the file-tree row context menu |
+
+File-tree path action messages deliberately do not carry a webview-supplied base path. The extension host owns the active file-tree root, validates `rootGeneration`, verifies the target is contained by that root, and rejects active-root delete before running reveal, copy, or trash-delete behavior.
 
 ### 3.2 TypeScript Type Definitions
 

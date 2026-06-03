@@ -304,6 +304,46 @@ export interface RequestUnsubscribeFsChangesMessage {
   paths: string[];
 }
 
+/** Webview → Extension: reveal a file-tree row target in the OS file manager. */
+export interface FileTreeRevealInOsMessage {
+  type: "file-tree-reveal-in-os";
+  /** Webview's last-known file-tree root generation. */
+  rootGeneration: number;
+  /** Absolute filesystem path to reveal. */
+  path: string;
+}
+
+/** Webview → Extension: copy a file-tree row target's absolute path. */
+export interface FileTreeCopyPathMessage {
+  type: "file-tree-copy-path";
+  /** Webview's last-known file-tree root generation. */
+  rootGeneration: number;
+  /** Absolute filesystem path to copy. */
+  path: string;
+}
+
+/**
+ * Webview → Extension: copy a file-tree row target relative to the
+ * host-owned active file-tree root. The webview deliberately does NOT send a
+ * base path; the host derives it from trusted state.
+ */
+export interface FileTreeCopyRelativePathMessage {
+  type: "file-tree-copy-relative-path";
+  /** Webview's last-known file-tree root generation. */
+  rootGeneration: number;
+  /** Absolute filesystem path to relativize. */
+  path: string;
+}
+
+/** Webview → Extension: delete a file-tree row target after host confirmation. */
+export interface FileTreeDeleteMessage {
+  type: "file-tree-delete";
+  /** Webview's last-known file-tree root generation. */
+  rootGeneration: number;
+  /** Absolute filesystem path to delete. */
+  path: string;
+}
+
 /** Request the extension host to read a file for the hover preview popup. */
 export interface RequestFilePreviewMessage {
   type: "requestFilePreview";
@@ -456,6 +496,10 @@ export type WebViewToExtensionMessage =
   | RequestOpenFolderMessage
   | RequestSubscribeFsChangesMessage
   | RequestUnsubscribeFsChangesMessage
+  | FileTreeRevealInOsMessage
+  | FileTreeCopyPathMessage
+  | FileTreeCopyRelativePathMessage
+  | FileTreeDeleteMessage
   | UpdateHoverPreviewSettingMessage
   | PersistPanelIdMessage
   | ScrollbackDumpMessage

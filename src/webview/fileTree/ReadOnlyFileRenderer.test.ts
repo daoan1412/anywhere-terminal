@@ -10,7 +10,7 @@
 //
 // See: asimov/changes/port-vscode-async-data-tree/specs/file-tree-panel/spec.md#requirement-file-tree-panel-component
 
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
 import type { FileNode } from "./IFileSystemProvider";
 import { FILE_TREE_DRAG_MIME, ReadOnlyFileRenderer } from "./ReadOnlyFileRenderer";
@@ -144,6 +144,54 @@ describe("ReadOnlyFileRenderer", () => {
     // tests do this). The handler must NOT throw.
     const evt = new Event("dragstart") as DragEvent;
     expect(() => template.row.dispatchEvent(evt)).not.toThrow();
+  });
+
+  it("forwards contextmenu for real file and folder rows", () => {
+    const onContextMenu = vi.fn();
+    const renderer = new ReadOnlyFileRenderer(null, { onContextMenu });
+    const container = document.createElement("div");
+    const template = renderer.renderTemplate(container);
+    const file: FileNode = { name: "main.ts", path: "/repo/main.ts", kind: "file" };
+
+    renderer.renderElement(file, 0, template);
+    const ev = new MouseEvent("contextmenu", { bubbles: true, cancelable: true });
+    template.row.dispatchEvent(ev);
+
+    expect(onContextMenu).toHaveBeenCalledWith(file, ev, template.row);
+    expect(ev.defaultPrevented).toBe(true);
+  });
+
+  it("does not forward contextmenu for synthetic search footer or error rows", () => {
+    const onContextMenu = vi.fn();
+    const renderer = new ReadOnlyFileRenderer(null, { onContextMenu });
+    const container = document.createElement("div");
+    const template = renderer.renderTemplate(container);
+
+    renderer.renderElement(
+      {
+        name: "Showing first 2000 files",
+        path: "/repo",
+        kind: "file",
+        searchRow: { variant: "overflow-footer", relativePath: "/repo" },
+      },
+      0,
+      template,
+    );
+    template.row.dispatchEvent(new MouseEvent("contextmenu", { bubbles: true, cancelable: true }));
+
+    renderer.renderElement(
+      {
+        name: "Search failed",
+        path: "/repo",
+        kind: "file",
+        searchRow: { variant: "error", relativePath: "/repo", errorMessage: "Search failed" },
+      },
+      0,
+      template,
+    );
+    template.row.dispatchEvent(new MouseEvent("contextmenu", { bubbles: true, cancelable: true }));
+
+    expect(onContextMenu).not.toHaveBeenCalled();
   });
 });
 

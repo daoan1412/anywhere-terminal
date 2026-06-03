@@ -112,6 +112,7 @@ vi.mock("./previewFileLink", () => ({
 import type * as vscode from "vscode";
 import { SessionManager } from "../session/SessionManager";
 import type { VaultService } from "../vault/VaultService";
+import { FileTreeHost } from "./fileTreeHost";
 import { openFileLink } from "./openFileLink";
 import { previewFileLink } from "./previewFileLink";
 import { TerminalViewProvider } from "./TerminalViewProvider";
@@ -305,6 +306,36 @@ describe("TerminalViewProvider: openFile dispatch", () => {
     }
 
     expect(openFileLink).not.toHaveBeenCalled();
+
+    sm.dispose();
+  });
+});
+
+// ─── file-tree action dispatch ─────────────────────────────────────
+
+describe("TerminalViewProvider: file-tree action dispatch", () => {
+  it("delegates all file-tree path action messages to FileTreeHost", () => {
+    const spy = vi.spyOn(FileTreeHost.prototype, "handleMessage").mockReturnValue(true);
+    const sm = new SessionManager();
+    const provider = new TerminalViewProvider({ fsPath: "/mock/extension" } as vscode.Uri, sm, "sidebar");
+    const { webviewView, messageHandlers } = createMockWebviewView();
+    provider.resolveWebviewView(webviewView, {} as vscode.WebviewViewResolveContext, {} as vscode.CancellationToken);
+
+    const messages = [
+      { type: "file-tree-reveal-in-os", rootGeneration: 0, path: "/mock/workspace/a.ts" },
+      { type: "file-tree-copy-path", rootGeneration: 0, path: "/mock/workspace/a.ts" },
+      { type: "file-tree-copy-relative-path", rootGeneration: 0, path: "/mock/workspace/a.ts" },
+      { type: "file-tree-delete", rootGeneration: 0, path: "/mock/workspace/a.ts" },
+    ] as const;
+
+    for (const msg of messages) {
+      for (const handler of messageHandlers) {
+        handler(msg);
+      }
+    }
+
+    expect(spy).toHaveBeenCalledTimes(4);
+    expect(spy.mock.calls.map(([msg]) => (msg as { type: string }).type)).toEqual(messages.map((msg) => msg.type));
 
     sm.dispose();
   });

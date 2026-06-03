@@ -23,7 +23,11 @@
 
 import type {
   CancelFileTreeSearchMessage,
+  FileTreeCopyPathMessage,
+  FileTreeCopyRelativePathMessage,
+  FileTreeDeleteMessage,
   FileTreePosition,
+  FileTreeRevealInOsMessage,
   FileTreeSearchResponseMessage,
   GitStatus,
   OpenFileMessage,
@@ -37,6 +41,7 @@ import type {
 import type { FileTreeState } from "../state/WebviewState";
 import { attachTooltip } from "../ui/Tooltip";
 import { FileSystemDataSource } from "./FileSystemDataSource";
+import { FileTreeContextMenu, type FileTreeContextMenuEvent } from "./FileTreeContextMenu";
 import { FileTreeSash, isHorizontalLayout } from "./FileTreeSash";
 import type { FileNode } from "./IFileSystemProvider";
 import { FILE_TREE_DRAG_MIME, ReadOnlyFileRenderer } from "./ReadOnlyFileRenderer";
@@ -55,7 +60,11 @@ export type FileTreePostMessage = (
     | RequestFileTreeSearchMessage
     | CancelFileTreeSearchMessage
     | RequestSubscribeFsChangesMessage
-    | RequestUnsubscribeFsChangesMessage,
+    | RequestUnsubscribeFsChangesMessage
+    | FileTreeRevealInOsMessage
+    | FileTreeCopyPathMessage
+    | FileTreeCopyRelativePathMessage
+    | FileTreeDeleteMessage,
 ) => void;
 
 /**
@@ -204,6 +213,10 @@ export class FileTreePanel {
   private collapseAnimDisarmTimer: ReturnType<typeof setTimeout> | null = null;
   /** Hover-tooltip detachers — invoked in dispose() to remove listeners. */
   private readonly tooltipDisposers: Array<() => void> = [];
+  /** Row context menu for file/folder actions. */
+  private readonly contextMenu: FileTreeContextMenu;
+  /** Root generation captured when the current row context menu opened. */
+  private contextMenuRootGeneration: number | null = null;
 
   constructor(private readonly deps: FileTreePanelDeps) {
     // Stamp the panel CSS class on the host so theme / position rules in
@@ -216,6 +229,10 @@ export class FileTreePanel {
     // `replaceChildren()` on `bodyEl` doesn't wipe the toolbar button.
     this.mountHeader();
     this.mountBody();
+    this.contextMenu = new FileTreeContextMenu({
+      host: deps.host,
+      onAction: (event) => this.handleContextMenuAction(event),
+    });
 
     // Seed position + expandedPaths from persisted state if present.
     const persisted = deps.getPersistedState?.();
@@ -543,6 +560,8 @@ export class FileTreePanel {
      */
     mountCollapsed?: boolean;
   }): void {
+    this.contextMenu.close();
+    this.contextMenuRootGeneration = null;
     // Tear down listeners + widgets bound to the previous mount.
     this.dragoverDetach?.();
     this.dragoverDetach = null;
@@ -767,6 +786,8 @@ export class FileTreePanel {
     this.tooltipDisposers.length = 0;
     this.searchController = null;
     this.disposed = true;
+    this.contextMenu.dispose();
+    this.contextMenuRootGeneration = null;
     this.dragoverDetach?.();
     this.dragoverDetach = null;
     this.resizeObserver?.disconnect();
@@ -1441,7 +1462,9 @@ export class FileTreePanel {
 
     // Pass the data source as the status lookup so search rows can mirror the
     // cached `FileNode.gitStatus` for matching absolute paths (D13).
-    const renderer = new ReadOnlyFileRenderer(this.dataSource);
+    const renderer = new ReadOnlyFileRenderer(this.dataSource, {
+      onContextMenu: (node, ev, row) => this.openContextMenu(node, ev, row),
+    });
     // Tree mounts inside the dedicated body — keeps the toolbar header above
     // the list and untouched by Tree's internal DOM management.
     //
@@ -1503,6 +1526,53 @@ export class FileTreePanel {
     // then on every host resize. Zero-sized entries are skipped because
     // layout(0,0) would tear down virtualisation state we want to retain.
     this.installResizeObserver();
+  }
+
+  private openContextMenu(node: FileNode, ev: MouseEvent, row: HTMLElement): void {
+    if (this.disposed || isSyntheticSearchRow(node)) {
+      return;
+    }
+    if (this.positionMenuEl) {
+      this.closePositionMenu({ restoreFocus: false });
+    }
+    this.tree?.setSelection(node);
+    this.contextMenuRootGeneration = this.currentRootGeneration;
+    this.contextMenu.open(node, ev, row);
+  }
+
+  private handleContextMenuAction(event: FileTreeContextMenuEvent): void {
+    const { node } = event;
+    const rootGeneration = this.contextMenuRootGeneration ?? this.currentRootGeneration;
+    switch (event.action) {
+      case "reveal-in-os":
+        this.deps.postMessage({
+          type: "file-tree-reveal-in-os",
+          rootGeneration,
+          path: node.path,
+        });
+        return;
+      case "copy-path":
+        this.deps.postMessage({
+          type: "file-tree-copy-path",
+          rootGeneration,
+          path: node.path,
+        });
+        return;
+      case "copy-relative-path":
+        this.deps.postMessage({
+          type: "file-tree-copy-relative-path",
+          rootGeneration,
+          path: node.path,
+        });
+        return;
+      case "delete":
+        this.deps.postMessage({
+          type: "file-tree-delete",
+          rootGeneration,
+          path: node.path,
+        });
+        return;
+    }
   }
 
   private installResizeObserver(): void {

@@ -117,6 +117,8 @@ export interface RowTemplate extends ITemplateData {
   currentElement: FileNode | null;
   /** Stable bound listener so disposeTemplate can detach cleanly. */
   onDragStart: (ev: DragEvent) => void;
+  /** Stable bound listener so disposeTemplate can detach cleanly. */
+  onContextMenu: (ev: MouseEvent) => void;
 }
 
 /**
@@ -131,6 +133,10 @@ export interface GitStatusLookup {
   getCachedNode(absPath: string): { gitStatus?: GitStatus } | undefined;
 }
 
+export interface ReadOnlyFileRendererOptions {
+  onContextMenu?: (node: FileNode, ev: MouseEvent, row: HTMLElement) => void;
+}
+
 export class ReadOnlyFileRenderer implements ITreeRenderer<FileNode, RowTemplate> {
   public static readonly TEMPLATE_ID = "file-tree-row";
 
@@ -141,7 +147,10 @@ export class ReadOnlyFileRenderer implements ITreeRenderer<FileNode, RowTemplate
    * cached `FileNode.gitStatus` for the same absolute path. Pass `null` (or
    * omit) to render search rows without decorations.
    */
-  constructor(private readonly statusLookup: GitStatusLookup | null = null) {}
+  constructor(
+    private readonly statusLookup: GitStatusLookup | null = null,
+    private readonly options: ReadOnlyFileRendererOptions = {},
+  ) {}
 
   public renderTemplate(container: HTMLElement): RowTemplate {
     const doc = container.ownerDocument;
@@ -190,9 +199,21 @@ export class ReadOnlyFileRenderer implements ITreeRenderer<FileNode, RowTemplate
         ev.dataTransfer.setData("text/uri-list", encodeURI(`file://${node.path}`));
         ev.dataTransfer.effectAllowed = "copyLink";
       },
+      onContextMenu: (ev: MouseEvent) => {
+        const node = template.currentElement;
+        if (!node || isNonActionSyntheticRow(node)) {
+          return;
+        }
+        if (!this.options.onContextMenu) {
+          return;
+        }
+        ev.preventDefault();
+        this.options.onContextMenu(node, ev, row);
+      },
     };
 
     row.addEventListener("dragstart", template.onDragStart);
+    row.addEventListener("contextmenu", template.onContextMenu);
 
     return template;
   }
@@ -336,6 +357,12 @@ export class ReadOnlyFileRenderer implements ITreeRenderer<FileNode, RowTemplate
     // Detach the dragstart listener so the row's DOM is GC-able once the
     // parent listWidget recycles it away permanently.
     template.row.removeEventListener("dragstart", template.onDragStart);
+    template.row.removeEventListener("contextmenu", template.onContextMenu);
     template.currentElement = null;
   }
+}
+
+function isNonActionSyntheticRow(node: FileNode): boolean {
+  const variant = node.searchRow?.variant;
+  return variant === "overflow-footer" || variant === "error";
 }
