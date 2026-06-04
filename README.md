@@ -1,6 +1,8 @@
 # AnyWhere Terminal
 
-**Put your terminal anywhere in VS Code or Cursor.** Sidebar, secondary sidebar, bottom panel, or as an editor tab. Split it, tab it, theme it.
+**A real terminal you can put anywhere in VS Code or Cursor — and a home base for your AI coding agents.**
+
+Sidebar, secondary sidebar, bottom panel, or an editor tab. Split it, tab it, theme it. Then resume any **Claude Code · Codex · OpenCode** session from one panel, preview file paths straight from agent output, and keep your shell alive across reloads.
 
 ![License](https://img.shields.io/badge/license-MIT-blue.svg)
 ![VS Code](https://img.shields.io/badge/VS%20Code-1.105%2B-007ACC.svg)
@@ -16,39 +18,82 @@
 ext install huybuidac.anywhere-terminal
 ```
 
-**Cursor** — search `AnyWhere Terminal` (Open VSX).
+**Cursor, Windsurf, Antigravity, VSCodium & other VS Code-compatible editors** — search `AnyWhere Terminal` (published to [Open VSX](https://open-vsx.org/extension/huybuidac/anywhere-terminal)).
 
 ## Quickstart
 
 1. Click the **AnyWhere Terminal** icon in the Activity Bar — a session starts automatically.
 2. Drag the view to **any** sidebar, panel, or editor group.
 3. Use the title bar to add tabs or split panes. Right-click for context actions.
+4. Open the **AI Vault** from the panel header (or `AnyWhere Terminal: Open AI Vault`) to browse and resume your AI-CLI sessions.
 
-## Why
+## At a glance
 
-VS Code's built-in terminal is locked to the bottom. AnyWhere Terminal lets you put it anywhere — without losing PTY semantics, WebGL rendering, theming, or clickable links.
+- 🧭 **Put the terminal anywhere** — sidebar, secondary sidebar, bottom panel, or editor tab
+- 🤖 **AI Coding Vault** — resume or fork Claude Code / Codex / OpenCode sessions, with rich session previews
+- 🔗 **AI-CLI-aware** — clickable paths, file hover previews, and pasted-image previews in agent output
+- 🪟 **Tabs + recursive split panes** with drag-to-resize
+- ♻️ **Survives reloads & restarts** — scrollback, names, cwd, and layout restore
+- 📤 **Export** any command or full scrollback to a file
+- 🎨 **Theme-aware, WebGL-rendered**, with an embedded file tree
 
-## Features
+---
 
-- **Place it anywhere** — Primary Sidebar, Secondary Sidebar, Bottom Panel, or Editor Tab
-- **Tabs + split panes** — horizontal/vertical splits with drag-to-resize, recursive
-- **Real terminal** — node-pty backed, full shell support, adaptive flow control
-- **GPU rendering** — WebGL, smooth on Retina
-- **Theme aware** — follows your VS Code theme (dark / light / high contrast)
-- **Smart clipboard** — `Cmd+C` / `Cmd+V`, selection-aware, `Ctrl+C` fallback
-- **Clickable URLs** — `Cmd+Click` with confirmation
-- **Drag & drop paths** — drag from Explorer to insert absolute path
+## 🤖 AI Coding Vault
+
+Every Claude Code, Codex, and OpenCode session you've run lives in a local store somewhere on disk — easy to lose track of across tools and folders. **AI Vault surfaces them all in one panel and lets you resume or fork any of them in a fresh terminal.**
+
+![AI Vault panel](images/ai-vault.png)
+
+- **Resume or fork** — pick up a past session in a new terminal, or branch a fresh thread from it (fork offered where the tool supports it, e.g. OpenCode ≥ 1.1.54).
+- **Group your way** — **Recent**, **Agent**, or **Folder** grouping (persisted), with real Claude / Codex / OpenCode brand icons tinted by a per-agent accent.
+- **Find it fast** — client-side search plus a **"This folder only"** filter scoped to the focused terminal's working directory.
+- **Right-click for more** — Resume in New Tab, Open, Reveal in Finder/Explorer, Copy File Path or Resume Command, Open Working Directory.
+- **Cross-platform** — store locations resolve per-OS (honoring `CLAUDE_CONFIG_DIR`, `CODEX_HOME` / `CODEX_SQLITE_HOME`, `XDG_DATA_HOME`); falls back to a built-in SQLite engine when the `sqlite3` CLI is missing (typically Windows). A missing store degrades to an empty list, never an error.
+
+> **Privacy:** the panel reads from each tool's own store and refreshes from that source of truth on every open. For an instant open it keeps a small, **owner-only** metadata cache (bounded session titles + working directories) under VS Code's storage — non-authoritative, never the source of truth. Full session content is read on demand, and **nothing is ever sent off your machine.**
+
+### Session preview
+
+Activate any row to open a movable, content-rich floating preview — without leaving your terminal.
+
+![Session preview](images/session-preview.png)
+
+- **The whole story** — first prompt, a recent-activity timeline of tool and sub-agent steps, the latest assistant message, and activity stats (messages · tokens · tools · sub-agents).
+- **Nested sub-agents** — spawned sub-agents render as highlighted, accent-bordered blocks with an `agent` badge, including Codex sub-agent threads nested under their parent.
+- **Questions & answers** — when a session uses the ask-the-user tool (Claude Code's `AskUserQuestion`, OpenCode's `question`, Codex's `request_user_input`), the preview shows the question, your choice, and a click-to-expand list of every option.
+- **Stays put** — remembers its size, position, and maximized state across reloads and restarts; drag the header to move it; a transient ↑ / ↓ control appears while scrolling.
+
+## 🔗 Made for AI coding CLIs
+
+Running an agent in the terminal floods it with file paths, diffs, and image attachments. AnyWhere Terminal makes that output **navigable**.
+
+- **Clickable file paths** — paths in terminal output are underlined and open in the editor on click, jumping to the parsed line/column. Understands `src/foo.ts:42:7`, line ranges, Python tracebacks, Windows paths, `file://` URIs, and Claude/Codex CLI line-wrapping (`Read(/abs/path · lines 180-299)`).
+- **Hover to preview** — hover any path for a syntax-highlighted (Shiki) preview with line numbers and markdown rendering; the target line scrolls into view. A trust-policy gate keeps dotfiles and sensitive folders from auto-previewing — press `Cmd`/`Ctrl` to override for one file.
+- **Pasted-image previews** — paste an image into Claude Code / Codex / OpenCode and the CLI shows a `[Image #N]` placeholder; hover it to see the image you actually attached. Captured locally at paste time — nothing is sent anywhere.
+
+## 🪟 Put it anywhere
+
+The built-in terminal is awkward to reposition and can't live in the sidebar. AnyWhere Terminal lets you put a full terminal **anywhere** — without losing PTY semantics, WebGL rendering, theming, or clickable links.
+
+- **Place it anywhere** — Primary Sidebar, Secondary Sidebar, Bottom Panel, or Editor Tab; each location remembers its own state.
+- **Tabs + split panes** — horizontal/vertical splits with drag-to-resize, recursive.
+- **Real terminal** — `node-pty` backed, full shell support, adaptive flow control.
+- **GPU rendering** — WebGL, smooth on Retina.
+- **Theme aware** — follows your VS Code theme (dark / light / high contrast).
+- **Smart clipboard** — `Cmd+C` / `Cmd+V`, selection-aware, with `Ctrl+C` fallback.
+- **Clickable URLs** — `Cmd+Click` with confirmation.
+- **Embedded file tree** — browse the workspace alongside the terminal, with VS Code-style git decorations, live filesystem sync, in-panel search, and drag-a-row-into-a-pane to insert a path. Right-click a row for Reveal in Finder, Copy Path, Copy Relative Path, or Delete.
 
 ## Shortcuts
 
 | Shortcut | Action |
 |----------|--------|
-| `Cmd+\` | Split vertical |
-| `Cmd+Shift+\` | Split horizontal |
 | `Cmd+C` / `Cmd+V` | Copy / paste |
 | `Cmd+K` | Clear terminal |
 | `Cmd+Backspace` | Kill input line |
 | `Shift+Enter` | Insert newline |
+| `F2` | Rename the focused tab |
 
 > Replace `Cmd` with `Ctrl` on non-macOS (Windows/Linux support in progress).
 
@@ -56,7 +101,7 @@ Run `Cmd+Shift+P` → `AnyWhere Terminal:` for the full command list.
 
 ## Settings
 
-All under `anywhereTerminal.*`:
+Key settings under `anywhereTerminal.*` (see the Settings UI for the full list):
 
 | Setting | Default | Description |
 |---------|---------|-------------|
@@ -70,6 +115,9 @@ All under `anywhereTerminal.*`:
 | `cursorBlink` | `true` | Cursor blink. |
 | `defaultCwd` | `""` | Empty = workspace root or `$HOME`. |
 | `sessionRestore.enabled` | `true` | Restore terminal scrollback and metadata across VS Code restarts. |
+| `hoverPreview.delay` | `300` | Debounce (ms) before the file hover preview fetches, range 100–2000. |
+| `hoverPreview.blockSensitive` | `true` | Block auto-preview for dotfiles and sensitive folders (`Cmd`/`Ctrl` overrides). |
+| `fileTree.autoReveal` | `true` | Reveal the active editor file in the file tree (`"focusNoScroll"` to skip scrolling). |
 
 > **Shell auto-detect** (empty `shell.<platform>`): uses VS Code's resolved default shell (`vscode.env.shell`, which honors `terminal.integrated.defaultProfile` and the remote host), then falls back per platform — macOS `$SHELL → /bin/zsh → /bin/bash → /bin/sh`, Linux `$SHELL → /bin/bash → /bin/sh`, Windows `%ComSpec% → cmd.exe`.
 >

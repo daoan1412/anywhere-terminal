@@ -27,7 +27,15 @@
     "cursor",
     "node-pty",
     "webgl",
-    "anywhere"
+    "anywhere",
+    "ai",
+    "ai agent",
+    "coding agent",
+    "claude code",
+    "codex",
+    "opencode",
+    "windsurf",
+    "antigravity"
   ],
   "engines": {
     "vscode": "^1.105.0"

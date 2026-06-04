@@ -4,6 +4,13 @@ All notable changes to **AnyWhere Terminal** are documented in this file.
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.17.3] — 2026-06-04
+
+### Changed
+
+- **README rebuilt around the AI Coding Vault.** The README now leads with the AI Vault and the coding-agent feature set — resume/fork Claude Code · Codex · OpenCode sessions, the floating session preview, clickable paths, and file/image hover previews — with new screenshots of the Vault panel and the session preview. The vault privacy note was corrected: a non-authoritative, owner-only metadata cache (bounded session titles + working directories) is persisted under VS Code storage for an instant open, while full session content is read on demand and nothing leaves your machine. The OpenCode fork minimum version is corrected to ≥ 1.1.54.
+- **Marketplace discovery keywords.** Added `ai`, `ai agent`, `coding agent`, `claude code`, `codex`, `opencode`, `windsurf`, and `antigravity` so the extension surfaces for AI-CLI searches on the VS Code Marketplace and Open VSX.
+
 ## [0.17.2] — 2026-06-04
 
 ### Added
