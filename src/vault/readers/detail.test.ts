@@ -10,6 +10,8 @@ import {
   finalizeDetail,
   MAX_ACTIVITY_STEPS,
   MAX_DETAIL_LIMIT,
+  MAX_MESSAGE_TEXT,
+  normalizeRich,
   SOURCE_TRUNCATED_REASON,
   synthesizeGroupDetail,
   toolLabel,
@@ -70,6 +72,19 @@ describe("truncateRich", () => {
 
   it("caps at max with an ellipsis", () => {
     expect(truncateRich("abcdef", 3)).toBe("abc…");
+  });
+});
+
+describe("normalizeRich", () => {
+  it("normalizes whitespace + structure like truncateRich, minus the cap", () => {
+    expect(normalizeRich("\n\na\r\nb   \n\n\n\nc\n\n")).toBe("a\nb\n\nc");
+  });
+
+  it("never caps length — a long body survives whole with no ellipsis", () => {
+    const long = "x".repeat(MAX_MESSAGE_TEXT * 2);
+    const out = normalizeRich(long);
+    expect(out).toBe(long);
+    expect(out).not.toContain("…");
   });
 });
 

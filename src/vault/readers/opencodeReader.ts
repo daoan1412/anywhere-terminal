@@ -24,6 +24,7 @@ import {
   boundTimeline,
   buildQuestionOptions,
   MAX_MESSAGE_TEXT,
+  normalizeRich,
   type QuestionPair,
   truncate,
   truncateRich,
@@ -434,9 +435,11 @@ export function mapOpencodeRows(
         }
       }
       latestMessage = { role, text: truncate(text), timestamp: m.timeCreated };
+      // Assistant bodies render in full; user prompts stay length-capped.
+      const body = role === "assistant" ? normalizeRich(text) : truncateRich(text, MAX_MESSAGE_TEXT);
       tl.push({
         ts: m.timeCreated,
-        item: { kind: "message", role, text: truncateRich(text, MAX_MESSAGE_TEXT), timestamp: m.timeCreated },
+        item: { kind: "message", role, text: body, timestamp: m.timeCreated },
       });
     }
   }

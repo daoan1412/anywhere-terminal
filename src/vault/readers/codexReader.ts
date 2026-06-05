@@ -32,6 +32,7 @@ import {
   finalizeDetail,
   MAX_MESSAGE_TEXT,
   mergeTimestampedItems,
+  normalizeRich,
   type QuestionPair,
   truncate,
   truncateRich,
@@ -790,7 +791,7 @@ export function classifyCodexRolloutEvents(
         if (m) {
           messageCount++;
           latestMessage = { role: "assistant", text: truncate(m), timestamp: ts };
-          timeline.push({ kind: "message", role: "assistant", text: truncateRich(m, MAX_MESSAGE_TEXT), timestamp: ts });
+          timeline.push({ kind: "message", role: "assistant", text: normalizeRich(m), timestamp: ts });
         }
       } else if (ptype === "token_count") {
         const tot = objField(objField(payload.info)?.total_token_usage);

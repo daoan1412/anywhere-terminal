@@ -4,7 +4,10 @@ import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import type { VaultTimelineItem } from "../types";
 import { readClaudeDetail, resolveClaudeSessionPath } from "./claudeReader";
+
+const isMessage = (t: VaultTimelineItem): t is Extract<VaultTimelineItem, { kind: "message" }> => t.kind === "message";
 
 let configDir: string;
 
@@ -91,6 +94,29 @@ describe("readClaudeDetail", () => {
     expect(detail.stats.toolCount).toBe(1);
     expect(detail.stats.subagentCount).toBe(1);
     expect(detail.stats.tokenCount).toBe(120);
+  });
+
+  it("renders a long assistant body in full but keeps a long user prompt capped", async () => {
+    const longAssistant = `START ${"a".repeat(5000)} END`;
+    const longUser = "u".repeat(5000);
+    await writeSession("-Users-me-proj", "sess-long", [
+      { type: "user", message: { role: "user", content: longUser }, timestamp: "2026-05-01T00:00:00.000Z" },
+      {
+        type: "assistant",
+        message: { role: "assistant", content: [{ type: "text", text: longAssistant }] },
+        timestamp: "2026-05-01T01:00:00.000Z",
+      },
+    ]);
+
+    const detail = await readClaudeDetail("sess-long", { configDir });
+    const messages = (detail?.timeline ?? []).filter(isMessage);
+    const assistant = messages.find((m) => m.role === "assistant");
+    const user = messages.find((m) => m.role === "user");
+    // Assistant body survives whole — no ellipsis truncation.
+    expect(assistant?.text).toBe(longAssistant);
+    expect(assistant?.text).not.toContain("…");
+    // User prompt stays bounded with the ellipsis.
+    expect(user?.text.endsWith("…")).toBe(true);
   });
 
   it("returns null when the session id can't be resolved", async () => {

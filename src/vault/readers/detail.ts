@@ -14,7 +14,9 @@ import type { VaultActivityStep, VaultSessionDetail, VaultTimelineItem } from ".
 export const MAX_DETAIL_TEXT = 600;
 /** Most-recent-N activity steps surfaced in the bounded `recentActivity` (D5). */
 export const MAX_ACTIVITY_STEPS = 12;
-/** Per-message text cap in the full timeline — generous but still bounded. */
+/** Length cap for the timeline bodies that stay bounded (user prompts, reasoning).
+ *  Assistant message bodies render in full via {@link normalizeRich}; the timeline
+ *  is still bounded by item count + the head/tail record windows. */
 export const MAX_MESSAGE_TEXT = 2000;
 /** Most-recent-N timeline items surfaced (the preview is still bounded). */
 export const MAX_TIMELINE_ITEMS = 400;
@@ -196,21 +198,28 @@ export function truncate(text: string, max = MAX_DETAIL_TEXT): string {
 }
 
 /**
- * Like {@link truncate} but PRESERVES the message's block structure for the rich
- * preview renderer (D17): line breaks, code indentation, and table alignment all
- * survive. Only normalizes line endings, strips per-line trailing whitespace, and
- * caps runaway blank-line runs — never collapses interior spaces. Length-capped
- * with an ellipsis like `truncate`. Use for full-transcript message/thinking
- * bodies; keep `truncate` for compact single-line previews (titles, latest, tool
- * labels).
+ * Normalize a message body for the rich preview renderer (D17) WITHOUT capping its
+ * length: line breaks, code indentation, and table alignment all survive — only
+ * line endings, per-line trailing whitespace, and runaway blank-line runs are
+ * tidied; interior spaces are never collapsed. Use for assistant message bodies,
+ * which render in full. {@link truncateRich} adds the length cap for bounded bodies.
  */
-export function truncateRich(text: string, max = MAX_MESSAGE_TEXT): string {
-  const normalized = text
+export function normalizeRich(text: string): string {
+  return text
     .replace(/\r\n?/g, "\n") // CRLF / CR → LF
     .replace(/[ \t]+$/gm, "") // drop per-line trailing whitespace
     .replace(/\n{3,}/g, "\n\n") // cap long blank-line runs
     .replace(/^\n+/, "")
     .replace(/\n+$/, "");
+}
+
+/**
+ * Like {@link normalizeRich} but length-capped with an ellipsis (like `truncate`).
+ * Use for bounded full-transcript bodies (user prompts, reasoning); keep `truncate`
+ * for compact single-line previews (titles, latest, tool labels).
+ */
+export function truncateRich(text: string, max = MAX_MESSAGE_TEXT): string {
+  const normalized = normalizeRich(text);
   return normalized.length > max ? `${normalized.slice(0, max)}…` : normalized;
 }
 
@@ -555,7 +564,7 @@ export function classifyClaudeStyleEvents(records: Rec[], opts: ClassifyOptions 
             timeline.push({
               kind: "message",
               role: "assistant",
-              text: truncateRich(t, MAX_MESSAGE_TEXT),
+              text: normalizeRich(t),
               timestamp: ts,
             });
           }
@@ -621,7 +630,7 @@ export function classifyClaudeStyleEvents(records: Rec[], opts: ClassifyOptions 
         }
       }
     } else if (text) {
-      timeline.push({ kind: "message", role: "assistant", text: truncateRich(text, MAX_MESSAGE_TEXT), timestamp: ts });
+      timeline.push({ kind: "message", role: "assistant", text: normalizeRich(text), timestamp: ts });
     }
 
     const usage = asObj(msg.usage);
