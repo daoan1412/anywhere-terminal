@@ -186,7 +186,9 @@ export class SubagentPreviewPopup {
     if (!this.postMessage) {
       // No host channel (degraded caller / test) → an inert placeholder, never a
       // spinner that can't resolve (review S1).
-      body.replaceChildren(emptyState(ICON_AGENT, "Nested preview unavailable", "Couldn't open this sub-session here."));
+      body.replaceChildren(
+        emptyState(ICON_AGENT, "Nested preview unavailable", "Couldn't open this sub-session here."),
+      );
       return;
     }
     body.replaceChildren(loadingBody());

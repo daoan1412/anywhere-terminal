@@ -126,7 +126,13 @@ describe("SubagentPreviewPopup: nested drill-down", () => {
       recentActivity: [],
       timeline: [
         { kind: "message", role: "user", text: "outer prompt" },
-        { kind: "subagentSession", entryId: CHILD, title: "inner agent", agent: "Explore", firstMessage: "inner first" },
+        {
+          kind: "subagentSession",
+          entryId: CHILD,
+          title: "inner agent",
+          agent: "Explore",
+          firstMessage: "inner first",
+        },
       ],
       stats: { messageCount: 1, toolCount: 0, subagentCount: 1 },
     };

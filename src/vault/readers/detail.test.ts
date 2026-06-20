@@ -13,8 +13,8 @@ import {
   MAX_DETAIL_LIMIT,
   MAX_MESSAGE_TEXT,
   normalizeRich,
-  scopeDirectChildren,
   SOURCE_TRUNCATED_REASON,
+  scopeDirectChildren,
   synthesizeGroupDetail,
   toolLabel,
   truncate,
@@ -783,7 +783,9 @@ describe("scopeDirectChildren", () => {
 describe("classify: toolUseId binding", () => {
   it("binds a toolUseId stub to its spawn block by id (not description)", () => {
     const out = classifyClaudeStyleEvents([userText("go"), taskRecord("toolu_A", { description: "do outer" })], {
-      childStubs: [{ entryId: "claude:p:subagent:agent-A", agentType: "outer", description: "do outer", toolUseId: "toolu_A" }],
+      childStubs: [
+        { entryId: "claude:p:subagent:agent-A", agentType: "outer", description: "do outer", toolUseId: "toolu_A" },
+      ],
     });
     const sub = out.timeline.find((i) => i.kind === "subagentSession");
     expect(sub?.kind === "subagentSession" && sub.entryId).toBe("claude:p:subagent:agent-A");
@@ -793,13 +795,21 @@ describe("classify: toolUseId binding", () => {
   it("does NOT let a toolUseId stub be consumed by a same-description call with a different id", () => {
     const out = classifyClaudeStyleEvents([userText("go"), taskRecord("toolu_OTHER", { description: "do outer" })], {
       childStubs: [
-        { entryId: "claude:p:subagent:agent-A", agentType: "outer", description: "do outer", toolUseId: "toolu_A", timestamp: 5 },
+        {
+          entryId: "claude:p:subagent:agent-A",
+          agentType: "outer",
+          description: "do outer",
+          toolUseId: "toolu_A",
+          timestamp: 5,
+        },
       ],
     });
     // The mismatched call renders as a bare subagent step (the stub did not bind to it)…
     expect(out.timeline.some((i) => i.kind === "subagent")).toBe(true);
     // …and the stub still surfaces (merged), never silently dropped.
-    expect(out.timeline.some((i) => i.kind === "subagentSession" && i.entryId === "claude:p:subagent:agent-A")).toBe(true);
+    expect(out.timeline.some((i) => i.kind === "subagentSession" && i.entryId === "claude:p:subagent:agent-A")).toBe(
+      true,
+    );
   });
 
   it("still surfaces a direct child whose spawn block was truncated out of the records (timestamp merge)", () => {
@@ -807,9 +817,17 @@ describe("classify: toolUseId binding", () => {
     // whole-stream collector) while the bounded records omit the Task block.
     const out = classifyClaudeStyleEvents([userText("go", { timestamp: "2026-05-01T00:00:00.000Z" })], {
       childStubs: [
-        { entryId: "claude:p:subagent:agent-A", agentType: "outer", description: "do outer", toolUseId: "toolu_A", timestamp: 1 },
+        {
+          entryId: "claude:p:subagent:agent-A",
+          agentType: "outer",
+          description: "do outer",
+          toolUseId: "toolu_A",
+          timestamp: 1,
+        },
       ],
     });
-    expect(out.timeline.some((i) => i.kind === "subagentSession" && i.entryId === "claude:p:subagent:agent-A")).toBe(true);
+    expect(out.timeline.some((i) => i.kind === "subagentSession" && i.entryId === "claude:p:subagent:agent-A")).toBe(
+      true,
+    );
   });
 });
