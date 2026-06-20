@@ -4,6 +4,17 @@ All notable changes to **AnyWhere Terminal** are documented in this file.
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.17.4] — 2026-06-21
+
+### Added
+
+- **Nested subagents now nest correctly in the session preview and the terminal popup.** Claude Code (v2.1.172+) lets a subagent spawn its own subagents — up to five levels deep. Previously the AI Vault preview and the in-terminal subagent popup flattened every subagent into the root session, so the tree was lost and the subagent count was off. They now reconstruct the real parent→child tree from each subagent's spawn id: the root shows only the subagents it launched directly, and expanding any subagent reveals the sub-subagents it spawned, recursively — including a new expand-in-place drill-down inside the terminal popup. Older sessions and the OpenCode/Codex readers are unchanged.
+- **A resumed agent you quit now drops you into a shell instead of a frozen tab.** A vault-resumed agent (Claude Code / Codex / OpenCode) runs as the terminal's root process, so quitting it (e.g. Ctrl+C) used to exit the whole PTY and freeze the tab at "[Process exited]". The tab now automatically spawns your default shell in place, so input returns. The tab's identity flips to that shell, so reloading the window restores the shell rather than re-resuming the agent you already quit — but reloading while the agent is still running still auto-resumes it.
+
+### Fixed
+
+- **Long assistant messages are no longer truncated in the session preview.** Assistant transcript bodies were capped at 2000 characters and cut with an ellipsis, dropping the tail of long answers. Assistant bodies now render in full across the Claude Code, Codex, and OpenCode readers — your prompts and the agent's reasoning stay capped, and the timeline is still bounded by item count and the head/tail record windows.
+
 ## [0.17.3] — 2026-06-04
 
 ### Changed
