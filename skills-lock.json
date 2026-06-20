@@ -11,25 +11,37 @@
       "source": "cyberk-dev/asimov",
       "sourceType": "github",
       "skillPath": "skills/asimov-build/SKILL.md",
-      "computedHash": "0471da3420d79cf7757ac13e9b1294c39dbda877f0575e57ffd6677b9ae72273"
+      "computedHash": "2d7344c5350cdcbe04885a22d9cbb84ccea25d6d7751ffbd432604acc9516668"
     },
     "asimov-core": {
       "source": "cyberk-dev/asimov",
       "sourceType": "github",
       "skillPath": "skills/asimov-core/SKILL.md",
-      "computedHash": "720d8679cd4e5cbaf5345711a7940e5f7f58b68d53c878e76e78f4d1e914fbf3"
+      "computedHash": "148f842bd4303756396c208b81c4cc1c0beda52e733381b9382ba36e6a6b6a9e"
+    },
+    "asimov-html-doc": {
+      "source": "cyberk-dev/asimov",
+      "sourceType": "github",
+      "skillPath": "skills/asimov-html-doc/SKILL.md",
+      "computedHash": "d2164610769460197d10397514795b3622c73f5ff973b17ddddc1894a587c65f"
     },
     "asimov-plan": {
       "source": "cyberk-dev/asimov",
       "sourceType": "github",
       "skillPath": "skills/asimov-plan/SKILL.md",
-      "computedHash": "49c0f1d8aed6a9d2b57170ce9334440351a1ce5918bd6d929ddeb7dde94c23c2"
+      "computedHash": "18dfa39b8c8a7ecb5e64e9239325b0cb343af17727b789ffeebcb62d7d7a006e"
     },
     "asimov-review": {
       "source": "cyberk-dev/asimov",
       "sourceType": "github",
       "skillPath": "skills/asimov-review/SKILL.md",
-      "computedHash": "a3dcfd24fde0b201fad4696819931ba54787d0f79a000716d0ccba05c71e3b47"
+      "computedHash": "3d94f425c2e16ed75481335f164ad30984e601577531fdbf6baf95744ab1cec3"
+    },
+    "asimov-teach-me": {
+      "source": "cyberk-dev/asimov",
+      "sourceType": "github",
+      "skillPath": "skills/asimov-teach-me/SKILL.md",
+      "computedHash": "e37d7343e2dd7b4a0adba8d8aa6ff3f17963dda43eee3d72b2ce76959545fe92"
     },
     "cyberk-flow": {
       "source": "cyberk-dev/cyberk-skills",

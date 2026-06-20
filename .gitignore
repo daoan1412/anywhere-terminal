@@ -51,3 +51,7 @@ asimov/memory.db*
 
 # Vendored third-party clones used for local research only — not built or shipped.
 third_party/
+
+# asimov
+.claude/commands/asimov-review-start.md
+skills-lock.json

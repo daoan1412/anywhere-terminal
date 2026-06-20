@@ -35,6 +35,13 @@
     "asm-oracle": {
       "model": "openai/gpt-5.5",
       "reasoningEffort": "high"
+    },
+    "asm-review-master": {
+      "model": "openai/gpt-5.5"
+    },
+    "asm-review-performance": {
+      "model": "openai/gpt-5.5",
+      "reasoningEffort": "high"
     }
   },
   "mcp": {
