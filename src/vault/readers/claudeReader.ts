@@ -49,9 +49,11 @@ import {
   boundTimeline,
   clampDetailLimit,
   classifyClaudeStyleEvents,
+  createSpawnIdCollector,
   finalizeDetail,
   MAX_TIMELINE_ITEMS,
   mergeTimestampedItems,
+  scopeDirectChildren,
 } from "./detail";
 
 export { listClaudeWorkflowStubs } from "./claudeChildren";
@@ -203,8 +205,18 @@ export async function readClaudeDetail(
   // grouped (D4), and detect whether THIS session is itself a non-lead member —
   // a member must NOT synthesize its own Team group (recursive peer nesting, W3),
   // so team groups are leader-only.
+  // Two whole-stream side-collectors share the single pass: team context (D4) and
+  // the root's `Agent`/`Task` spawn ids (non-sidechain only) used to scope subagent
+  // stubs to root's DIRECT children — so a subagent spawned inside another subagent
+  // is NOT flattened under the root (support-nested-subagent-preview D2).
   const { ctx, onRecord } = teamContextCollector();
-  const read = await streamClaudeRecords(filePath, { onRecord });
+  const spawn = createSpawnIdCollector(false);
+  const read = await streamClaudeRecords(filePath, {
+    onRecord: (rec) => {
+      onRecord(rec);
+      spawn.onRecord(rec);
+    },
+  });
   if (read === null) {
     return null;
   }
@@ -221,7 +233,7 @@ export async function readClaudeDetail(
   // Progress-bearing runs render INLINE as self-collapsing `workflowBoard` items (no
   // wrapper layer) — threaded with the teammate turns by timestamp below. Fallback
   // runs fold in as lazy "Workflow:" group stubs (classify merges them).
-  const childStubs = [...subStubs, ...wfNodes.stubs];
+  const childStubs = [...scopeDirectChildren(subStubs, spawn.ids), ...wfNodes.stubs];
   const detail = classifyClaudeStyleEvents(read.records, { limit, childStubs, teammateMessage: teammateMessageHook });
   // Thread the teammate turns + inline workflow boards into the classified timeline
   // by timestamp, then re-bound (classify already bounded its stream-derived items) (D14).

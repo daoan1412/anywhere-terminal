@@ -27,6 +27,28 @@ async function writeSession(
   return file;
 }
 
+async function writeSubagent(
+  encodedCwd: string,
+  parentSessionId: string,
+  stem: string,
+  meta: Record<string, unknown>,
+  records: Record<string, unknown>[],
+): Promise<void> {
+  const dir = path.join(configDir, "projects", encodedCwd, parentSessionId, "subagents");
+  await fs.mkdir(dir, { recursive: true });
+  await fs.writeFile(path.join(dir, `${stem}.jsonl`), jsonl(records));
+  await fs.writeFile(path.join(dir, `${stem}.meta.json`), JSON.stringify(meta));
+}
+
+/** isSidechain assistant record carrying one `Task` tool_use block (a nested spawn). */
+function sidechainTask(id: string, input: Record<string, unknown>): Record<string, unknown> {
+  return {
+    type: "assistant",
+    isSidechain: true,
+    message: { role: "assistant", content: [{ type: "tool_use", id, name: "Task", input }] },
+  };
+}
+
 beforeEach(async () => {
   configDir = await fs.mkdtemp(path.join(os.tmpdir(), "at-claude-detail-"));
 });
@@ -134,5 +156,66 @@ describe("readClaudeDetail", () => {
     const detail = await readClaudeDetail("sess-3", { configDir });
     expect(detail?.firstPrompt).toBe("first");
     expect(detail?.latestMessage).toMatchObject({ role: "assistant", text: "ok" });
+  });
+});
+
+// support-nested-subagent-preview — a depth-2 tree (root → outer → inner), all
+// subagents stored flat under <sessionId>/subagents/, linked by meta.toolUseId.
+describe("readClaudeDetail nested subagents (depth-2)", () => {
+  const CWD = "-Users-me-proj";
+
+  async function writeDepth2Tree(): Promise<void> {
+    await writeSession(CWD, "sess-root", [
+      { type: "user", message: { role: "user", content: "build it" }, timestamp: "2026-05-01T00:00:00.000Z" },
+      {
+        type: "assistant",
+        message: {
+          role: "assistant",
+          content: [{ type: "tool_use", id: "toolu_A", name: "Task", input: { subagent_type: "outer", description: "do outer" } }],
+        },
+      },
+      { type: "assistant", message: { role: "assistant", content: [{ type: "text", text: "root done" }] } },
+    ]);
+    await writeSubagent(CWD, "sess-root", "agent-outer1", { agentType: "outer", description: "do outer", toolUseId: "toolu_A" }, [
+      { type: "user", isSidechain: true, message: { role: "user", content: "start outer" }, timestamp: "2026-05-01T00:01:00.000Z" },
+      sidechainTask("toolu_B", { subagent_type: "inner", description: "do inner" }),
+      { type: "assistant", isSidechain: true, message: { role: "assistant", content: [{ type: "text", text: "outer done" }] } },
+    ]);
+    await writeSubagent(CWD, "sess-root", "agent-inner1", { agentType: "inner", description: "do inner", toolUseId: "toolu_B" }, [
+      { type: "user", isSidechain: true, message: { role: "user", content: "start inner" }, timestamp: "2026-05-01T00:02:00.000Z" },
+      { type: "assistant", isSidechain: true, message: { role: "assistant", content: [{ type: "text", text: "inner done" }] } },
+    ]);
+  }
+
+  it("embeds only the DIRECT child at the root (the nested grandchild does not flatten up)", async () => {
+    await writeDepth2Tree();
+    const root = await readClaudeDetail("sess-root", { configDir });
+    const subs = (root?.timeline ?? []).filter((i) => i.kind === "subagentSession");
+    expect(subs.map((s) => (s.kind === "subagentSession" ? s.entryId : ""))).toEqual([
+      "claude:sess-root:subagent:agent-outer1",
+    ]);
+    expect(root?.stats.subagentCount).toBe(1);
+  });
+
+  it("reveals the nested grandchild when the outer subagent is expanded", async () => {
+    await writeDepth2Tree();
+    const outer = await readClaudeDetail("sess-root:subagent:agent-outer1", { configDir });
+    const subs = (outer?.timeline ?? []).filter((i) => i.kind === "subagentSession");
+    expect(subs.map((s) => (s.kind === "subagentSession" ? s.entryId : ""))).toEqual([
+      "claude:sess-root:subagent:agent-inner1",
+    ]);
+    // The outer transcript renders (its sidechain records ARE its conversation).
+    expect(outer?.timeline.some((i) => i.kind === "message" && i.role === "assistant" && i.text.includes("outer done"))).toBe(
+      true,
+    );
+  });
+
+  it("renders the innermost subagent as a leaf (no further nesting)", async () => {
+    await writeDepth2Tree();
+    const inner = await readClaudeDetail("sess-root:subagent:agent-inner1", { configDir });
+    expect(inner?.timeline.some((i) => i.kind === "subagentSession")).toBe(false);
+    expect(inner?.timeline.some((i) => i.kind === "message" && i.role === "assistant" && i.text.includes("inner done"))).toBe(
+      true,
+    );
   });
 });

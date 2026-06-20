@@ -5,6 +5,7 @@
 // scroll nav), so assertions key off those classes.
 
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import type { RequestSubagentPreviewMessage } from "../../types/messages";
 import type { VaultSessionDetail } from "../../vault/types";
 import { SubagentPreviewPopup } from "./SubagentPreviewPopup";
 
@@ -113,6 +114,62 @@ describe("SubagentPreviewPopup: single instance + dispose", () => {
     expect(popupEl()).toBeNull();
     expect(popup.isOpen()).toBe(false);
     expect(() => popup.dispose()).not.toThrow();
+  });
+});
+
+describe("SubagentPreviewPopup: nested drill-down", () => {
+  const CHILD = "claude:parent:subagent:agent-child";
+
+  function nestedDetail(): VaultSessionDetail {
+    return {
+      entryId: "claude:parent:subagent:agent-outer",
+      recentActivity: [],
+      timeline: [
+        { kind: "message", role: "user", text: "outer prompt" },
+        { kind: "subagentSession", entryId: CHILD, title: "inner agent", agent: "Explore", firstMessage: "inner first" },
+      ],
+      stats: { messageCount: 1, toolCount: 0, subagentCount: 1 },
+    };
+  }
+  function childDetail(): VaultSessionDetail {
+    return {
+      entryId: CHILD,
+      recentActivity: [],
+      timeline: [{ kind: "message", role: "assistant", text: "GRANDCHILD CONTENT" }],
+      stats: { messageCount: 1, toolCount: 0, subagentCount: 0 },
+    };
+  }
+  function head(): HTMLButtonElement {
+    return popupEl()?.querySelector<HTMLButtonElement>(".vault-preview-subagent-head") as HTMLButtonElement;
+  }
+
+  it("fetches a nested child by entryId on expand and renders it in place", () => {
+    const posted: RequestSubagentPreviewMessage[] = [];
+    popup = new SubagentPreviewPopup({ postMessage: (m) => posted.push(m) });
+    popup.open("req-n", "Explore", "outer", 10, 10, "term-1");
+    popup.setContent("req-n", nestedDetail());
+    // The nested block renders collapsed — no fetch until the user expands it.
+    expect(head()).not.toBeNull();
+    expect(posted).toHaveLength(0);
+
+    head().click();
+    expect(posted).toHaveLength(1);
+    expect(posted[0]).toMatchObject({ type: "requestSubagentPreview", entryId: CHILD, terminalId: "term-1" });
+
+    // Host reply for that entryId renders the child into the nested body.
+    popup.handleNestedResponse(CHILD, childDetail());
+    expect(popupEl()?.querySelector(".vault-preview-subagent-body")?.textContent).toContain("GRANDCHILD CONTENT");
+  });
+
+  it("drops a nested response after dispose without throwing", () => {
+    const posted: RequestSubagentPreviewMessage[] = [];
+    popup = new SubagentPreviewPopup({ postMessage: (m) => posted.push(m) });
+    popup.open("req-n2", "Explore", "outer", 10, 10, "term-1");
+    popup.setContent("req-n2", nestedDetail());
+    head().click();
+    popup.dispose();
+    expect(() => popup.handleNestedResponse(CHILD, childDetail())).not.toThrow();
+    expect(popupEl()).toBeNull();
   });
 });
 

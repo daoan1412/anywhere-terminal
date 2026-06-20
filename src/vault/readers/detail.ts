@@ -125,6 +125,12 @@ export interface ClaudeChildStub {
   agentType?: string;
   /** The spawn description (matches the tool call's `input.description`). */
   description?: string;
+  /** The `tool_use` id of the `Agent`/`Task` call that spawned this subagent
+   *  (from `agent-<id>.meta.json`). When present it is the EXACT parent edge — the
+   *  call lives in the parent transcript (root or another subagent) — so the stub
+   *  binds to its spawn block by id only, never by description. Absent on legacy
+   *  transcripts written before this field, and on synthetic group nodes. */
+  toolUseId?: string;
   /** The subagent's first prompt (collapsed-block preview). */
   firstMessage?: string;
   /** First-record timestamp (placement fallback for unmatched stubs). */
@@ -458,6 +464,66 @@ function buildClaudeQuestionItem(
 }
 
 /**
+ * Whole-stream collector of `Agent`/`Task` spawn `tool_use` ids — the parent edges
+ * used to scope a transcript to its DIRECT children (support-nested-subagent-preview
+ * D2). Pass `.onRecord` to `streamClaudeRecords` so it sees EVERY record (even those
+ * the head+tail bound later drops — a direct child whose spawn call sits in the
+ * truncated middle is still recognized), then read `.ids`. Mirrors the classifier's
+ * record filtering: a ROOT read counts non-`isSidechain` records only (an older mixed
+ * root file can carry a subagent's own spawn ids, which must NOT surface a nested
+ * child at root); a SUBAGENT read (`includeSidechain`) counts all, since that file IS
+ * the sidechain conversation.
+ */
+export function createSpawnIdCollector(includeSidechain: boolean): {
+  ids: Set<string>;
+  onRecord: (rec: Record<string, unknown>) => void;
+} {
+  const ids = new Set<string>();
+  return {
+    ids,
+    onRecord: (rec) => {
+      if (!rec || typeof rec !== "object") {
+        return;
+      }
+      if (rec.isSidechain === true && !includeSidechain) {
+        return;
+      }
+      if (rec.isMeta === true || rec.type !== "assistant") {
+        return;
+      }
+      const content = asObj(rec.message)?.content;
+      if (!Array.isArray(content)) {
+        return;
+      }
+      for (const b of content) {
+        const block = asObj(b);
+        if (!block || block.type !== "tool_use") {
+          continue;
+        }
+        const name = str(block.name);
+        if (name === "Task" || name === "Agent") {
+          const id = str(block.id);
+          if (id) {
+            ids.add(id);
+          }
+        }
+      }
+    },
+  };
+}
+
+/**
+ * Keep only the stubs that are THIS transcript's direct children: a stub WITH a
+ * `toolUseId` survives iff that id was spawned in this transcript (`spawnIds`); a
+ * stub WITHOUT one (legacy transcript / synthetic group node) is always kept and
+ * falls back to description/timestamp matching downstream
+ * (support-nested-subagent-preview D2/D4).
+ */
+export function scopeDirectChildren(stubs: ClaudeChildStub[], spawnIds: Set<string>): ClaudeChildStub[] {
+  return stubs.filter((s) => s.toolUseId == null || spawnIds.has(s.toolUseId));
+}
+
+/**
  * Classify Claude-style mixed-event records into bounded session detail.
  * Records are the parsed JSONL objects (each with `type`, `message`,
  * `isSidechain?`, `timestamp?`). Only `user`/`assistant`, non-sidechain records
@@ -581,9 +647,14 @@ export function classifyClaudeStyleEvents(records: Rec[], opts: ClassifyOptions 
             const inObj = asObj(input) ?? {};
             const sub = str(inObj.subagent_type) ?? str(inObj.agent) ?? "subagent";
             const prompt = str(inObj.prompt) ?? str(inObj.description);
-            // Fold in a stored subagent transcript (matched by description) as a
-            // lazy nested block; else surface the call as a plain subagent step.
-            const matchIdx = matchStub(stubs, str(inObj.description), sub);
+            // Fold in a stored subagent transcript as a lazy nested block; else
+            // surface the call as a plain subagent step. A stub carrying a
+            // `toolUseId` (the spawn call's id) binds to THIS block by id ONLY — the
+            // exact parent edge (support-nested-subagent-preview D1); legacy stubs
+            // without one fall back to description (matchStub).
+            const callId = str(block.id);
+            const idIdx = callId ? stubs.findIndex((s) => s.toolUseId != null && s.toolUseId === callId) : -1;
+            const matchIdx = idIdx >= 0 ? idIdx : matchStub(stubs, str(inObj.description), sub);
             if (matchIdx >= 0) {
               const [stub] = stubs.splice(matchIdx, 1);
               activity.push({ kind: "subagent", name: sub, prompt: prompt ? truncate(prompt) : undefined });
@@ -672,16 +743,19 @@ export function classifyClaudeStyleEvents(records: Rec[], opts: ClassifyOptions 
 
 /** Index of the first unconsumed stub whose description (else agentType) matches
  *  a spawn call, or -1. Description match is exact (trimmed); agentType is the
- *  fallback when the call carries no description. */
+ *  fallback when the call carries no description. Stubs carrying a `toolUseId` are
+ *  skipped here — they bind to their spawn block by id only (handled at the call
+ *  site), so description must never re-home one to the wrong same-description call
+ *  (support-nested-subagent-preview D2). */
 function matchStub(stubs: ClaudeChildStub[], description: string | undefined, agentType: string): number {
   const want = description?.trim();
   if (want) {
-    const i = stubs.findIndex((s) => s.description?.trim() === want);
+    const i = stubs.findIndex((s) => s.toolUseId == null && s.description?.trim() === want);
     if (i >= 0) {
       return i;
     }
   }
-  return stubs.findIndex((s) => s.agentType && s.agentType === agentType);
+  return stubs.findIndex((s) => s.toolUseId == null && s.agentType && s.agentType === agentType);
 }
 
 function timelineTimestamp(item: VaultTimelineItem): number | undefined {

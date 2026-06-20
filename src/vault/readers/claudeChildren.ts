@@ -23,13 +23,19 @@ import { coerceTimestamp, readFirstUserRecord, readManifestJson, streamClaudeRec
 import {
   type ClaudeChildStub,
   classifyClaudeStyleEvents,
+  createSpawnIdCollector,
   finalizeDetail,
+  scopeDirectChildren,
   synthesizeGroupDetail,
   truncate,
 } from "./detail";
 
-/** A flat subagent leaf: its records are all `isSidechain` (that IS the
- *  conversation here), so classify with `includeSidechain`. */
+/** A subagent's own detail: its records are all `isSidechain` (that IS the
+ *  conversation here), so classify with `includeSidechain`. It ALSO embeds this
+ *  subagent's OWN direct children — the session's flat subagent list scoped to the
+ *  `Agent`/`Task` ids spawned within THIS transcript — so a sub-subagent is
+ *  expandable, recursing through the same `<parentId>:subagent:<stem>` id scheme
+ *  (support-nested-subagent-preview D3). */
 export async function readClaudeSubagentDetail(
   parentId: string,
   stem: string,
@@ -41,11 +47,19 @@ export async function readClaudeSubagentDetail(
   if (!filePath) {
     return null;
   }
-  const read = await streamClaudeRecords(filePath);
+  // Collect this subagent's spawn ids (whole stream, ALL records — the file is the
+  // sidechain) while reading; scope the session's flat subagent list to its direct
+  // children. Both reads run in parallel.
+  const spawn = createSpawnIdCollector(true);
+  const [read, allStubs] = await Promise.all([
+    streamClaudeRecords(filePath, { onRecord: spawn.onRecord }),
+    listClaudeSubagentStubs(parentId, options),
+  ]);
   if (read === null) {
     return null;
   }
-  const detail = classifyClaudeStyleEvents(read.records, { limit, includeSidechain: true });
+  const childStubs = scopeDirectChildren(allStubs, spawn.ids);
+  const detail = classifyClaudeStyleEvents(read.records, { limit, includeSidechain: true, childStubs });
   return finalizeDetail(formatEntryId("claude", sessionId), detail, read.truncated);
 }
 
@@ -468,29 +482,39 @@ export async function listClaudeSubagentStubs(
     } catch {
       continue; // no subagents dir under this project — try the next
     }
-    const stems = files.filter((f) => f.endsWith(".jsonl")).map((f) => f.slice(0, -".jsonl".length));
-    const stubs: ClaudeChildStub[] = [];
-    for (const stem of stems) {
-      if (!isSafeSessionId(stem)) {
-        continue;
-      }
-      const meta = await readSubagentMeta(path.join(subagentsDir, `${stem}.meta.json`));
-      const first = await readFirstUserRecord(path.join(subagentsDir, `${stem}.jsonl`));
-      stubs.push({
-        entryId: formatEntryId("claude", `${parentId}${SUBAGENT_MARKER}${stem}`),
-        agentType: meta?.agentType,
-        description: meta?.description,
-        firstMessage: first?.text,
-        timestamp: first?.timestamp,
-      });
-    }
+    const stems = files
+      .filter((f) => f.endsWith(".jsonl"))
+      .map((f) => f.slice(0, -".jsonl".length))
+      .filter((stem) => isSafeSessionId(stem));
+    // Read every sibling's meta + first record CONCURRENTLY: a session can hold many
+    // subagents and this runs on each preview open (root read + every nested expand),
+    // so a serial loop scaled O(N) wall-clock per open (review W2). Promise.all keeps
+    // the stable directory order.
+    const stubs: ClaudeChildStub[] = await Promise.all(
+      stems.map(async (stem) => {
+        const meta = await readSubagentMeta(path.join(subagentsDir, `${stem}.meta.json`));
+        const first = await readFirstUserRecord(path.join(subagentsDir, `${stem}.jsonl`));
+        return {
+          entryId: formatEntryId("claude", `${parentId}${SUBAGENT_MARKER}${stem}`),
+          agentType: meta?.agentType,
+          description: meta?.description,
+          ...(meta?.toolUseId ? { toolUseId: meta.toolUseId } : {}),
+          firstMessage: first?.text,
+          timestamp: first?.timestamp,
+        };
+      }),
+    );
     return stubs;
   }
   return [];
 }
 
-/** Read a subagent's `{agentType, description}` meta sidecar (best-effort). */
-async function readSubagentMeta(metaPath: string): Promise<{ agentType?: string; description?: string } | null> {
+/** Read a subagent's `{agentType, description, toolUseId}` meta sidecar (best-effort).
+ *  `toolUseId` is the spawning `Agent`/`Task` call's id — the parent edge used to
+ *  scope each transcript to its direct children (support-nested-subagent-preview D1). */
+async function readSubagentMeta(
+  metaPath: string,
+): Promise<{ agentType?: string; description?: string; toolUseId?: string } | null> {
   try {
     const raw = await fs.readFile(metaPath, "utf8");
     const obj = JSON.parse(raw) as Record<string, unknown>;
@@ -500,6 +524,7 @@ async function readSubagentMeta(metaPath: string): Promise<{ agentType?: string;
     return {
       agentType: typeof obj.agentType === "string" ? obj.agentType : undefined,
       description: typeof obj.description === "string" ? obj.description : undefined,
+      toolUseId: typeof obj.toolUseId === "string" ? obj.toolUseId : undefined,
     };
   } catch {
     return null;

@@ -7,11 +7,13 @@ import {
   classifyClaudeStyleEvents,
   cleanPromptText,
   createBoundedRecordBuffer,
+  createSpawnIdCollector,
   finalizeDetail,
   MAX_ACTIVITY_STEPS,
   MAX_DETAIL_LIMIT,
   MAX_MESSAGE_TEXT,
   normalizeRich,
+  scopeDirectChildren,
   SOURCE_TRUNCATED_REASON,
   synthesizeGroupDetail,
   toolLabel,
@@ -731,5 +733,83 @@ describe("createBoundedRecordBuffer (W1)", () => {
     expect(truncated).toBe(true);
     // head = first 2, tail = last 3.
     expect(records.map((r) => (r as { i: number }).i)).toEqual([0, 1, 7, 8, 9]);
+  });
+});
+
+// support-nested-subagent-preview — toolUseId is the exact parent edge; scoping a
+// transcript to its direct children lets nested subagents nest under their real
+// parent instead of flattening to the root.
+function taskRecord(id: string, input: Rec = {}, over: Rec = {}): Rec {
+  return {
+    type: "assistant",
+    message: { role: "assistant", content: [{ type: "tool_use", id, name: "Task", input }] },
+    timestamp: "2026-05-01T01:00:00.000Z",
+    ...over,
+  };
+}
+
+describe("createSpawnIdCollector", () => {
+  it("collects non-sidechain Agent/Task ids only when includeSidechain is false (mixed root)", () => {
+    const c = createSpawnIdCollector(false);
+    [
+      taskRecord("toolu_root"),
+      taskRecord("toolu_side", {}, { isSidechain: true }), // a subagent's own spawn, in a mixed root file
+      assistantTool("Read", { file_path: "/a.ts" }), // not a spawn
+    ].forEach(c.onRecord);
+    expect([...c.ids]).toEqual(["toolu_root"]);
+  });
+
+  it("collects sidechain ids too when includeSidechain is true (subagent file)", () => {
+    const c = createSpawnIdCollector(true);
+    [taskRecord("toolu_a", {}, { isSidechain: true }), taskRecord("toolu_b", {}, { isSidechain: true })].forEach(
+      c.onRecord,
+    );
+    expect([...c.ids].sort()).toEqual(["toolu_a", "toolu_b"]);
+  });
+});
+
+describe("scopeDirectChildren", () => {
+  it("keeps in-set toolUseId stubs and all legacy stubs, drops out-of-set", () => {
+    const stubs = [
+      { entryId: "claude:p:subagent:agent-A", toolUseId: "toolu_A" },
+      { entryId: "claude:p:subagent:agent-B", toolUseId: "toolu_B" },
+      { entryId: "claude:p:subagent:agent-legacy" }, // no toolUseId → always kept
+    ];
+    const kept = scopeDirectChildren(stubs, new Set(["toolu_A"])).map((s) => s.entryId);
+    expect(kept).toEqual(["claude:p:subagent:agent-A", "claude:p:subagent:agent-legacy"]);
+  });
+});
+
+describe("classify: toolUseId binding", () => {
+  it("binds a toolUseId stub to its spawn block by id (not description)", () => {
+    const out = classifyClaudeStyleEvents([userText("go"), taskRecord("toolu_A", { description: "do outer" })], {
+      childStubs: [{ entryId: "claude:p:subagent:agent-A", agentType: "outer", description: "do outer", toolUseId: "toolu_A" }],
+    });
+    const sub = out.timeline.find((i) => i.kind === "subagentSession");
+    expect(sub?.kind === "subagentSession" && sub.entryId).toBe("claude:p:subagent:agent-A");
+    expect(out.timeline.some((i) => i.kind === "subagent")).toBe(false); // matched → no bare step
+  });
+
+  it("does NOT let a toolUseId stub be consumed by a same-description call with a different id", () => {
+    const out = classifyClaudeStyleEvents([userText("go"), taskRecord("toolu_OTHER", { description: "do outer" })], {
+      childStubs: [
+        { entryId: "claude:p:subagent:agent-A", agentType: "outer", description: "do outer", toolUseId: "toolu_A", timestamp: 5 },
+      ],
+    });
+    // The mismatched call renders as a bare subagent step (the stub did not bind to it)…
+    expect(out.timeline.some((i) => i.kind === "subagent")).toBe(true);
+    // …and the stub still surfaces (merged), never silently dropped.
+    expect(out.timeline.some((i) => i.kind === "subagentSession" && i.entryId === "claude:p:subagent:agent-A")).toBe(true);
+  });
+
+  it("still surfaces a direct child whose spawn block was truncated out of the records (timestamp merge)", () => {
+    // Simulates the reader having scoped this stub in (its id was seen by the
+    // whole-stream collector) while the bounded records omit the Task block.
+    const out = classifyClaudeStyleEvents([userText("go", { timestamp: "2026-05-01T00:00:00.000Z" })], {
+      childStubs: [
+        { entryId: "claude:p:subagent:agent-A", agentType: "outer", description: "do outer", toolUseId: "toolu_A", timestamp: 1 },
+      ],
+    });
+    expect(out.timeline.some((i) => i.kind === "subagentSession" && i.entryId === "claude:p:subagent:agent-A")).toBe(true);
   });
 });

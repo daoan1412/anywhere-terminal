@@ -8,7 +8,7 @@ import type { ThemeChangedMessage, WebViewToExtensionMessage } from "../types/me
 import { buildResumeCommandString, type LaunchMode } from "../vault/LaunchBuilder";
 import { readClaudeSessions, resolveClaudeSessionPath } from "../vault/readers/claudeReader";
 import { listRunningClaudeSessions } from "../vault/readers/runningSessions";
-import { resolveSubagentDetail } from "../vault/readers/subagentLookup";
+import { resolveSubagentDetail, resolveSubagentDetailByEntryId } from "../vault/readers/subagentLookup";
 import type { VaultSessionEntry } from "../vault/types";
 import type { VaultLauncher } from "../vault/VaultLauncher";
 import type { VaultService } from "../vault/VaultService";
@@ -480,8 +480,21 @@ export class TerminalViewProvider implements vscode.WebviewViewProvider {
     message: Extract<WebViewToExtensionMessage, { type: "requestSubagentPreview" }>,
     webview: vscode.Webview,
   ): Promise<void> {
-    const { terminalId, requestId, description } = message;
+    const { terminalId, requestId, description, entryId } = message;
     try {
+      // Nested drill-down: resolve the named child by its vault entryId (no live
+      // terminal/description matching) and echo entryId so the popup routes the
+      // reply to that nested block (support-nested-subagent-preview D5).
+      if (entryId) {
+        const nested = await resolveSubagentDetailByEntryId(entryId);
+        void this.safeSendWithRetry(
+          webview,
+          nested
+            ? { type: "subagentPreviewResponse", requestId, entryId, detail: nested }
+            : { type: "subagentPreviewResponse", requestId, entryId, error: "notFound" },
+        );
+        return;
+      }
       const session = await resolveClaudeSession(terminalId, this.subagentResolveDeps());
       if (!session) {
         void this.safeSendWithRetry(webview, { type: "subagentPreviewResponse", requestId, error: "noSession" });
@@ -498,6 +511,7 @@ export class TerminalViewProvider implements vscode.WebviewViewProvider {
       void this.safeSendWithRetry(webview, {
         type: "subagentPreviewResponse",
         requestId,
+        ...(entryId ? { entryId } : {}),
         error: err instanceof Error ? err.message : "Failed to read subagent transcript",
       });
     }

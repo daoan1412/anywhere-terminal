@@ -12,6 +12,7 @@ import * as fs from "node:fs/promises";
 import { parseEntryId, type VaultSessionDetail } from "../types";
 import { listClaudeSubagentStubs, readClaudeSubagentDetail } from "./claudeChildren";
 import { type ClaudeReaderOptions, resolveClaudeSubagentPath, SUBAGENT_MARKER } from "./claudePaths";
+import { readClaudeDetail } from "./claudeReader";
 
 /** Recover the `agent-*` file stem from a subagent stub's entry id
  *  (`claude:<parentId>:subagent:<stem>`). Returns null when it carries no marker. */
@@ -88,4 +89,24 @@ export async function resolveSubagentDetail(
   // nested nodes consistently (`<parentId>:subagent:<stem>`).
   const token = `${sessionId}${SUBAGENT_MARKER}${chosen.stem}`;
   return readClaudeSubagentDetail(sessionId, chosen.stem, token, options, limit);
+}
+
+/**
+ * Resolve a subagent transcript directly by its vault `entryId` — the path used by
+ * the terminal popup's NESTED drill-down (support-nested-subagent-preview D5): the
+ * popup already holds a child's `claude:<parentId>:subagent:<stem>` id, so resolve
+ * it by id (containment-checked inside `readClaudeDetail`) rather than re-matching a
+ * live terminal + description. Subagent popups are Claude-only, so a non-`claude`
+ * entryId resolves to null. Never throws beyond the reader's own guarantees.
+ */
+export async function resolveSubagentDetailByEntryId(
+  entryId: string,
+  options: ClaudeReaderOptions = {},
+  limit?: number,
+): Promise<VaultSessionDetail | null> {
+  const parsed = parseEntryId(entryId);
+  if (!parsed || parsed.agent !== "claude") {
+    return null;
+  }
+  return readClaudeDetail(parsed.sessionId, options, limit);
 }

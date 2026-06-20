@@ -658,8 +658,9 @@ const routeMessage = createMessageRouter({
     vaultPanel?.handleSessionDetailResponse(msg);
   },
   onSubagentPreviewResponse(msg) {
-    // Fill the (factory-owned) subagent popup; matched by requestId, stale drops.
-    factory.fillSubagentPreview(msg.requestId, msg.detail, msg.error);
+    // Fill the (factory-owned) subagent popup. An `entryId` marks a nested
+    // drill-down reply (routed to that block); else top-level, matched by requestId.
+    factory.fillSubagentPreview(msg.requestId, msg.detail, msg.error, msg.entryId);
   },
   onVaultContextCwd(msg) {
     // Drop a reply for a pane that is no longer active (stale-guard): the user

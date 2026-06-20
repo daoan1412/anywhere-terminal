@@ -68,7 +68,10 @@ export class TerminalFactory {
   private subagentReqSeq = 0;
 
   /** The single, factory-owned subagent preview popup (at most one open; D7). */
-  private readonly subagentPopup = new SubagentPreviewPopup();
+  // The popup posts `requestSubagentPreview{entryId}` for nested drill-down; the
+  // arrow reads `this.postMessage` lazily (set in the constructor body, after this
+  // field initializer runs) (support-nested-subagent-preview D5).
+  private readonly subagentPopup = new SubagentPreviewPopup({ postMessage: (msg) => this.postMessage(msg) });
 
   private readonly themeManager: ThemeManager;
   private readonly store: WebviewStateStore;
@@ -671,13 +674,20 @@ export class TerminalFactory {
   private handleSubagentClick(terminalId: string, agentType: string, description: string, x: number, y: number): void {
     const requestId = `subagent-${++this.subagentReqSeq}`;
     // agentType is webview-display only (header badge); the host resolves by description.
-    this.subagentPopup.open(requestId, agentType, description, x, y);
+    // terminalId is remembered so the popup's nested-drill-down requests can echo it.
+    this.subagentPopup.open(requestId, agentType, description, x, y, terminalId);
     this.postMessage({ type: "requestSubagentPreview", terminalId, requestId, description, x, y });
   }
 
-  /** Fill the open subagent popup with the host's response (matched by requestId). */
-  fillSubagentPreview(requestId: string, detail?: VaultSessionDetail, error?: string): void {
-    this.subagentPopup.setContent(requestId, detail, error);
+  /** Fill the open subagent popup with the host's response. A response carrying an
+   *  `entryId` is a NESTED drill-down reply → route it to that block; otherwise it's
+   *  the top-level transcript (matched by `requestId`) (support-nested-subagent-preview D5). */
+  fillSubagentPreview(requestId: string, detail?: VaultSessionDetail, error?: string, entryId?: string): void {
+    if (entryId) {
+      this.subagentPopup.handleNestedResponse(entryId, detail, error);
+    } else {
+      this.subagentPopup.setContent(requestId, detail, error);
+    }
   }
 
   /** Dispose the subagent popup. Idempotent; called on every terminal teardown (D7). */

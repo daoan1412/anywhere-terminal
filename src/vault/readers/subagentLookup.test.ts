@@ -4,7 +4,7 @@ import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { resolveSubagentDetail } from "./subagentLookup";
+import { resolveSubagentDetail, resolveSubagentDetailByEntryId } from "./subagentLookup";
 
 let tmpRoot: string;
 let subagentsDir: string;
@@ -88,5 +88,23 @@ describe("resolveSubagentDetail", () => {
 
     const detail = await resolveSubagentDetail(PARENT, "Find things", opts());
     expect(detail?.entryId).toBe(`claude:${PARENT}:subagent:agent-new`);
+  });
+});
+
+// support-nested-subagent-preview D5 — the terminal popup's nested drill-down
+// resolves a child directly by its vault entryId (no live-terminal matching).
+describe("resolveSubagentDetailByEntryId", () => {
+  it("resolves a Claude subagent child by its vault entryId", async () => {
+    await writeSubagent("agent-eee", "Trace the spawn", "child work");
+    const detail = await resolveSubagentDetailByEntryId(`claude:${PARENT}:subagent:agent-eee`, opts());
+    expect(detail?.entryId).toBe(`claude:${PARENT}:subagent:agent-eee`);
+  });
+
+  it("returns null for a non-Claude entryId (subagent popups are Claude-only)", async () => {
+    expect(await resolveSubagentDetailByEntryId(`codex:${PARENT}:subagent:agent-eee`, opts())).toBeNull();
+  });
+
+  it("returns null for an unresolvable id", async () => {
+    expect(await resolveSubagentDetailByEntryId("claude:nope:subagent:agent-zzz", opts())).toBeNull();
   });
 });

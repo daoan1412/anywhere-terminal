@@ -468,6 +468,14 @@ export interface RequestSubagentPreviewMessage {
   /** Click viewport coordinates — the popup anchor (`event.clientX/clientY`). */
   x: number;
   y: number;
+  /**
+   * NESTED drill-down (support-nested-subagent-preview D5): when set, the host
+   * resolves THIS child by its vault `entryId` (`claude:<parentId>:subagent:<stem>`,
+   * containment-checked) instead of the live terminal + `description` path, and the
+   * response echoes the same `entryId` so the popup routes it to the right nested
+   * block. Absent for the initial top-level click (`terminalId`+`description` path).
+   */
+  entryId?: string;
 }
 
 /**
@@ -1006,6 +1014,10 @@ export interface VaultContextCwdMessage {
 interface SubagentPreviewResponseBase {
   type: "subagentPreviewResponse";
   requestId: string;
+  /** Echoed when the request carried an `entryId` (a NESTED drill-down fetch) so the
+   *  popup routes this response to that nested block instead of the top-level body
+   *  (support-nested-subagent-preview D5). Absent for the initial top-level reply. */
+  entryId?: string;
 }
 
 /**
