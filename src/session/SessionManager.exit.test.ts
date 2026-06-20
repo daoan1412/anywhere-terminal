@@ -26,6 +26,7 @@ vi.mock("../pty/PtySession", () => {
     write = vi.fn();
     resize = vi.fn();
     kill = vi.fn();
+    dispose = vi.fn();
     pause = vi.fn();
     resume = vi.fn();
     setShellIntegrationSink = vi.fn();
@@ -68,6 +69,7 @@ vi.mock("./OutputBuffer", () => {
     resumeOutput = vi.fn();
     handleAck = vi.fn();
     flush = vi.fn();
+    isOutputPaused = false;
     bufferSize = 0;
     unackedCharCount = 0;
     constructor(
@@ -173,6 +175,133 @@ describe("SessionManager shell-exit metadata", () => {
     mockPtySessions[0].onData?.("x");
     mockPtySessions[0].onExit?.(0);
     expect(seen).toEqual([id]);
+    sm.dispose();
+  });
+});
+
+describe("SessionManager shell-fallback respawn (vault agent sessions)", () => {
+  function newSM() {
+    const fx = makeFactories();
+    return new SessionManager(undefined, {
+      restoreEnabled: true,
+      headlessFactory: fx.headless,
+      serializeAddonFactory: fx.serialize,
+    });
+  }
+  const postedTypes = (webview: MessageSender): unknown[] =>
+    (webview.postMessage as any).mock.calls.map((c: any[]) => (c[0] as any)?.type);
+
+  it("respawns a shell in the same tab when the agent exits (no exit message, tab stays live)", () => {
+    const sm = newSM();
+    const webview = mockWebview();
+    const id = sm.createSession("sidebar", webview, {
+      shell: "claude",
+      shellArgs: ["--resume", "x"],
+      isAgentLaunch: true,
+    });
+    expect(mockPtySessions).toHaveLength(1);
+
+    mockPtySessions[0].onExit?.(0); // agent quits (Ctrl+C)
+
+    // A fresh PTY was spawned for the same tab; the session is still alive.
+    expect(mockPtySessions).toHaveLength(2);
+    expect(sm.getSession(id)).toBeDefined();
+    expect(sm.getSession(id)?.state).toBe("live");
+    expect(sm.getSession(id)?.shellExited).toBeFalsy();
+    expect(sm.getSession(id)?.shellFallbackArmed).toBe(false);
+    // The tab's persisted identity flips to the fallback shell, so a later
+    // window reload restores THIS shell — not the agent the user already quit.
+    expect(sm.getSession(id)?.shell).toBe("/bin/zsh");
+    expect(sm.getSession(id)?.isAgentLaunch).toBeFalsy();
+    // The user is NOT shown "[Process exited]" — no exit message went out.
+    expect(postedTypes(webview)).not.toContain("exit");
+    sm.dispose();
+  });
+
+  it("the fallback shell exiting closes the tab normally (one-shot, no re-respawn)", () => {
+    const sm = newSM();
+    const webview = mockWebview();
+    // Spy the private respawn so the one-shot guarantee is asserted on real
+    // re-entry, not on the mock's handler-sharing quirk.
+    const respawnSpy = vi.spyOn(sm as unknown as { respawnFallbackShell: () => void }, "respawnFallbackShell");
+    const id = sm.createSession("sidebar", webview, {
+      shell: "claude",
+      shellArgs: ["--resume", "x"],
+      isAgentLaunch: true,
+    });
+    mockPtySessions[0].onExit?.(0); // agent → fallback shell
+    expect(respawnSpy).toHaveBeenCalledTimes(1);
+    expect(mockPtySessions).toHaveLength(2);
+    // Disarmed: the fallback shell is now a normal terminal.
+    expect(sm.getSession(id)?.shellFallbackArmed).toBeFalsy();
+
+    // The mock indexes handlers by session id (same for both PTYs), so the
+    // fallback shell's onExit lands on entry[0]. Triggering it = the user typing
+    // `exit` in the fallback shell.
+    mockPtySessions[0].onExit?.(0);
+
+    expect(respawnSpy).toHaveBeenCalledTimes(1); // did NOT respawn again
+    expect(mockPtySessions).toHaveLength(2);
+    expect(sm.getSession(id)).toBeUndefined(); // cleaned up like a normal close
+    expect(postedTypes(webview)).toContain("exit");
+    sm.dispose();
+  });
+
+  it("a normal (non-agent) terminal does NOT respawn on exit", () => {
+    const sm = newSM();
+    const webview = mockWebview();
+    const id = sm.createSession("sidebar", webview);
+    mockPtySessions[0].onExit?.(0);
+    expect(mockPtySessions).toHaveLength(1); // no respawn
+    expect(sm.getSession(id)).toBeUndefined();
+    expect(postedTypes(webview)).toContain("exit");
+    sm.dispose();
+  });
+
+  it("closing the tab (kill) does NOT respawn even for an agent session", () => {
+    const sm = newSM();
+    sm.createSession("sidebar", mockWebview(), {
+      shell: "claude",
+      shellArgs: ["--resume", "x"],
+      isAgentLaunch: true,
+    });
+    (sm as any).terminalBeingKilled.add(mockPtySessions[0].id);
+    mockPtySessions[0].onExit?.(0);
+    expect(mockPtySessions).toHaveLength(1); // no respawn on intentional kill
+    sm.dispose();
+  });
+
+  it("re-arms the fallback after a cross-restart restore (auto-resumed agent)", () => {
+    const sm = newSM();
+    const restoreFrom = {
+      metadata: {
+        sessionId: "agent-1",
+        viewLocation: "sidebar" as const,
+        terminalNumber: 1,
+        customName: null,
+        shell: "claude",
+        shellArgs: ["--resume", "x"],
+        cwd: "/proj",
+        currentCwd: null,
+        cols: 80,
+        rows: 30,
+        bufferFile: "snapshots/agent-1.snapshot.ans",
+        bufferBytes: 0,
+        isSplitPane: false,
+        rootTabId: "agent-1",
+        snapshotAt: 1,
+        shellExited: false,
+        exitCode: null,
+        isAgentLaunch: true,
+      },
+      buffer: "",
+    };
+    const id = sm.createSession("sidebar", mockWebview(), { restoreFrom });
+    expect(sm.getSession(id)?.shellFallbackArmed).toBe(true);
+    // The restored agent exits → still respawns a shell.
+    mockPtySessions[0].onExit?.(0);
+    expect(mockPtySessions).toHaveLength(2);
+    expect(sm.getSession(id)).toBeDefined();
     sm.dispose();
   });
 });

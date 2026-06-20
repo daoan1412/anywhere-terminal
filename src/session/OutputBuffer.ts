@@ -98,6 +98,11 @@ export class OutputBuffer {
     return this._isPaused;
   }
 
+  /** Whether output flushing is paused (view hidden / restore replay pending). */
+  get isOutputPaused(): boolean {
+    return this._isOutputPaused;
+  }
+
   constructor(
     /** Tab/session ID for output messages. */
     private readonly _tabId: string,
@@ -245,8 +250,11 @@ export class OutputBuffer {
 
   /**
    * Dispose the buffer. Flushes remaining data (best-effort), clears timer.
+   * Pass `{ flush: false }` to discard still-buffered data instead — used when a
+   * caller is swapping in a replacement buffer and the pending (paused) chunks
+   * must not reach the webview out of order.
    */
-  dispose(): void {
+  dispose(opts?: { flush?: boolean }): void {
     if (this._disposed) {
       return;
     }
@@ -259,8 +267,10 @@ export class OutputBuffer {
       this._flushTimer = undefined;
     }
 
-    // Best-effort final flush
-    this._flush();
+    // Best-effort final flush (skipped when the caller is discarding paused data).
+    if (opts?.flush !== false) {
+      this._flush();
+    }
 
     // Reset state
     this._chunks = [];

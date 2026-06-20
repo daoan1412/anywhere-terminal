@@ -30,13 +30,16 @@ function stubService(entries: VaultSessionEntry[]): VaultService {
 }
 
 describe("VaultLauncher.resolve", () => {
-  it("maps a claude resume to createSession options with the auth env override", async () => {
+  it("maps a claude resume to createSession options (agent as PTY root) with the auth env override", async () => {
     const launcher = new VaultLauncher(stubService([makeEntry({ flags: { model: "claude-opus-4-7" } })]), {
       ANTHROPIC_API_KEY: "sk-1",
     });
     const opts = await launcher.resolve("claude:sess-1", "resume");
+    // The agent CLI is the terminal's process; the session manager respawns a
+    // shell in-tab on exit (isAgentLaunch).
     expect(opts.shell).toBe("claude");
     expect(opts.shellArgs).toEqual(["--resume", "sess-1", "--model", "claude-opus-4-7"]);
+    expect(opts.isAgentLaunch).toBe(true);
     expect(opts.cwd).toBe("/Users/me/proj");
     expect(opts.env).toEqual({ ANTHROPIC_API_KEY: "sk-1" });
   });
@@ -47,6 +50,7 @@ describe("VaultLauncher.resolve", () => {
     const opts = await launcher.resolve("codex:t1", "resume");
     expect(opts.shell).toBe("codex");
     expect(opts.shellArgs).toEqual(["resume", "t1"]);
+    expect(opts.isAgentLaunch).toBe(true);
     expect(opts.env).toBeUndefined();
   });
 

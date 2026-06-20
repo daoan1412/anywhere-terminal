@@ -597,6 +597,9 @@ export class SnapshotPersistence {
       snapshotAt: Date.now(),
       shellExited: session.shellExited ?? false,
       exitCode: session.exitCode ?? null,
+      // Persisted so the restore re-spawn re-arms the shell-fallback-on-exit for
+      // vault agent sessions (omitted when false to keep snapshots clean).
+      isAgentLaunch: session.isAgentLaunch ? true : undefined,
       // Snapshot a shallow copy so concurrent appendOutput / close calls
       // during JSON.stringify can't mutate what we hand off to the storage
       // layer. The TrackedCommand objects themselves are pure data (no

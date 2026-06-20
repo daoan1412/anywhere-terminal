@@ -357,6 +357,13 @@ export class SessionManager {
        * Claude's `CLAUDE_CONFIG_DIR` when it differs from the host. See D5.
        */
       env?: Record<string, string>;
+      /**
+       * Marks the root process as a vault agent CLI (not a shell). Arms
+       * "respawn a shell in this tab when it exits" so the agent quitting leaves
+       * a usable prompt instead of a dead terminal. On restore this is re-derived
+       * from the persisted snapshot, not this option.
+       */
+      isAgentLaunch?: boolean;
       restoreFrom?: PendingSnapshot;
       /**
        * For split-pane children, the sessionId of the owning root tab. The
@@ -369,6 +376,10 @@ export class SessionManager {
   ): string {
     const restoreFrom = options?.restoreFrom;
     const restoringExited = restoreFrom?.metadata.shellExited === true;
+    // Vault agent session? Drives the shell-fallback-on-exit arming below. On
+    // restore the flag is re-derived from the persisted snapshot (the option is
+    // absent there).
+    const isAgentLaunch = options?.isAgentLaunch ?? restoreFrom?.metadata.isAgentLaunch ?? false;
     const isSplitPane = options?.isSplitPane ?? restoreFrom?.metadata.isSplitPane ?? false;
     // Preserve the persisted sessionId during restore so the webview's
     // split-layout (`vscode.setState`) keeps referencing the same tabs.
@@ -461,6 +472,10 @@ export class SessionManager {
       currentCwd: restoreFrom?.metadata.currentCwd ?? undefined,
       shell: resolvedShell,
       shellArgs: resolvedArgs,
+      isAgentLaunch: isAgentLaunch || undefined,
+      // Arm shell-fallback for a live agent root; a restored-exited session is
+      // read-only so nothing to fall back from.
+      shellFallbackArmed: isAgentLaunch && !restoringExited ? true : undefined,
       panelId: viewId.startsWith("editor-") ? viewId.slice("editor-".length) : undefined,
       shellExited: restoringExited || undefined,
       exitCode: restoringExited ? (restoreFrom?.metadata.exitCode ?? null) : undefined,
@@ -507,9 +522,22 @@ export class SessionManager {
     // subsequent serializes include the prior session's history.
     this.snapshots.attachSession(session, restoreFrom);
 
-    // Wire PTY events
+    // Wire PTY events (extracted so respawnFallbackShell can re-wire a fresh PTY).
+    this.wirePty(session, pty, webview);
+
+    return id;
+  }
+
+  /**
+   * Wire a freshly-spawned PTY's data/exit handlers onto a session. Reads
+   * `session.outputBuffer` live (not a captured local) so it stays correct after
+   * `respawnFallbackShell` swaps the buffer. Used by createSession and the
+   * shell-fallback respawn.
+   */
+  private wirePty(session: TerminalSession, pty: PtySession, webview: MessageSender): void {
+    const id = session.id;
     pty.onData = (data: string) => {
-      outputBuffer.append(data);
+      session.outputBuffer.append(data);
       this.appendToScrollback(session, data);
       this.snapshots.recordData(session, data);
       // NOTE: command-output capture is NOT done here. The OSC parser emits
@@ -520,6 +548,23 @@ export class SessionManager {
     };
 
     pty.onExit = (code: number) => {
+      // Shell-fallback: a vault agent that owns the terminal (the PTY root) just
+      // exited on its own (Ctrl+C / done). Replace it with a fresh shell in the
+      // SAME tab so the user keeps an input prompt, instead of a dead terminal.
+      // Checked BEFORE recordExit so the session isn't frozen as "exited". Skip
+      // when the user is closing the tab (terminalBeingKilled). One-shot: the
+      // fallback shell then behaves like a normal terminal.
+      if (session.shellFallbackArmed && !this.terminalBeingKilled.has(id)) {
+        session.shellFallbackArmed = false;
+        try {
+          this.respawnFallbackShell(session, webview);
+          return;
+        } catch (err) {
+          console.error(`[AnyWhere Terminal] shell-fallback respawn failed for ${id}:`, err);
+          // Fall through to the normal exit path so the tab doesn't hang.
+        }
+      }
+
       // Record exit state BEFORE cleanup so an immediate persist (queued by
       // the persistence pipeline) captures the exit metadata. See D13.
       this.snapshots.recordExit(session, typeof code === "number" ? code : null);
@@ -539,8 +584,79 @@ export class SessionManager {
       this.cleanupSession(id);
       this.safePostMessage(webview, { type: "exit", tabId: id, code });
     };
+  }
 
-    return id;
+  /**
+   * The agent that owned this tab exited — spawn the user's default shell in the
+   * same session so the tab stays usable. Swaps in a fresh PTY + OutputBuffer and
+   * re-wires events.
+   *
+   * The session's persisted identity (`shell`/`shellArgs`/`isAgentLaunch`) is
+   * flipped to the fallback shell so a later window reload restores THIS shell
+   * (scrollback history above), NOT the agent the user already quit. Auto-resume
+   * therefore only applies while the agent is still live: reload-with-agent-running
+   * re-resumes it; reload-after-exit restores the shell. See respawn UX bug.
+   */
+  private respawnFallbackShell(session: TerminalSession, webview: MessageSender): void {
+    const id = session.id;
+    const detected = PtyManager.detectShell();
+    const shell = detected.shell;
+    const args = detected.args;
+    const cwd = session.currentCwd || session.initialCwd || PtyManager.resolveWorkingDirectory();
+
+    const nodePty = PtyManager.loadNodePty();
+    // Base env only: the fallback is a plain shell, so the vault's per-session
+    // env (CLAUDE_CONFIG_DIR / auth allowlist) must not leak into it.
+    const baseEnv = PtyManager.buildEnvironment();
+    // Reclaim the exited agent's shell-integration cleanup before re-registering
+    // the same id; injectAtSpawn would otherwise drop its cleanup callback unrun.
+    this.shellIntegration.cleanupSession(id);
+    const pty = new PtySession(id);
+    let spawnArgs: readonly string[] = args;
+    let spawnEnv: Record<string, string> = baseEnv;
+    const injection = this.shellIntegration.injectAtSpawn(id, shell, args, baseEnv);
+    if (injection) {
+      spawnArgs = injection.args;
+      spawnEnv = injection.env;
+      pty.setShellIntegrationNonce(injection.nonce);
+    }
+    // Do all fallible spawn work BEFORE mutating `session`, so a throw leaves the
+    // old PTY/buffer intact for the caller's fall-through exit path. Tear down the
+    // half-spawned shell on failure so it isn't orphaned.
+    try {
+      pty.spawn(nodePty, shell, [...spawnArgs], { cwd, env: spawnEnv });
+      pty.setShellIntegrationSink(this.shellIntegration.makeSink(id));
+      pty.resize(session.cols, session.rows);
+    } catch (err) {
+      pty.dispose();
+      throw err;
+    }
+
+    // Atomic swap: the dead agent PTY + its buffer for the fresh shell, keeping
+    // the tab. If a restore replay hasn't resumed output yet, inherit the paused
+    // state (dropping the old paused chunks) so shell output can't beat the
+    // snapshot replay.
+    const wasOutputPaused = session.outputBuffer.isOutputPaused;
+    session.outputBuffer.dispose(wasOutputPaused ? { flush: false } : undefined);
+    session.pty = pty;
+    const nextBuffer = new OutputBuffer(id, webview, pty);
+    if (wasOutputPaused) {
+      nextBuffer.pauseOutput();
+    }
+    session.outputBuffer = nextBuffer;
+    // Flip the persisted identity (+ cwd) so a reload restores THIS shell, not
+    // the agent the user already quit.
+    session.shell = shell;
+    session.shellArgs = args;
+    session.initialCwd = cwd;
+    session.isAgentLaunch = undefined;
+    this.wirePty(session, pty, webview);
+    // Persist the flip now so a crash/quit before the next debounced flush can't
+    // resurrect the agent identity (clean reload is covered by the deactivate
+    // flush). See review W1.
+    void this.snapshots.flushSessionImmediate(id).catch((err) => {
+      console.error(`[AnyWhere Terminal] persist fallback-shell identity failed for ${id}:`, err);
+    });
   }
 
   /** Write input data to a session's PTY. Silent no-op for unknown session IDs. */

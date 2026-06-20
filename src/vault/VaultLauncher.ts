@@ -16,6 +16,13 @@ export interface CreateSessionOptions {
   cwd: string;
   /** Present only for Claude (auth/config override); omitted otherwise. */
   env?: Record<string, string>;
+  /**
+   * Marks this session's root process as an agent CLI (claude/codex/opencode),
+   * not a shell. The session manager arms "fall back to a shell on exit" so that
+   * when the agent quits (Ctrl+C / done) the tab drops to a live shell prompt
+   * instead of dying. Persisted so a window reload re-arms it after auto-resume.
+   */
+  isAgentLaunch: boolean;
 }
 
 export class VaultLauncher {
@@ -37,11 +44,16 @@ export class VaultLauncher {
     }
 
     const spec = build(entry, mode, this.hostEnv);
+    // Spawn the agent CLI directly as the terminal's process (PTY root). This is
+    // killed cleanly on window reload; on exit, the session manager respawns a
+    // shell in the same tab so the user keeps an input prompt (see
+    // SessionManager.respawnFallbackShell + isAgentLaunch).
     return {
       shell: spec.file,
       shellArgs: spec.args,
       cwd: spec.cwd,
       env: Object.keys(spec.env).length > 0 ? spec.env : undefined,
+      isAgentLaunch: true,
     };
   }
 }

@@ -399,6 +399,7 @@ export class TerminalViewProvider implements vscode.WebviewViewProvider {
         shellArgs: opts.shellArgs,
         cwd: opts.cwd,
         env: opts.env,
+        isAgentLaunch: opts.isAgentLaunch,
       });
       const newSession = this.sessionManager.getSession(newSessionId);
       if (newSession) {

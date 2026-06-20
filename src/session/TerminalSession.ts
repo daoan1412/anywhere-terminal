@@ -100,6 +100,20 @@ export interface TerminalSession {
   shell?: string;
   /** Resolved shell args (recorded on spawn so cross-restart restore can respawn the same shell). */
   shellArgs?: string[];
+  /**
+   * True when this session's root process is an agent CLI launched from the vault
+   * (claude/codex/opencode), not a shell. Persisted; drives the shell-fallback
+   * behavior below. See SessionManager.respawnFallbackShell.
+   */
+  isAgentLaunch?: boolean;
+  /**
+   * Runtime one-shot: when the current PTY exits naturally, respawn the user's
+   * default shell in this same tab instead of killing it. Set from `isAgentLaunch`
+   * at each agent spawn (fresh launch + cross-restart restore) and cleared once
+   * the fallback shell takes over, so the shell exiting behaves like a normal
+   * terminal close. Not persisted — re-derived from `isAgentLaunch` on restore.
+   */
+  shellFallbackArmed?: boolean;
   /** For editor sessions, the panelId of the owning webview panel. Derived from viewId on session create. */
   panelId?: string;
   /**

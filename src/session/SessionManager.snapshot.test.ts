@@ -258,6 +258,27 @@ describe("SessionManager.generateSnapshotMetadata", () => {
     sm.dispose();
   });
 
+  it("persists isAgentLaunch for vault agent launches (omitted otherwise)", () => {
+    const fx = makeFactories();
+    const sm = new SessionManager(undefined, {
+      restoreEnabled: true,
+      headlessFactory: fx.headless,
+      serializeAddonFactory: fx.serializeAddon,
+    });
+    const agent = sm.createSession("anywhereTerminal.sidebar", mockWebview(), {
+      shell: "claude",
+      shellArgs: ["--resume", "x"],
+      isAgentLaunch: true,
+    });
+    mockPtySessions[0].onData?.("data");
+    expect(sm.generateSnapshotMetadata(agent)!.metadata.isAgentLaunch).toBe(true);
+
+    const plain = sm.createSession("anywhereTerminal.sidebar", mockWebview());
+    mockPtySessions[1].onData?.("data");
+    expect(sm.generateSnapshotMetadata(plain)!.metadata.isAgentLaunch).toBeUndefined();
+    sm.dispose();
+  });
+
   it("attaches trackedCommands to metadata when commandTracking has entries", () => {
     const fx = makeFactories();
     const sm = new SessionManager(undefined, {

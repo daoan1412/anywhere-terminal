@@ -33,6 +33,16 @@ export interface SessionSnapshotMetadata {
   exitCode: number | null;
 
   /**
+   * True when this session's root process is an agent CLI (claude/codex/opencode)
+   * launched from the vault, not a shell. Persisted so that after a window reload
+   * re-spawns (auto-resumes) the agent, the session manager re-arms "fall back to
+   * a shell on exit" — when the agent quits, the tab drops to a live shell prompt
+   * instead of dying. Optional for back-compat: older indexes lack it and
+   * deserialize as `undefined`/`false`.
+   */
+  isAgentLaunch?: boolean;
+
+  /**
    * Tracked commands captured from OSC 633 markers, persisted so the
    * "Export Last Command…" / "Export Command…" pickers survive a window
    * reload (or full IDE restart). Only completed commands are persisted —
@@ -98,6 +108,7 @@ export const KNOWN_METADATA_KEYS: ReadonlySet<string> = new Set<keyof SessionSna
   "snapshotAt",
   "shellExited",
   "exitCode",
+  "isAgentLaunch",
   "trackedCommands",
 ]);
 
