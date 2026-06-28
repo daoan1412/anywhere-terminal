@@ -83,20 +83,54 @@ function asString(v: unknown): string | undefined {
   return undefined;
 }
 
-/** sandbox_policy is a JSON blob; we surface its `.type` (else the raw string). */
+/** The only values codex's `-s/--sandbox` flag accepts (codex-cli ≥0.136). */
+const CODEX_SANDBOX_MODES = new Set(["read-only", "workspace-write", "danger-full-access"]);
+
+/** A `managed` policy lists per-path filesystem `access`; any `write` entry means
+ *  the closest CLI bucket is workspace-write, otherwise read-only. */
+function managedToCliMode(policy: object): string {
+  const fs = (policy as { file_system?: unknown }).file_system;
+  const entries = fs && typeof fs === "object" ? (fs as { entries?: unknown }).entries : undefined;
+  const hasWrite =
+    Array.isArray(entries) &&
+    entries.some((e) => e && typeof e === "object" && (e as { access?: unknown }).access === "write");
+  return hasWrite ? "workspace-write" : "read-only";
+}
+
+/**
+ * Resolve `sandbox_policy` to a value `codex resume -s <…>` accepts, or undefined
+ * to omit the flag. `sandbox_policy` is a JSON blob whose `.type` is codex's
+ * INTERNAL policy enum, which is NOT 1:1 with the CLI flag's value set: codex
+ * ≥0.136 records a granular `"managed"` type that the flag rejects. We map the
+ * direct modes through, collapse `"managed"` to its closest bucket, and drop any
+ * other/unknown type (so codex falls back to its configured default rather than
+ * crashing the resume).
+ */
 function parseSandbox(raw: unknown): string | undefined {
   if (typeof raw !== "string" || !raw) {
     return undefined;
   }
+  let policy: unknown;
   try {
-    const obj = JSON.parse(raw);
-    if (obj && typeof obj === "object" && typeof (obj as { type?: unknown }).type === "string") {
-      return (obj as { type: string }).type;
-    }
+    policy = JSON.parse(raw);
   } catch {
-    // not JSON — fall through to the raw value
+    // not JSON — keep only if it is already a valid CLI mode.
+    return CODEX_SANDBOX_MODES.has(raw) ? raw : undefined;
   }
-  return raw;
+  if (!policy || typeof policy !== "object") {
+    return undefined;
+  }
+  const type = (policy as { type?: unknown }).type;
+  if (typeof type !== "string") {
+    return undefined;
+  }
+  if (CODEX_SANDBOX_MODES.has(type)) {
+    return type;
+  }
+  if (type === "managed") {
+    return managedToCliMode(policy);
+  }
+  return undefined;
 }
 
 function mapThreadRow(row: Record<string, unknown>): VaultSessionEntry | null {

@@ -239,9 +239,56 @@ describe("readCodexSessions: fallback + errors", () => {
   });
 });
 
+describe("readCodexSessions: sandbox_policy → -s value", () => {
+  async function sandboxOf(sandbox_policy: unknown): Promise<string | undefined> {
+    const fn = stubSqlite({ status: "ok", rows: [{ id: "t1", title: "t", updated_at_ms: 1, sandbox_policy }] });
+    const { entries } = await readCodexSessions({ codexDir: "/x/.codex", readSqliteFn: fn });
+    return entries[0].flags.sandbox;
+  }
+
+  it("passes through the direct CLI modes", async () => {
+    expect(await sandboxOf('{"type":"read-only"}')).toBe("read-only");
+    expect(await sandboxOf('{"type":"workspace-write"}')).toBe("workspace-write");
+    expect(await sandboxOf('{"type":"danger-full-access"}')).toBe("danger-full-access");
+  });
+
+  it("collapses a managed policy with a write entry to workspace-write", async () => {
+    const policy = JSON.stringify({
+      type: "managed",
+      file_system: {
+        type: "restricted",
+        entries: [
+          { path: { type: "special", value: { kind: "root" } }, access: "read" },
+          { path: { type: "path", path: "/p" }, access: "write" },
+        ],
+      },
+      network: "restricted",
+    });
+    expect(await sandboxOf(policy)).toBe("workspace-write");
+  });
+
+  it("collapses a read-only managed policy to read-only", async () => {
+    const policy = JSON.stringify({
+      type: "managed",
+      file_system: {
+        type: "restricted",
+        entries: [{ path: { type: "special", value: { kind: "root" } }, access: "read" }],
+      },
+      network: "restricted",
+    });
+    expect(await sandboxOf(policy)).toBe("read-only");
+  });
+
+  it("omits -s for an unknown/future policy type or non-JSON garbage", async () => {
+    expect(await sandboxOf('{"type":"something-new"}')).toBeUndefined();
+    expect(await sandboxOf("not json")).toBeUndefined();
+    expect(await sandboxOf(null)).toBeUndefined();
+  });
+});
+
 describe("readCodexSessions: cache schema", () => {
-  it("bumps the persisted vault list cache version for child filtering", () => {
-    expect(VAULT_CACHE_VERSION).toBe(2);
+  it("bumps the persisted vault list cache version to invalidate stale sandbox values", () => {
+    expect(VAULT_CACHE_VERSION).toBe(3);
   });
 });
 
