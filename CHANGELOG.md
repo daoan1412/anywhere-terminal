@@ -4,6 +4,12 @@ All notable changes to **AnyWhere Terminal** are documented in this file.
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.17.5] — 2026-06-28
+
+### Fixed
+
+- **Resuming a recent Codex session no longer fails with `invalid value 'managed' for '--sandbox'`.** Codex CLI 0.136 started recording a new, granular `managed` sandbox policy for sessions, but `codex resume -s` only accepts `read-only`, `workspace-write`, or `danger-full-access` — so resuming any `managed` session aborted before it started. The vault now maps a `managed` policy to the closest accepted mode (`workspace-write` when it grants write access, otherwise `read-only`) and drops the `-s` flag entirely for any unrecognized future policy type, letting Codex fall back to its configured default instead of crashing. The cached session list is rebuilt once on upgrade so previously-indexed sessions pick up the fix.
+
 ## [0.17.4] — 2026-06-21
 
 ### Added
