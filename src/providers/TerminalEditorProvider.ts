@@ -10,6 +10,7 @@ import type { SetPanelIdMessage, ThemeChangedMessage, WebViewToExtensionMessage 
 import { readClaudeSessions, resolveClaudeSessionPath } from "../vault/readers/claudeReader";
 import { listRunningClaudeSessions } from "../vault/readers/runningSessions";
 import { resolveSubagentDetail, resolveSubagentDetailByEntryId } from "../vault/readers/subagentLookup";
+import { handlePasteClipboardImage } from "./clipboardImageSync";
 import { FileTreeHost } from "./fileTreeHost";
 import type { WatcherPool } from "./fsWatcherPool";
 import type { GitDecorationProvider } from "./gitDecorationProvider";
@@ -433,6 +434,24 @@ export class TerminalEditorProvider {
         case "input":
           if (typeof message.tabId === "string" && typeof message.data === "string") {
             this.sessionManager.writeToSession(message.tabId, message.data);
+          }
+          break;
+
+        case "pasteClipboardImage":
+          if (
+            typeof message.tabId === "string" &&
+            typeof message.data === "string" &&
+            typeof message.trigger === "string"
+          ) {
+            void handlePasteClipboardImage(
+              {
+                tabId: message.tabId,
+                mimeType: typeof message.mimeType === "string" ? message.mimeType : "image/png",
+                data: message.data,
+                trigger: message.trigger,
+              },
+              (tabId, data) => this.sessionManager.writeToSession(tabId, data),
+            );
           }
           break;
 

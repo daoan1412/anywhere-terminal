@@ -457,6 +457,18 @@ export interface RequestVaultContextCwdMessage {
  * `subagentPreviewResponse` echoing `requestId`. See:
  * asimov/changes/preview-subagent-popup/design.md D3.
  */
+/** Webview captured an image paste; host mirrors it to the OS clipboard then signals the PTY. */
+export interface PasteClipboardImageMessage {
+  type: "pasteClipboardImage";
+  /** Active pane session id (same as `InputMessage.tabId`). */
+  tabId: string;
+  mimeType: string;
+  /** Base64-encoded image bytes from the webview clipboard. */
+  data: string;
+  /** Raw PTY trigger after sync (`\x16` on Linux, empty bracketed paste on macOS). */
+  trigger: string;
+}
+
 export interface RequestSubagentPreviewMessage {
   type: "requestSubagentPreview";
   /** Source terminal pane (session) id, used to resolve the running session. */
@@ -521,7 +533,8 @@ export type WebViewToExtensionMessage =
   | VaultCopyResumeCommandMessage
   | VaultCopyFilePathMessage
   | RequestVaultContextCwdMessage
-  | RequestSubagentPreviewMessage;
+  | RequestSubagentPreviewMessage
+  | PasteClipboardImageMessage;
 
 /**
  * Webview → Extension. Sent by the editor webview after it has merged the
