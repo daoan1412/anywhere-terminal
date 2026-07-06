@@ -15,6 +15,7 @@ import { sameStamps, stampStoreFiles } from "../storeStamp";
 import {
   formatEntryId,
   type VaultActivityStep,
+  type VaultMessageTokens,
   type VaultSessionDetail,
   type VaultSessionEntry,
   type VaultTimelineItem,
@@ -181,6 +182,13 @@ function resolveOpencodePaths(options: OpenCodeReaderOptions): {
   const xdgData = process.env.XDG_DATA_HOME?.trim() || path.join(home, ".local", "share");
   const dataDir = options.dataDir ?? path.join(xdgData, "opencode");
   return { dbPath: path.join(dataDir, "opencode.db"), readSqliteFn: options.readSqliteFn ?? readSqlite };
+}
+
+/** Public store paths for FS-watch targets (enhance-vault-sessions D4/D5) — the
+ *  single source of truth so watchers don't drift from the reader's resolution. */
+export function opencodeStoreDirs(options: OpenCodeReaderOptions = {}): { dbPath: string; dataDir: string } {
+  const { dbPath } = resolveOpencodePaths(options);
+  return { dbPath, dataDir: path.dirname(dbPath) };
 }
 
 export async function readOpenCodeSessions(
@@ -412,16 +420,29 @@ export function mapOpencodeRows(
     if (role !== "user" && role !== "assistant") {
       continue;
     }
+    // Per-message model + tokens (enhance-vault-sessions D3). Assistant only.
+    let msgModel: string | undefined;
+    let msgTokens: VaultMessageTokens | undefined;
     if (role === "assistant") {
       // A real assistant turn counts even when it's tool-only (no text), mirroring
       // the Claude classifier; tokens accrue regardless of visible text.
       messageCount++;
+      const providerID = strField(m.data.providerID);
+      const modelID = strField(m.data.modelID);
+      msgModel = providerID && modelID ? `${providerID}/${modelID}` : (modelID ?? providerID);
       const tokens = objField(m.data.tokens);
       if (tokens) {
         sawTokens = true;
         const cache = objField(tokens.cache) ?? {};
         tokenCount +=
           num(tokens.input) + num(tokens.output) + num(tokens.reasoning) + num(cache.read) + num(cache.write);
+        // "context" size = prompt tokens (input + cache read/creation); output =
+        // generated. OpenCode records reasoning separately, but Claude/Codex fold it
+        // into their output — add it here so `output` means the same across agents.
+        msgTokens = {
+          input: num(tokens.input) + num(cache.read) + num(cache.write),
+          output: num(tokens.output) + num(tokens.reasoning),
+        };
       }
     }
     const text = (textByMessage.get(m.id) ?? []).join(" ").trim();
@@ -439,7 +460,14 @@ export function mapOpencodeRows(
       const body = role === "assistant" ? normalizeRich(text) : truncateRich(text, MAX_MESSAGE_TEXT);
       tl.push({
         ts: m.timeCreated,
-        item: { kind: "message", role, text: body, timestamp: m.timeCreated },
+        item: {
+          kind: "message",
+          role,
+          text: body,
+          timestamp: m.timeCreated,
+          ...(msgModel ? { model: msgModel } : {}),
+          ...(msgTokens ? { tokens: msgTokens } : {}),
+        },
       });
     }
   }

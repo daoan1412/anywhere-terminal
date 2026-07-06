@@ -21,6 +21,11 @@ export function entriesSignature(entries: readonly VaultSessionEntry[]): string 
         e.id,
         e.agent,
         e.title,
+        // A rename only changes `customName` (the derived title is untouched), and
+        // the session's git branch shows as a header chip — both must be in the
+        // signature or the no-op guard would mask the change (enhance-vault-sessions D1).
+        e.customName ?? "",
+        e.gitBranch ?? "",
         e.cwd,
         String(e.modified),
         e.canFork ? "1" : "0",

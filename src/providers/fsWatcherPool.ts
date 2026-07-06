@@ -75,6 +75,24 @@ export interface WatcherPool {
   subscribe(absPath: string, onInvalidate: () => void): vscode.Disposable;
 
   /**
+   * Change-aware, glob-scoped subscription (enhance-vault-sessions D4/D5).
+   * Unlike {@link subscribe} (non-recursive `*`, create/delete only, refcounted),
+   * this creates a dedicated `FileSystemWatcher` over
+   * `new RelativePattern(Uri.file(baseDir), glob)` and fires the supplied
+   * handlers — including `change`, which the refcounted path watcher discards
+   * (`ignoreChange: true`). Vault session stores grow by APPENDING to existing
+   * JSONL files and by SQLite WAL writes, both pure change events. Each handler
+   * is debounced ({@link DEBOUNCE_MS}); a handler that is omitted sets the
+   * corresponding `ignore*` flag so VS Code never emits it. The returned
+   * Disposable tears down this watcher (not refcounted — one watcher per call).
+   */
+  subscribePattern(
+    baseDir: string,
+    glob: string,
+    handlers: { create?: () => void; change?: () => void; delete?: () => void },
+  ): vscode.Disposable;
+
+  /**
    * Fires on the window-focus rising edge (false → true). Each
    * `FileTreeHost` forwards this to its webview as `fs-rehydrate`.
    */
@@ -138,6 +156,8 @@ export function createWatcherPool(options: WatcherPoolOptions = {}): WatcherPool
   // flow). Acknowledged v1 limit if a non-canonical path arrives via a typed
   // external integration.
   const paths = new Map<string, PathEntry>();
+  // Dedicated (non-refcounted) pattern watchers created via subscribePattern.
+  const patternEntries = new Set<{ dispose: () => void }>();
 
   let disposed = false;
   let softCapWarned = false;
@@ -271,6 +291,93 @@ export function createWatcherPool(options: WatcherPoolOptions = {}): WatcherPool
     };
   }
 
+  function subscribePattern(
+    baseDir: string,
+    glob: string,
+    handlers: { create?: () => void; change?: () => void; delete?: () => void },
+  ): vscode.Disposable {
+    if (disposed) {
+      return { dispose: () => {} };
+    }
+    let watcher: vscode.FileSystemWatcher | null = null;
+    try {
+      const pattern = new vscode.RelativePattern(vscode.Uri.file(baseDir), glob);
+      watcher = createFileSystemWatcher(pattern, !handlers.create, !handlers.change, !handlers.delete);
+    } catch (err) {
+      const code = (err as { code?: string } | null)?.code ?? "<unknown>";
+      console.error(`${LOG_PREFIX} subscribePattern watcher failed (${code}) for ${baseDir}/${glob}`, err);
+    }
+
+    // Independent trailing debounce per event kind, so a burst of appends
+    // collapses to a single handler call.
+    const timers: Record<"create" | "change" | "delete", ReturnType<typeof setTimeout> | null> = {
+      create: null,
+      change: null,
+      delete: null,
+    };
+    const eventSubs: vscode.Disposable[] = [];
+    const armed = { value: true };
+
+    function fire(kind: "create" | "change" | "delete", cb: () => void): void {
+      if (timers[kind] !== null) {
+        clearTimeout(timers[kind] as ReturnType<typeof setTimeout>);
+      }
+      timers[kind] = setTimeout(() => {
+        timers[kind] = null;
+        if (!armed.value) {
+          return;
+        }
+        try {
+          cb();
+        } catch (err) {
+          console.warn(`${LOG_PREFIX} subscribePattern ${kind} handler threw — continuing`, err);
+        }
+      }, DEBOUNCE_MS);
+    }
+
+    if (watcher) {
+      if (handlers.create) {
+        eventSubs.push(watcher.onDidCreate(() => fire("create", handlers.create as () => void)));
+      }
+      if (handlers.change) {
+        eventSubs.push(watcher.onDidChange(() => fire("change", handlers.change as () => void)));
+      }
+      if (handlers.delete) {
+        eventSubs.push(watcher.onDidDelete(() => fire("delete", handlers.delete as () => void)));
+      }
+    }
+
+    const entry = {
+      dispose: () => {
+        armed.value = false;
+        for (const k of ["create", "change", "delete"] as const) {
+          if (timers[k] !== null) {
+            clearTimeout(timers[k] as ReturnType<typeof setTimeout>);
+            timers[k] = null;
+          }
+        }
+        for (const sub of eventSubs) {
+          try {
+            sub.dispose();
+          } catch {
+            // not actionable
+          }
+        }
+        eventSubs.length = 0;
+        if (watcher) {
+          try {
+            watcher.dispose();
+          } catch {
+            // not actionable
+          }
+        }
+        patternEntries.delete(entry);
+      },
+    };
+    patternEntries.add(entry);
+    return entry;
+  }
+
   function dispose(): void {
     if (disposed) {
       return;
@@ -281,11 +388,16 @@ export function createWatcherPool(options: WatcherPoolOptions = {}): WatcherPool
       teardownEntry(absPath, entry);
     }
     paths.clear();
+    for (const entry of [...patternEntries]) {
+      entry.dispose();
+    }
+    patternEntries.clear();
     rehydrateEmitter.dispose();
   }
 
   return {
     subscribe,
+    subscribePattern,
     onDidRequestRehydrate: rehydrateEmitter.event,
     dispose,
   };

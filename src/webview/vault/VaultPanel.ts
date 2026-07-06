@@ -14,9 +14,11 @@ import type {
   VaultCopyResumeCommandMessage,
   VaultOpenSessionFileMessage,
   VaultOpenWorkingDirMessage,
+  VaultRenameSessionMessage,
   VaultResumeMessage,
   VaultRevealInOSMessage,
   VaultSessionDetailResponseMessage,
+  VaultWatchSessionMessage,
 } from "../../types/messages";
 import type { VaultListResult, VaultSessionEntry } from "../../vault/types";
 import type { VaultPreviewGeometry } from "../state/WebviewState";
@@ -26,7 +28,14 @@ import { type GroupMode, groupEntries } from "./grouping";
 import { ICON_AGENT, ICON_CLOSE, ICON_FOLDER, ICON_RECENT, ICON_REFRESH, ICON_SEARCH } from "./icons";
 import { PreviewController } from "./PreviewController";
 import { VaultContextMenu } from "./VaultContextMenu";
-import { buildListStatus, renderGroupHeader, renderRow, renderShowMore, type VaultRowCallbacks } from "./vaultListView";
+import {
+  beginInlineRename,
+  buildListStatus,
+  renderGroupHeader,
+  renderRow,
+  renderShowMore,
+  type VaultRowCallbacks,
+} from "./vaultListView";
 import { entriesSignature } from "./vaultRenderSignature";
 
 /** Every message the panel can post — all webview→host vault messages carry entryId only. */
@@ -39,7 +48,9 @@ export type VaultPanelPostMessage = (
     | VaultOpenSessionFileMessage
     | VaultOpenWorkingDirMessage
     | VaultCopyResumeCommandMessage
-    | VaultCopyFilePathMessage,
+    | VaultCopyFilePathMessage
+    | VaultRenameSessionMessage
+    | VaultWatchSessionMessage,
 ) => void;
 
 /** Rows shown per group before a "Show more" affordance keeps the list scannable. */
@@ -141,6 +152,10 @@ export class VaultPanel {
   private readonly expandedGroups = new Set<string>();
   /** Active terminal pane's cwd; the folder filter scopes to this. */
   private contextCwd: string | null = null;
+  /** Entry id being inline-renamed (enhance-vault-sessions D1). While set, an
+   *  incoming list push defers its DOM rebuild so it can't destroy the open
+   *  editor mid-edit; the next render after the edit ends repaints. */
+  private renamingEntryId: string | null = null;
   /** Right-click context menu (at most one open) — owns its own DOM + listeners. */
   private readonly contextMenu: VaultContextMenu;
   /** Row interaction handlers, passed to the pure `renderRow` builder. */
@@ -153,7 +168,11 @@ export class VaultPanel {
   constructor(deps: VaultPanelDeps) {
     this.host = deps.host;
     this.postMessage = deps.postMessage;
-    this.contextMenu = new VaultContextMenu({ host: this.host, postMessage: this.postMessage });
+    this.contextMenu = new VaultContextMenu({
+      host: this.host,
+      postMessage: this.postMessage,
+      beginRename: (entry, row) => this.beginRename(entry, row),
+    });
     this.rowCallbacks = {
       onActivate: (entry) => this.preview.open(entry),
       onContextMenu: (entry, ev, row) => this.contextMenu.open(entry, ev, row),
@@ -571,6 +590,13 @@ export class VaultPanel {
         this.preview.refreshActiveEntry(fresh);
       }
     }
+    // An inline rename is open: defer the DOM rebuild so an auto-refresh push
+    // can't destroy the editor mid-edit. Drop the guard key so the next render
+    // (after the edit commits/cancels) repaints against the fresh entries.
+    if (this.renamingEntryId) {
+      this.lastRenderSig = null;
+      return;
+    }
     // Guard on the full rendered projection (entries + the live filter state
     // renderList consumes). renderList() updates lastRenderSig to match what it
     // actually painted, so a render triggered by a LOCAL UI change (search /
@@ -646,6 +672,12 @@ export class VaultPanel {
     this.countEl.textContent = visible.length > 0 ? String(visible.length) : "";
     this.renderStatus(visible.length);
 
+    // Preserve the scroll position across the rebuild so an auto-refresh push (or
+    // any re-render) doesn't jump the list back to the top (enhance-vault-sessions
+    // D4 — non-disruptive auto-update). The selection highlight is re-derived from
+    // the preview's active entryId below, and the preview overlay is separate DOM
+    // (untouched here), so an open preview also survives.
+    const prevScrollTop = this.bodyEl.scrollTop;
     this.listEl.replaceChildren();
     // Recent → flat list (no group headers). Agent/Folder → grouped headers.
     for (const group of groupEntries(visible, this.groupMode)) {
@@ -686,6 +718,10 @@ export class VaultPanel {
     // more"), nothing is highlighted — the preview stays open, just unanchored.
     this.applyActiveHighlight();
 
+    // Restore the pre-rebuild scroll position (clamped by the browser to the new
+    // content height). Keeps an auto-refresh update from scrolling the list.
+    this.bodyEl.scrollTop = prevScrollTop;
+
     // Record what we just painted so the render() guard compares host responses
     // against the ACTUAL DOM projection — including renders triggered by local UI
     // changes (search/filter/group), which call renderList directly.
@@ -722,6 +758,26 @@ export class VaultPanel {
       this.collapsedGroups.add(groupKey);
     }
     this.renderList();
+  }
+
+  /** Begin an inline rename of a row (context-menu "Rename"). Guards the row from
+   *  a concurrent list rebuild while editing, then commits by posting the rename —
+   *  the host round-trips an overlaid list that repaints the row (D1). */
+  private beginRename(entry: VaultSessionEntry, row: HTMLElement): void {
+    this.renamingEntryId = entry.id;
+    beginInlineRename(row, entry, {
+      commit: (name) => this.postMessage({ type: "vaultRenameSession", entryId: entry.id, name }),
+      onDone: () => {
+        this.renamingEntryId = null;
+        // render() deferred rebuilds while editing (lastRenderSig = null). A commit
+        // round-trips a fresh push that repaints; an Esc-cancel does not, so if an
+        // auto-refresh landed mid-edit the DOM is stale — repaint now against the
+        // stored entries (W4).
+        if (this.lastRenderSig === null) {
+          this.renderList();
+        }
+      },
+    });
   }
 
   /** Host → webview session-detail reply — forwarded to the preview controller. */

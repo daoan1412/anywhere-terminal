@@ -3,6 +3,7 @@
 // See: specs/agent-session-index/spec.md (Aggregate and sort; Defensive parsing),
 //      specs/vault-session-launch/spec.md (Fork when supported), design.md D2,D8.
 
+import * as path from "node:path";
 import {
   type ListReader,
   type ReaderListCache,
@@ -11,13 +12,20 @@ import {
   type VaultListCacheFileV1,
 } from "./cacheTypes";
 import { canForkOpenCode } from "./forkSupport";
+import { claudeRoots, resolveClaudeSessionPath } from "./readers/claudePaths";
 import { readClaudeDetail, readClaudeEntry, readClaudeSessions } from "./readers/claudeReader";
-import { readCodexDetail, readCodexEntry, readCodexSessions } from "./readers/codexReader";
+import { codexStoreDirs, readCodexDetail, readCodexEntry, readCodexSessions } from "./readers/codexReader";
 import { clampDetailLimit } from "./readers/detail";
-import { readOpenCodeDetail, readOpenCodeEntry, readOpenCodeSessions } from "./readers/opencodeReader";
+import {
+  opencodeStoreDirs,
+  readOpenCodeDetail,
+  readOpenCodeEntry,
+  readOpenCodeSessions,
+} from "./readers/opencodeReader";
 import { getAgentDefinition, VAULT_AGENT_IDS, type VaultAgentId } from "./registry";
 import { parseEntryId, type VaultListResult, type VaultSessionDetail, type VaultSessionEntry } from "./types";
 import type { VaultCacheStore } from "./VaultCacheStore";
+import type { VaultCustomNameRegistry } from "./VaultCustomNameRegistry";
 
 // Agent identity is a single source of truth in `registry.ts`: `VaultAgentId`
 // is derived from `VAULT_AGENT_IDS`, and the keyed reader records below are
@@ -61,6 +69,12 @@ export interface VaultServiceDeps {
    * When omitted, the service is stateless (full read every `list()`, as before).
    */
   cacheStore?: VaultCacheStore;
+  /**
+   * User custom-name registry (enhance-vault-sessions D1). When provided, list
+   * results are overlaid with `customName` at serve time — cloned, never mutating
+   * the cache. When omitted, no overlay is applied.
+   */
+  customNames?: VaultCustomNameRegistry;
 }
 
 // Readers stay option-first for back-compat; adapt them to the prev-only ListReader
@@ -83,12 +97,26 @@ const defaultEntryReaders = {
   opencode: (sessionId) => readOpenCodeEntry(sessionId),
 } satisfies VaultEntryReaders;
 
+/** A directory + glob to hand to `WatcherPool.subscribePattern` (enhance-vault-sessions
+ *  D4/D5). Resolved from the reader path helpers so watch targets never drift. */
+export interface VaultWatchTarget {
+  baseDir: string;
+  glob: string;
+}
+
+/** Glob-safe id (filename stems / uuids) — reject anything with path or glob
+ *  metacharacters before interpolating an id into a watch glob. */
+function isGlobSafeId(id: string): boolean {
+  return /^[A-Za-z0-9._-]+$/.test(id) && !id.includes("..");
+}
+
 export class VaultService {
   private readonly readers: VaultReaders;
   private readonly detailReaders: VaultDetailReaders;
   private readonly entryReaders: VaultEntryReaders;
   private readonly canForkOpenCodeFn: (minVersion: string) => Promise<boolean>;
   private readonly cacheStore?: VaultCacheStore;
+  private readonly customNames?: VaultCustomNameRegistry;
 
   /** In-memory copy of the persisted cache, lazily loaded from `cacheStore`. */
   private mem: VaultListCacheFileV1 | null = null;
@@ -102,6 +130,36 @@ export class VaultService {
     this.entryReaders = deps.entryReaders ?? defaultEntryReaders;
     this.canForkOpenCodeFn = deps.canForkOpenCodeFn ?? ((min) => canForkOpenCode(min));
     this.cacheStore = deps.cacheStore;
+    this.customNames = deps.customNames;
+  }
+
+  /**
+   * Set or clear a session's user custom name (enhance-vault-sessions D1). Empty
+   * (after trim) clears it, reverting to the reader-derived title. No-op when the
+   * service was built without a registry.
+   */
+  setCustomName(entryId: string, name: string): void {
+    this.customNames?.set(entryId, name);
+  }
+
+  /**
+   * Overlay user custom names onto a served list WITHOUT mutating the cache: only
+   * renamed entries are cloned (`{ ...entry, customName }`); the rest pass through
+   * by reference, and `this.mem.entries` / the persisted doc are never touched.
+   */
+  private overlayCustomNames(result: VaultListResult): VaultListResult {
+    if (!this.customNames) {
+      return result;
+    }
+    const names = this.customNames.all();
+    if (Object.keys(names).length === 0) {
+      return result;
+    }
+    const entries = result.entries.map((e) => {
+      const name = names[e.id];
+      return name ? { ...e, customName: name } : e;
+    });
+    return { entries, unreadable: result.unreadable };
   }
 
   /**
@@ -203,7 +261,9 @@ export class VaultService {
    */
   listCached(): VaultListResult | null {
     this.ensureMemLoaded();
-    return this.mem ? { entries: this.mem.entries, unreadable: this.mem.unreadable } : null;
+    return this.mem
+      ? this.overlayCustomNames({ entries: this.mem.entries, unreadable: this.mem.unreadable })
+      : null;
   }
 
   /**
@@ -229,7 +289,8 @@ export class VaultService {
           console.error("[AnyWhere Terminal] Failed to persist vault cache:", err);
         }
       }
-      return result;
+      // Overlay AFTER persistence so the cache stays agent-derived (D1).
+      return this.overlayCustomNames(result);
     })();
     this.inflightRefresh = run;
     try {
@@ -292,6 +353,58 @@ export class VaultService {
     }
     entry.canFork = resolveCanFork(entry, opencodeCanFork);
     return entry;
+  }
+
+  /**
+   * Store-wide FS-watch targets for auto-refresh (enhance-vault-sessions D4): the
+   * three agents' session roots, scoped to store roots (never all of $HOME). WAL
+   * DBs are matched with a `<db>*` glob so `-wal`/`-shm` writes are seen too.
+   * Change-aware `subscribePattern` (task 1_3) is required — vault sessions grow
+   * by APPEND, which the create/delete-only `subscribe` drops.
+   */
+  getStoreWatchTargets(): VaultWatchTarget[] {
+    const { projectsDir } = claudeRoots({});
+    const codex = codexStoreDirs();
+    const opencode = opencodeStoreDirs();
+    return [
+      { baseDir: projectsDir, glob: "**/*.jsonl" },
+      { baseDir: path.dirname(codex.dbPath), glob: `${path.basename(codex.dbPath)}*` },
+      { baseDir: codex.sessionsDir, glob: "**/*.jsonl" },
+      { baseDir: path.dirname(opencode.dbPath), glob: `${path.basename(opencode.dbPath)}*` },
+    ];
+  }
+
+  /**
+   * Per-session FS-watch targets for live-follow (enhance-vault-sessions D5),
+   * scoped to the ONE previewed session so unrelated writes don't wake the
+   * follow re-read. Claude/Codex content lives in a JSONL (the Codex SQLite index
+   * updates in lockstep — watch both); OpenCode content lives in the WAL DB.
+   * Returns `[]` for an unknown agent, an unresolved Claude file, or an unsafe id.
+   */
+  async resolveSessionWatchTargets(entryId: string): Promise<VaultWatchTarget[]> {
+    const parsed = parseEntryId(entryId);
+    if (!parsed || !isVaultAgentId(parsed.agent) || !isGlobSafeId(parsed.sessionId)) {
+      return [];
+    }
+    switch (parsed.agent) {
+      case "claude": {
+        const file = await resolveClaudeSessionPath(parsed.sessionId);
+        return file ? [{ baseDir: path.dirname(file), glob: path.basename(file) }] : [];
+      }
+      case "codex": {
+        const { dbPath, sessionsDir } = codexStoreDirs();
+        return [
+          { baseDir: sessionsDir, glob: `**/*-${parsed.sessionId}.jsonl` },
+          { baseDir: path.dirname(dbPath), glob: `${path.basename(dbPath)}*` },
+        ];
+      }
+      case "opencode": {
+        const { dbPath } = opencodeStoreDirs();
+        return [{ baseDir: path.dirname(dbPath), glob: `${path.basename(dbPath)}*` }];
+      }
+      default:
+        return [];
+    }
   }
 }
 

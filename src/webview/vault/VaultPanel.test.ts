@@ -234,7 +234,7 @@ describe("VaultPanel row rendering (redesign 4_1)", () => {
 
   it("posts vaultResume with the entry id when the icon-only Resume is clicked", () => {
     const host = createHost();
-    const posted: { type: string; entryId?: string }[] = [];
+    const posted: { type: string; entryId?: string | null }[] = [];
     const panel = new VaultPanel({ host, postMessage: (m) => posted.push(m), getInitialCollapsed: () => false });
     panel.render(result([entry({ id: "codex:x1", agent: "codex" })]));
     host.querySelector<HTMLButtonElement>(".vault-action--resume")?.click();
@@ -417,7 +417,7 @@ describe("VaultPanel context menu (redesign 5_1)", () => {
     return host.querySelector(".vault-context-menu");
   }
 
-  function _mount(entryOver: Partial<VaultSessionEntry>, posted: { type: string; entryId?: string }[]): VaultPanel {
+  function _mount(entryOver: Partial<VaultSessionEntry>, posted: { type: string; entryId?: string | null }[]): VaultPanel {
     const host = createHost();
     const panel = new VaultPanel({ host, postMessage: (m) => posted.push(m), getInitialCollapsed: () => false });
     panel.render(result([entry({ id: "claude:a", ...entryOver })]));
@@ -433,7 +433,7 @@ describe("VaultPanel context menu (redesign 5_1)", () => {
     expect(host.querySelector(".vault-context-menu")).not.toBeNull();
   });
 
-  it("shows all six items for a file-backed session", () => {
+  it("shows all items for a file-backed session", () => {
     const host = createHost();
     const panel = new VaultPanel({ host, postMessage: () => {}, getInitialCollapsed: () => false });
     panel.render(result([entry({ id: "claude:a", sessionPath: "/store/a.jsonl" })]));
@@ -441,6 +441,7 @@ describe("VaultPanel context menu (redesign 5_1)", () => {
     const labels = Array.from(menu?.querySelectorAll("button") ?? []).map((b) => b.textContent);
     expect(labels).toEqual([
       "Resume in New Tab",
+      "Rename",
       "Open",
       "Reveal in Finder",
       "Copy File Path",
@@ -455,13 +456,13 @@ describe("VaultPanel context menu (redesign 5_1)", () => {
     panel.render(result([entry({ id: "opencode:a", agent: "opencode", sessionPath: undefined })]));
     const menu = openMenu(host);
     const labels = Array.from(menu?.querySelectorAll("button") ?? []).map((b) => b.textContent);
-    expect(labels).toEqual(["Resume in New Tab", "Copy Resume Command", "Open Working Directory"]);
+    expect(labels).toEqual(["Resume in New Tab", "Rename", "Copy Resume Command", "Open Working Directory"]);
     expect(labels).not.toContain("Open");
     expect(labels).not.toContain("Copy File Path");
   });
 
   it("each item posts the matching entryId-only message", () => {
-    const posted: { type: string; entryId?: string }[] = [];
+    const posted: { type: string; entryId?: string | null }[] = [];
     const host = createHost();
     const panel = new VaultPanel({ host, postMessage: (m) => posted.push(m), getInitialCollapsed: () => false });
     panel.render(result([entry({ id: "claude:a", sessionPath: "/store/a.jsonl" })]));
@@ -519,7 +520,7 @@ describe("VaultPanel session preview (redesign 5_2)", () => {
 
   it("activating a row opens the preview (loading) and posts requestVaultSessionDetail", () => {
     const host = createHost();
-    const posted: { type: string; entryId?: string }[] = [];
+    const posted: { type: string; entryId?: string | null }[] = [];
     const panel = new VaultPanel({ host, postMessage: (m) => posted.push(m), getInitialCollapsed: () => false });
     panel.render(result([entry({ id: "claude:a" })]));
     host.querySelector<HTMLElement>(".vault-row")?.click();
@@ -645,7 +646,7 @@ describe("VaultPanel session preview (redesign 5_2)", () => {
 
   it("scroll-to-top loads every older window, then lands on the session's first message", () => {
     const host = createHost();
-    const posted: { type: string; entryId?: string; limit?: number }[] = [];
+    const posted: { type: string; entryId?: string | null; limit?: number }[] = [];
     const panel = new VaultPanel({ host, postMessage: (m) => posted.push(m), getInitialCollapsed: () => false });
     panel.render(result([entry({ id: "claude:a" })]));
     host.querySelector<HTMLElement>(".vault-row")?.click();
@@ -785,7 +786,7 @@ describe("VaultPanel session preview (redesign 5_2)", () => {
 
   it("renders a teammateTurn as a highlighted node that breaks the run and opens its segment (D13)", () => {
     const host = createHost();
-    const posted: { type: string; entryId?: string }[] = [];
+    const posted: { type: string; entryId?: string | null }[] = [];
     const panel = new VaultPanel({ host, postMessage: (m) => posted.push(m), getInitialCollapsed: () => false });
     panel.render(result([entry({ id: "claude:a" })]));
     host.querySelector<HTMLElement>(".vault-row")?.click();
@@ -1157,7 +1158,7 @@ describe("VaultPanel session preview (redesign 5_2)", () => {
 
   it("loads older messages when truncated: the button posts a larger limit; the grown response removes it", () => {
     const host = createHost();
-    const posted: { type: string; entryId?: string; limit?: number }[] = [];
+    const posted: { type: string; entryId?: string | null; limit?: number }[] = [];
     const panel = new VaultPanel({ host, postMessage: (m) => posted.push(m), getInitialCollapsed: () => false });
     panel.render(result([entry({ id: "claude:a" })]));
     host.querySelector<HTMLElement>(".vault-row")?.click();
@@ -1439,7 +1440,7 @@ describe("VaultPanel session preview (redesign 5_2)", () => {
 
   it("expanding a subagent block lazily requests the child and renders its transcript nested", () => {
     const host = createHost();
-    const posted: { type: string; entryId?: string }[] = [];
+    const posted: { type: string; entryId?: string | null }[] = [];
     const panel = new VaultPanel({ host, postMessage: (m) => posted.push(m), getInitialCollapsed: () => false });
     panel.render(result([entry({ id: "opencode:a", agent: "opencode" })]));
     host.querySelector<HTMLElement>(".vault-row")?.click();
@@ -1476,7 +1477,7 @@ describe("VaultPanel session preview (redesign 5_2)", () => {
 
   it("2_4: a workflow board reuses the session-detail preview per agent; a late switch is inert", () => {
     const host = createHost();
-    const posted: { type: string; entryId?: string }[] = [];
+    const posted: { type: string; entryId?: string | null }[] = [];
     const panel = new VaultPanel({ host, postMessage: (m) => posted.push(m), getInitialCollapsed: () => false });
     panel.render(result([entry({ id: "claude:wfp", agent: "claude" })]));
     host.querySelector<HTMLElement>(".vault-row")?.click();
@@ -1693,7 +1694,7 @@ describe("VaultPanel session preview (redesign 5_2)", () => {
 
   it("resolves every block sharing a child entryId from one detail reply (not just the latest)", () => {
     const host = createHost();
-    const posted: { type: string; entryId?: string }[] = [];
+    const posted: { type: string; entryId?: string | null }[] = [];
     const panel = new VaultPanel({ host, postMessage: (m) => posted.push(m), getInitialCollapsed: () => false });
     panel.render(result([entry({ id: "opencode:a", agent: "opencode" })]));
     host.querySelector<HTMLElement>(".vault-row")?.click();
@@ -1787,7 +1788,7 @@ describe("VaultPanel session preview (redesign 5_2)", () => {
 
   it("keeps a nested run's expansion when the ROOT loads older messages", () => {
     const host = createHost();
-    const posted: { type: string; entryId?: string; limit?: number }[] = [];
+    const posted: { type: string; entryId?: string | null; limit?: number }[] = [];
     const panel = new VaultPanel({ host, postMessage: (m) => posted.push(m), getInitialCollapsed: () => false });
     panel.render(result([entry({ id: "opencode:a", agent: "opencode" })]));
     host.querySelector<HTMLElement>(".vault-row")?.click();

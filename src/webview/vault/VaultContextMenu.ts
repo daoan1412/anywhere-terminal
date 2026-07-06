@@ -9,20 +9,27 @@
 
 import type { VaultSessionEntry } from "../../vault/types";
 import { collapseSeparators } from "./format";
-import { ICON_COPY, ICON_FOLDER, ICON_OPEN, ICON_RESUME, ICON_REVEAL, ICON_TERMINAL } from "./icons";
+import { ICON_COPY, ICON_FOLDER, ICON_OPEN, ICON_RENAME, ICON_RESUME, ICON_REVEAL, ICON_TERMINAL } from "./icons";
 import type { VaultPanelPostMessage } from "./VaultPanel";
 
 export class VaultContextMenu {
   private readonly host: HTMLElement;
   private readonly postMessage: VaultPanelPostMessage;
+  /** Start an inline rename on the anchor row (owner supplies the editor). */
+  private readonly beginRename: (entry: VaultSessionEntry, row: HTMLElement) => void;
   private menuEl: HTMLElement | null = null;
   private menuRow: HTMLElement | null = null;
   private onDocPointerDown?: (ev: MouseEvent) => void;
   private onDocKeyDown?: (ev: KeyboardEvent) => void;
 
-  constructor(deps: { host: HTMLElement; postMessage: VaultPanelPostMessage }) {
+  constructor(deps: {
+    host: HTMLElement;
+    postMessage: VaultPanelPostMessage;
+    beginRename: (entry: VaultSessionEntry, row: HTMLElement) => void;
+  }) {
     this.host = deps.host;
     this.postMessage = deps.postMessage;
+    this.beginRename = deps.beginRename;
   }
 
   /** Whether the menu is currently open — lets the preview's Esc handler dismiss
@@ -48,6 +55,11 @@ export class VaultContextMenu {
         label: "Resume in New Tab",
         icon: ICON_RESUME,
         act: () => this.postMessage({ type: "vaultResume", entryId: entry.id }),
+      },
+      {
+        label: "Rename",
+        icon: ICON_RENAME,
+        act: () => this.beginRename(entry, row),
       },
       "sep",
       {

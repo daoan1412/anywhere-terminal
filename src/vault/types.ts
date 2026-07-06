@@ -148,6 +148,33 @@ export interface VaultSessionEntry {
    * DB-backed sessions (OpenCode) leave it undefined.
    */
   sessionPath?: string;
+  /**
+   * Session's git branch when the agent records it (Claude top-level `gitBranch`,
+   * Codex `git_branch`). Undefined for OpenCode (no branch recorded) — the
+   * webview omits the branch chip rather than deriving one (enhance-vault-sessions D2).
+   */
+  gitBranch?: string;
+  /**
+   * User-supplied custom name, overlaid at serve time from `VaultCustomNameRegistry`
+   * (enhance-vault-sessions D1). NOT persisted into the vault list cache — the cache
+   * stays agent-derived. When present the webview renders `customName ?? title`.
+   */
+  customName?: string;
+}
+
+/**
+ * Per-message token usage attached to an assistant message (enhance-vault-sessions
+ * D3/D6). "context" is rendered as token usage: `input` is the prompt/context size
+ * (input + cache read/creation), `output` the generated tokens (reasoning tokens
+ * are folded into `output` across all agents for a single consistent semantic).
+ * `input`/`output` are always co-emitted — a message with no usage carries no
+ * `tokens` at all (the whole object is absent), so both are required. `contextWindow`
+ * is only set when the agent records it (Codex `model_context_window`); absent otherwise.
+ */
+export interface VaultMessageTokens {
+  input: number;
+  output: number;
+  contextWindow?: number;
 }
 
 /**
@@ -165,7 +192,16 @@ export type VaultActivityStep =
  * chronologically by the readers.
  */
 export type VaultTimelineItem =
-  | { kind: "message"; role: "user" | "assistant"; text: string; timestamp?: number }
+  | {
+      kind: "message";
+      role: "user" | "assistant";
+      text: string;
+      timestamp?: number;
+      /** Assistant model id, when the transcript records it (enhance-vault-sessions D3). */
+      model?: string;
+      /** Per-message token usage; present only when recorded (enhance-vault-sessions D3/D6). */
+      tokens?: VaultMessageTokens;
+    }
   | { kind: "thinking"; text: string; timestamp?: number }
   /**
    * An AskUserQuestion turn — a user decision point. Each pair is a question the

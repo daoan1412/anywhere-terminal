@@ -23,6 +23,7 @@ import {
 import { PtyLoadError } from "./types/errors";
 import { escapePathForShell } from "./utils/shellEscape";
 import { VaultCacheStore } from "./vault/VaultCacheStore";
+import { VaultCustomNameRegistry } from "./vault/VaultCustomNameRegistry";
 import { VaultLauncher } from "./vault/VaultLauncher";
 import { VaultService } from "./vault/VaultService";
 
@@ -125,7 +126,10 @@ export function activate(context: vscode.ExtensionContext) {
   // Shared across the sidebar + panel providers.
   const vaultCacheStore = new VaultCacheStore(context.globalStorageUri, fs);
   vaultCacheStore.cleanupOrphanTemps(); // reap temp files orphaned by a prior crash
-  const vaultService = new VaultService({ cacheStore: vaultCacheStore });
+  // User custom names for vault sessions (enhance-vault-sessions D1). Machine-global,
+  // like the cache, and applied as a serve-time overlay — it NEVER writes agent files.
+  const vaultCustomNames = new VaultCustomNameRegistry(context.globalState);
+  const vaultService = new VaultService({ cacheStore: vaultCacheStore, customNames: vaultCustomNames });
   const vaultLauncher = new VaultLauncher(vaultService);
 
   // Sidebar view

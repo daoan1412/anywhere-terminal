@@ -146,6 +146,7 @@ function mapThreadRow(row: Record<string, unknown>): VaultSessionEntry | null {
     title: boundedPreview(title),
     cwd: asString(row.cwd) ?? "",
     modified: Number(row.updated_at_ms) || 0,
+    gitBranch: asString(row.git_branch),
     flags: {
       model: asString(row.model),
       approval: asString(row.approval_mode),
@@ -459,6 +460,12 @@ function codexDirs(options: CodexReaderOptions): { dbPath: string; sessionsDir: 
   const codexDir = options.codexDir ?? envDir(process.env.CODEX_HOME) ?? path.join(home, ".codex");
   const sqliteDir = envDir(process.env.CODEX_SQLITE_HOME) ?? codexDir;
   return { dbPath: path.join(sqliteDir, "state_5.sqlite"), sessionsDir: path.join(codexDir, "sessions") };
+}
+
+/** Public store paths for FS-watch targets (enhance-vault-sessions D4/D5) — the
+ *  single source of truth so watchers don't drift from the reader's resolution. */
+export function codexStoreDirs(options: CodexReaderOptions = {}): { dbPath: string; sessionsDir: string } {
+  return codexDirs(options);
 }
 
 export async function readCodexSessions(
@@ -791,6 +798,12 @@ export function classifyCodexRolloutEvents(
   let messageCount = 0;
   let toolCount = 0;
   let totalTokens: number | undefined;
+  // Per-message model/tokens (enhance-vault-sessions D3/D6): the model rides on
+  // `turn_context` (captured as we walk), and the per-turn token usage arrives in
+  // the `token_count` event AFTER the turn's `agent_message` — so we backfill it
+  // onto the most recent assistant item by reference.
+  let currentModel: string | undefined;
+  let lastAssistantItem: Extract<VaultTimelineItem, { kind: "message" }> | undefined;
   // request_user_input answers arrive in a later function_call_output (correlated
   // by call_id); pre-scan them so the question item can carry the answer inline.
   const questionAnswers = collectCodexQuestionAnswers(records);
@@ -809,6 +822,14 @@ export function classifyCodexRolloutEvents(
     const ptype = payload.type;
     const ts = parseTs(rec.timestamp);
 
+    if (type === "turn_context") {
+      const m = asString(payload.model);
+      if (m) {
+        currentModel = m;
+      }
+      continue;
+    }
+
     if (type === "event_msg") {
       if (ptype === "user_message") {
         const m = asString(payload.message);
@@ -825,13 +846,36 @@ export function classifyCodexRolloutEvents(
         if (m) {
           messageCount++;
           latestMessage = { role: "assistant", text: truncate(m), timestamp: ts };
-          timeline.push({ kind: "message", role: "assistant", text: normalizeRich(m), timestamp: ts });
+          const item: Extract<VaultTimelineItem, { kind: "message" }> = {
+            kind: "message",
+            role: "assistant",
+            text: normalizeRich(m),
+            timestamp: ts,
+            ...(currentModel ? { model: currentModel } : {}),
+          };
+          timeline.push(item);
+          lastAssistantItem = item;
         }
       } else if (ptype === "token_count") {
-        const tot = objField(objField(payload.info)?.total_token_usage);
+        const info = objField(payload.info);
+        const tot = objField(info?.total_token_usage);
         const n = tot ? num(tot.total_tokens) : 0;
         if (n > 0) {
           totalTokens = n; // last token_count is the cumulative session total (D7)
+        }
+        // Backfill this turn's usage onto its assistant message (arrives after it).
+        const last = objField(info?.last_token_usage);
+        if (last && lastAssistantItem) {
+          const ctx = info ? num(info.model_context_window) : 0;
+          lastAssistantItem.tokens = {
+            input: num(last.input_tokens) + num(last.cached_input_tokens),
+            output: num(last.output_tokens),
+            ...(ctx > 0 ? { contextWindow: ctx } : {}),
+          };
+          // Consume the reference: a later token_count with no intervening
+          // agent_message (tool-only / interrupted turn) must not re-attribute its
+          // usage onto this already-backfilled message.
+          lastAssistantItem = undefined;
         }
       } else if (ptype === "collab_agent_spawn_end") {
         const childThreadId = asString(payload.new_thread_id);

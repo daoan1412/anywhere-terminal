@@ -294,6 +294,7 @@ async function buildClaudeEntry(
     title: boundedPreview(aiTitle ?? fields.title ?? ""),
     cwd: fields.cwd ?? decodeProjectDir(path.basename(path.dirname(filePath))),
     modified: stat.mtimeMs,
+    gitBranch: fields.gitBranch,
     flags: {
       model: fields.model,
       permissionMode: fields.permissionMode,

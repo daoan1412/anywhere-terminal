@@ -3,7 +3,13 @@
 // state (`this`). Untrusted text is ALWAYS written via textContent (or the safe
 // markdown-lite renderer, which never uses innerHTML) — never raw innerHTML.
 
-import type { VaultActivityStep, VaultSessionDetail, VaultSessionEntry, VaultTimelineItem } from "../../vault/types";
+import type {
+  VaultActivityStep,
+  VaultMessageTokens,
+  VaultSessionDetail,
+  VaultSessionEntry,
+  VaultTimelineItem,
+} from "../../vault/types";
 import { formatRelativeTime, formatStats, leafSegment } from "./format";
 import { ICON_CHEVRON_DOWN } from "./icons";
 import { renderMarkdownLite } from "./markdownLite";
@@ -62,7 +68,13 @@ function roleDot(): HTMLElement {
  * `renderMarkdownLite` never uses innerHTML — so the textContent-only safety rule
  * holds either way.
  */
-export function previewMessage(kind: string, roleLabel: string, text: string, rich = false): HTMLElement {
+export function previewMessage(
+  kind: string,
+  roleLabel: string,
+  text: string,
+  rich = false,
+  meta?: HTMLElement | null,
+): HTMLElement {
   const wrap = document.createElement("div");
   wrap.className = `vault-preview-message vault-preview-message-${kind}`;
   const role = document.createElement("div");
@@ -80,7 +92,50 @@ export function previewMessage(kind: string, roleLabel: string, text: string, ri
     p.textContent = text;
     wrap.append(role, p);
   }
+  // Per-message model + token usage (enhance-vault-sessions D3/D6) — assistant
+  // messages only; omitted entirely when the reader recorded no model/tokens.
+  if (meta) {
+    wrap.appendChild(meta);
+  }
   return wrap;
+}
+
+/** Compact token count: 1234 → "1.2k", 12345 → "12k", 456 → "456". */
+function formatTokenCount(n: number): string {
+  if (n >= 1000) {
+    return `${(n / 1000).toFixed(n >= 10_000 ? 0 : 1)}k`;
+  }
+  return String(n);
+}
+
+/**
+ * Per-assistant-message meta line (enhance-vault-sessions D3/D6): model + input/
+ * output token usage, plus the context window when the agent records it (Codex).
+ * Returns null when there is nothing to show so the caller omits the line entirely.
+ */
+export function buildMessageMeta(model?: string, tokens?: VaultMessageTokens): HTMLElement | null {
+  const parts: string[] = [];
+  if (model) {
+    parts.push(model);
+  }
+  if (tokens) {
+    if (typeof tokens.input === "number") {
+      parts.push(`${formatTokenCount(tokens.input)} in`);
+    }
+    if (typeof tokens.output === "number") {
+      parts.push(`${formatTokenCount(tokens.output)} out`);
+    }
+    if (typeof tokens.contextWindow === "number") {
+      parts.push(`${formatTokenCount(tokens.contextWindow)} ctx`);
+    }
+  }
+  if (parts.length === 0) {
+    return null;
+  }
+  const el = document.createElement("div");
+  el.className = "vault-preview-message-meta";
+  el.textContent = parts.join(" · ");
+  return el;
 }
 
 /** First non-empty line of reasoning, stripped of markdown noise — used as the

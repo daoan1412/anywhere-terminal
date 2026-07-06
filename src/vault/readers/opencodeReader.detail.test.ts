@@ -92,6 +92,31 @@ describe("mapOpencodeRows", () => {
     expect(out.stats).toMatchObject({ messageCount: 3, toolCount: 2, subagentCount: 1, tokenCount: 135 });
   });
 
+  it("attaches per-message model + tokens to assistant messages, not user ones", () => {
+    const messages: OcMessageRow[] = [
+      msg("m1", "user", 1),
+      msg("m2", "assistant", 2, {
+        providerID: "anthropic",
+        modelID: "claude-opus-4-8",
+        tokens: { input: 100, output: 20, reasoning: 5, cache: { read: 10, write: 0 } },
+      }),
+    ];
+    const parts: OcPartRow[] = [textPart("m1", 1, "hi"), textPart("m2", 2, "hello")];
+    const out = mapOpencodeRows(messages, parts);
+    const assistant = out.timeline.find((t) => t.kind === "message" && t.role === "assistant");
+    if (assistant?.kind === "message") {
+      expect(assistant.model).toBe("anthropic/claude-opus-4-8");
+      // input = input + cache.read + cache.write = 100 + 10 + 0 = 110;
+      // output = output + reasoning = 20 + 5 = 25 (reasoning folded in, matching Claude/Codex)
+      expect(assistant.tokens).toEqual({ input: 110, output: 25 });
+    }
+    const user = out.timeline.find((t) => t.kind === "message" && t.role === "user");
+    if (user?.kind === "message") {
+      expect(user.model).toBeUndefined();
+      expect(user.tokens).toBeUndefined();
+    }
+  });
+
   it("excludes synthetic text parts and summary messages from first/latest + count", () => {
     const messages: OcMessageRow[] = [
       msg("s0", "user", 1, { summary: true }), // compaction message — excluded

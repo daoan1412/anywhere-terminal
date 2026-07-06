@@ -58,6 +58,55 @@ describe("classifyCodexRolloutEvents", () => {
     expect(out.stats.tokenCount).toBeUndefined();
   });
 
+  it("attaches per-message model (turn_context) + per-turn tokens (token_count) to the assistant message", () => {
+    const records = [
+      rec("turn_context", { turn_id: "t1", model: "gpt-5.5" }),
+      rec("event_msg", { type: "user_message", message: "hi" }),
+      rec("event_msg", { type: "agent_message", message: "hello" }),
+      rec("event_msg", {
+        type: "token_count",
+        info: {
+          total_token_usage: { total_tokens: 14327 },
+          last_token_usage: { input_tokens: 14291, cached_input_tokens: 9088, output_tokens: 36 },
+          model_context_window: 258400,
+        },
+      }),
+    ];
+    const out = classifyCodexRolloutEvents(records);
+    const assistant = out.timeline.find((t) => t.kind === "message" && t.role === "assistant");
+    expect(assistant).toBeDefined();
+    if (assistant?.kind === "message") {
+      expect(assistant.model).toBe("gpt-5.5");
+      // input = input + cached = 14291 + 9088 = 23379; output = 36; contextWindow = 258400
+      expect(assistant.tokens).toEqual({ input: 23379, output: 36, contextWindow: 258400 });
+    }
+    const user = out.timeline.find((t) => t.kind === "message" && t.role === "user");
+    if (user?.kind === "message") {
+      expect(user.model).toBeUndefined();
+      expect(user.tokens).toBeUndefined();
+    }
+  });
+
+  it("does not re-attribute a later token_count (tool-only turn) onto an already-backfilled message", () => {
+    const records = [
+      rec("turn_context", { turn_id: "t1", model: "gpt-5.5" }),
+      rec("event_msg", { type: "agent_message", message: "hello" }),
+      rec("event_msg", {
+        type: "token_count",
+        info: { last_token_usage: { input_tokens: 100, cached_input_tokens: 0, output_tokens: 10 } },
+      }),
+      // A tool-only / interrupted turn emits its own token_count with NO agent_message
+      // before it. Its usage must not overwrite "hello" — the reference was consumed.
+      rec("event_msg", {
+        type: "token_count",
+        info: { last_token_usage: { input_tokens: 999, cached_input_tokens: 0, output_tokens: 888 } },
+      }),
+    ];
+    const out = classifyCodexRolloutEvents(records);
+    const assistant = out.timeline.find((t) => t.kind === "message" && t.role === "assistant");
+    expect(assistant?.kind === "message" && assistant.tokens).toEqual({ input: 100, output: 10 });
+  });
+
   it("maps a request_user_input call + its function_call_output into a question item", () => {
     // Plan-mode AskUserQuestion analogue: arguments carry the questions; the answer
     // arrives in a later function_call_output (a JSON string), keyed by question id.

@@ -1841,3 +1841,91 @@ body:has(#tab-bar.visible) .vault-preview--max {
 .vault-panel.vault-collapsed .vault-context-menu {
   display: none;
 }
+
+/* ── enhance-vault-sessions ─────────────────────────────────────────────── */
+
+/* Inline rename editor (D1): replaces the row title in place. Sized to match the
+   title so the row doesn't jump when it swaps in. */
+.vault-row-rename-input {
+  min-width: 0;
+  flex: 1;
+  font: inherit;
+  font-size: 13px;
+  font-weight: 500;
+  padding: 1px 4px;
+  border: 1px solid var(--vscode-focusBorder);
+  border-radius: 3px;
+  background: var(--vscode-input-background);
+  color: var(--vscode-input-foreground);
+  outline: none;
+}
+
+/* Git-branch chip in the preview header title row (D2/D3): a compact, dim pill
+   next to the title. Omitted entirely for agents that record no branch (OpenCode). */
+.vault-preview-branch-chip {
+  flex: 0 1 auto;
+  min-width: 0;
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  max-width: 40%;
+  padding: 1px 6px;
+  border-radius: 999px;
+  font-size: 10px;
+  line-height: 1.5;
+  color: var(--vscode-descriptionForeground);
+  background: color-mix(in srgb, var(--vscode-foreground) 10%, transparent);
+  cursor: default;
+}
+.vault-preview-branch-icon {
+  flex: 0 0 auto;
+  opacity: 0.85;
+}
+.vault-preview-branch-name {
+  min-width: 0;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  font-family: var(--vscode-editor-font-family, monospace);
+}
+
+/* Per-assistant-message model + token meta line (D3/D6): a compact, dim caption
+   under the message body. Absent when the reader recorded no model/tokens. */
+.vault-preview-message-meta {
+  margin-top: 3px;
+  font-size: 10px;
+  line-height: 1.4;
+  color: var(--vscode-descriptionForeground);
+  opacity: 0.85;
+  font-family: var(--vscode-editor-font-family, monospace);
+  overflow-wrap: anywhere;
+}
+
+/* Live-follow "N new messages" pill (D5): sits in the scroll-nav FAB cluster but,
+   unlike the FABs, stays visible whenever armed (it doesn't fade on idle). */
+.vault-preview-newmsg-pill {
+  align-self: flex-end;
+  display: none;
+  padding: 4px 10px;
+  border: 1px solid var(--vscode-focusBorder);
+  border-radius: 999px;
+  font: inherit;
+  font-size: 11px;
+  font-weight: 600;
+  white-space: nowrap;
+  background: var(--vscode-button-background);
+  color: var(--vscode-button-foreground);
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.4);
+  cursor: pointer;
+  pointer-events: auto;
+}
+.vault-preview-newmsg-pill.is-visible {
+  display: inline-flex;
+}
+.vault-preview-newmsg-pill:hover {
+  background: var(--vscode-button-hoverBackground);
+}
+.vault-preview-newmsg-pill:focus-visible {
+  outline: 1px solid var(--vscode-focusBorder);
+  outline-offset: 1px;
+}

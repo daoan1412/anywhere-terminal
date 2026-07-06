@@ -47,6 +47,20 @@ describe("entriesSignature", () => {
     expect(entriesSignature([entry({ flags: { model: "sonnet" } })])).not.toBe(base);
   });
 
+  it("changes when customName is set/cleared (a rename-only delta must re-render)", () => {
+    const base = entriesSignature([entry()]);
+    expect(entriesSignature([entry({ customName: "My session" })])).not.toBe(base);
+    // Two different custom names differ; clearing returns to the base signature.
+    expect(entriesSignature([entry({ customName: "A" })])).not.toBe(entriesSignature([entry({ customName: "B" })]));
+    expect(entriesSignature([entry({ customName: undefined })])).toBe(base);
+  });
+
+  it("changes when gitBranch changes (drives the header chip)", () => {
+    const base = entriesSignature([entry()]);
+    expect(entriesSignature([entry({ gitBranch: "main" })])).not.toBe(base);
+    expect(entriesSignature([entry({ gitBranch: "main" })])).not.toBe(entriesSignature([entry({ gitBranch: "dev" })]));
+  });
+
   it("changes when the order changes", () => {
     const a = entry({ id: "claude:c1" });
     const b = entry({ id: "codex:x1", agent: "codex" });

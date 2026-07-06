@@ -8,7 +8,7 @@ import type { VaultSessionDetail, VaultTimelineItem } from "../../vault/types";
 import { formatRelativeTime } from "./format";
 import { ICON_CHEVRON_DOWN } from "./icons";
 import { teammateAccent } from "./previewColors";
-import { activityStep, previewMessage, questionBlock, thinkingBlock } from "./renderAtoms";
+import { activityStep, buildMessageMeta, previewMessage, questionBlock, thinkingBlock } from "./renderAtoms";
 import { renderWorkflowBoard } from "./workflowBoard";
 
 /** A prominent node that breaks the surrounding AI-output run and renders directly
@@ -120,7 +120,9 @@ function renderTimelineItem(item: VaultTimelineItem, bag: PreviewTimelineBag): H
   if (item.kind === "message") {
     const label = item.role === "assistant" ? "Assistant" : "User";
     const suffix = item.timestamp ? ` · ${formatRelativeTime(item.timestamp)}` : "";
-    return previewMessage(item.role, `${label}${suffix}`, item.text, true);
+    // Model/tokens ride on assistant messages only (D3); user messages carry neither.
+    const meta = item.role === "assistant" ? buildMessageMeta(item.model, item.tokens) : null;
+    return previewMessage(item.role, `${label}${suffix}`, item.text, true, meta);
   }
   if (item.kind === "thinking") {
     return thinkingBlock(item.text);

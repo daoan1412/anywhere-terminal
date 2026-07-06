@@ -13,6 +13,9 @@ export interface PreviewHeaderModel {
   badge: { icon?: AgentIcon; ariaLabel?: string; fallbackText?: string };
   /** Optional chip between badge and title (subagent `@agentType`). */
   chip?: { text: string; className: string };
+  /** Session git branch (enhance-vault-sessions D2/D3) — renders a `⎇ <branch>`
+   *  chip in the title row when set (Claude/Codex; absent for OpenCode). */
+  branch?: string;
   title: string;
   /** Pre-built meta block (vault Folder/Modified/Activity, or subagent Activity). */
   meta?: HTMLElement;
@@ -109,6 +112,20 @@ export function buildPreviewHeader(
     chip.className = model.chip.className;
     chip.textContent = model.chip.text;
     titleRow.appendChild(chip);
+  }
+  if (model.branch) {
+    const branchChip = document.createElement("span");
+    branchChip.className = "vault-preview-branch-chip";
+    branchChip.title = `Git branch: ${model.branch}`;
+    const icon = document.createElement("span");
+    icon.className = "vault-preview-branch-icon";
+    icon.textContent = "⎇";
+    icon.setAttribute("aria-hidden", "true");
+    const name = document.createElement("span");
+    name.className = "vault-preview-branch-name";
+    name.textContent = model.branch;
+    branchChip.append(icon, name);
+    titleRow.appendChild(branchChip);
   }
   titleRow.append(titleEl, actions);
   header.appendChild(titleRow);

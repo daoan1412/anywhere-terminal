@@ -8,7 +8,7 @@
 // recent-activity tail, and synthetic / sidechain records are excluded so the
 // preview reflects the main conversation.
 
-import type { VaultActivityStep, VaultSessionDetail, VaultTimelineItem } from "../types";
+import type { VaultActivityStep, VaultMessageTokens, VaultSessionDetail, VaultTimelineItem } from "../types";
 
 /** ~600-char cap per text field (D5). */
 export const MAX_DETAIL_TEXT = 600;
@@ -616,6 +616,24 @@ export function classifyClaudeStyleEvents(records: Rec[], opts: ClassifyOptions 
     if (text) {
       latestMessage = { role: "assistant", text: truncate(text), timestamp: ts };
     }
+    // Per-message model + token usage (enhance-vault-sessions D3). Assistant turns
+    // only; attached to each text item emitted below. `input` is the context/prompt
+    // size (input + cache read/creation), `output` the generated tokens.
+    const msgModel = str(msg.model);
+    const usageForMsg = asObj(msg.usage);
+    const msgTokens: VaultMessageTokens | undefined = usageForMsg
+      ? {
+          input:
+            num(usageForMsg.input_tokens) +
+            num(usageForMsg.cache_read_input_tokens) +
+            num(usageForMsg.cache_creation_input_tokens),
+          output: num(usageForMsg.output_tokens),
+        }
+      : undefined;
+    const msgMeta = {
+      ...(msgModel ? { model: msgModel } : {}),
+      ...(msgTokens ? { tokens: msgTokens } : {}),
+    };
     if (Array.isArray(content)) {
       // Walk the content blocks in order so thinking / text / tool calls land in
       // the timeline in the sequence the assistant produced them.
@@ -632,6 +650,7 @@ export function classifyClaudeStyleEvents(records: Rec[], opts: ClassifyOptions 
               role: "assistant",
               text: normalizeRich(t),
               timestamp: ts,
+              ...msgMeta,
             });
           }
         } else if (block.type === "thinking" && typeof block.thinking === "string") {
@@ -701,7 +720,7 @@ export function classifyClaudeStyleEvents(records: Rec[], opts: ClassifyOptions 
         }
       }
     } else if (text) {
-      timeline.push({ kind: "message", role: "assistant", text: normalizeRich(text), timestamp: ts });
+      timeline.push({ kind: "message", role: "assistant", text: normalizeRich(text), timestamp: ts, ...msgMeta });
     }
 
     const usage = asObj(msg.usage);

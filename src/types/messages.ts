@@ -436,6 +436,29 @@ export interface VaultCopyFilePathMessage {
 }
 
 /**
+ * Webview → Extension: set or clear a session's user custom name
+ * (enhance-vault-sessions D1). An empty (after trim) `name` clears it, reverting
+ * to the reader-derived title. Persisted in a sidecar registry — never in the
+ * agent's own files.
+ */
+export interface VaultRenameSessionMessage {
+  type: "vaultRenameSession";
+  entryId: string;
+  name: string;
+}
+
+/**
+ * Webview → Extension: start/stop live-following the previewed session
+ * (enhance-vault-sessions D5). `entryId` selects the session to watch;
+ * `null` stops following (preview closed or switched). At most one follow
+ * watcher is active per view.
+ */
+export interface VaultWatchSessionMessage {
+  type: "vaultWatchSession";
+  entryId: string | null;
+}
+
+/**
  * Webview → Extension: resolve the REAL current working directory of a terminal
  * pane (the host queries its own PTY: lsof/`/proc` live cwd, else the
  * shell-integration-tracked cwd, else the spawn cwd) so the vault's "This folder
@@ -553,6 +576,8 @@ export type WebViewToExtensionMessage =
   | VaultOpenWorkingDirMessage
   | VaultCopyResumeCommandMessage
   | VaultCopyFilePathMessage
+  | VaultRenameSessionMessage
+  | VaultWatchSessionMessage
   | RequestVaultContextCwdMessage
   | RequestSubagentPreviewMessage
   | PasteClipboardImageMessage
@@ -1014,6 +1039,13 @@ interface VaultSessionDetailResponseBase {
    * stale-render guard).
    */
   entryId: string;
+  /**
+   * True when this detail is a live-follow push (not a user-initiated open/load-more)
+   * (enhance-vault-sessions D5). The webview handles it before the normal open path:
+   * it never force-scrolls — it appends+auto-scrolls only when already at the bottom,
+   * otherwise it surfaces a "new messages" indicator.
+   */
+  followUpdate?: boolean;
 }
 
 /**

@@ -62,8 +62,10 @@ export function renderRow(entry: VaultSessionEntry, opts: { hideCwd?: boolean },
 
   const titleEl = document.createElement("span");
   titleEl.className = "vault-row-title";
-  titleEl.textContent = entry.title || "(untitled session)";
-  titleEl.title = entry.title;
+  // A user rename overrides the derived title (enhance-vault-sessions D1).
+  const shownTitle = entry.customName || entry.title;
+  titleEl.textContent = shownTitle || "(untitled session)";
+  titleEl.title = shownTitle;
   row.appendChild(titleEl);
 
   if (!opts.hideCwd) {
@@ -106,6 +108,63 @@ export function renderRow(entry: VaultSessionEntry, opts: { hideCwd?: boolean },
   row.appendChild(actions);
 
   return row;
+}
+
+/**
+ * Turn a row's title into an inline rename editor (enhance-vault-sessions D1).
+ * Enter (or blur) commits, Esc cancels, an empty value clears back to the derived
+ * title (the host normalizes). Seeded with the current display name. Idempotent —
+ * a no-op if the row is already being edited. The commit is fire-and-forget: the
+ * host round-trips an overlaid list that re-renders the row with the new name.
+ */
+export function beginInlineRename(
+  row: HTMLElement,
+  entry: VaultSessionEntry,
+  cb: { commit: (name: string) => void; onDone?: () => void },
+): void {
+  const titleEl = row.querySelector<HTMLElement>(".vault-row-title");
+  if (!titleEl || row.querySelector(".vault-row-rename-input")) {
+    return;
+  }
+  const input = document.createElement("input");
+  input.type = "text";
+  input.className = "vault-row-rename-input";
+  input.value = entry.customName || entry.title || "";
+  input.setAttribute("aria-label", "Rename session");
+  input.maxLength = 80;
+  // Keep pointer/keyboard events inside the editor — a click must not activate the
+  // row (open the preview) and keys must not reach the panel's collapse handler.
+  input.addEventListener("click", (e) => e.stopPropagation());
+  input.addEventListener("mousedown", (e) => e.stopPropagation());
+
+  let done = false;
+  const finish = (commitValue: boolean): void => {
+    if (done) {
+      return;
+    }
+    done = true;
+    const value = input.value;
+    input.replaceWith(titleEl);
+    cb.onDone?.();
+    if (commitValue) {
+      cb.commit(value);
+    }
+  };
+  input.addEventListener("keydown", (e) => {
+    e.stopPropagation();
+    if (e.key === "Enter") {
+      e.preventDefault();
+      finish(true);
+    } else if (e.key === "Escape") {
+      e.preventDefault();
+      finish(false);
+    }
+  });
+  input.addEventListener("blur", () => finish(true));
+
+  titleEl.replaceWith(input);
+  input.focus();
+  input.select();
 }
 
 /** "Show N more" affordance that expands a group past the per-group cap. */

@@ -118,6 +118,38 @@ describe("readClaudeDetail", () => {
     expect(detail.stats.tokenCount).toBe(120);
   });
 
+  it("attaches per-message model + token usage to assistant messages, not user ones", async () => {
+    await writeSession("-Users-me-proj", "sess-meta", [
+      { type: "user", message: { role: "user", content: "hi" }, timestamp: "2026-05-01T00:00:00.000Z" },
+      {
+        type: "assistant",
+        message: {
+          role: "assistant",
+          model: "claude-opus-4-8",
+          content: [{ type: "text", text: "hello back" }],
+          usage: {
+            output_tokens: 30,
+            input_tokens: 100,
+            cache_read_input_tokens: 5,
+            cache_creation_input_tokens: 15,
+          },
+        },
+        timestamp: "2026-05-01T01:00:00.000Z",
+      },
+    ]);
+
+    const detail = await readClaudeDetail("sess-meta", { configDir });
+    const messages = (detail?.timeline ?? []).filter(isMessage);
+    const assistant = messages.find((m) => m.role === "assistant");
+    const user = messages.find((m) => m.role === "user");
+    expect(assistant?.model).toBe("claude-opus-4-8");
+    // input = input + cache_read + cache_creation = 100 + 5 + 15 = 120; output = 30
+    expect(assistant?.tokens).toEqual({ input: 120, output: 30 });
+    // User messages carry no model/tokens.
+    expect(user?.model).toBeUndefined();
+    expect(user?.tokens).toBeUndefined();
+  });
+
   it("renders a long assistant body in full but keeps a long user prompt capped", async () => {
     const longAssistant = `START ${"a".repeat(5000)} END`;
     const longUser = "u".repeat(5000);

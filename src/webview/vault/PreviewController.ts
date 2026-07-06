@@ -9,7 +9,7 @@
 // through textContent; the only innerHTML lives in the closed-map icon builders.
 
 import type { VaultSessionDetailResponseMessage } from "../../types/messages";
-import type { VaultSessionDetail, VaultSessionEntry } from "../../vault/types";
+import type { VaultSessionDetail, VaultSessionEntry, VaultTimelineItem } from "../../vault/types";
 import type { VaultPreviewGeometry } from "../state/WebviewState";
 import { getAgentAccent, getAgentIcon, VAULT_ACCENTS } from "./agentIcons";
 import { FloatingPreviewShell } from "./FloatingPreviewShell";
@@ -85,6 +85,13 @@ export class PreviewController {
    *  here lets the rebuilt board reopen the same agent (and its now-expanded run).
    *  Reset when the preview closes. */
   private readonly boardSelections = new Map<string, BoardSelection>();
+  /** Live-follow (enhance-vault-sessions D5): fingerprint of the currently-rendered
+   *  timeline's tail, so a follow push that changed nothing no-ops. Null until the
+   *  first render. */
+  private followTailFingerprint: string | null = null;
+  /** New messages appended by follow pushes while the reader is scrolled up — the
+   *  count shown on the "N new messages" pill. Reset to 0 when caught up (at bottom). */
+  private followPillCount = 0;
 
   constructor(deps: PreviewControllerDeps) {
     this.deps = deps;
@@ -170,13 +177,18 @@ export class PreviewController {
     this.previewLoadingMore = false;
     this.previewScrollToTopPending = false;
     this.previewScrollToTopLastCount = 0;
-    this.shell.scrollNav.reset();
+    this.followTailFingerprint = null;
+    this.followPillCount = 0;
+    this.shell.scrollNav.reset(); // also clears any prior follow pill
 
     this.applyPreviewAgentAccent(entry.agent);
     this.renderPreviewLoading(entry);
     this.shell.show(); // is-open + anchor via getActiveRow + attach close-listeners
     this.deps.syncHighlight(); // VaultPanel sets aria-selected on the active row
     this.deps.postMessage({ type: "requestVaultSessionDetail", entryId: entry.id });
+    // Live-follow: ask the host to watch this session's store; a switch re-points
+    // the single follow watcher, close releases it (enhance-vault-sessions D5).
+    this.deps.postMessage({ type: "vaultWatchSession", entryId: entry.id });
   }
 
   /** Tint the preview's user messages with the session's agent accent (D: #3). */
@@ -207,6 +219,10 @@ export class PreviewController {
     this.boardSelections.clear();
     this.previewScrollToTopPending = false;
     this.previewScrollToTopLastCount = 0;
+    this.followTailFingerprint = null;
+    this.followPillCount = 0;
+    // Release the host's live-follow watcher (at most one active, D5).
+    this.deps.postMessage({ type: "vaultWatchSession", entryId: null });
     this.deps.syncHighlight(); // clears aria-selected (activeEntryId is now null)
   }
 
@@ -243,6 +259,12 @@ export class PreviewController {
           container.textContent = text;
         }
       }
+      return;
+    }
+    // Live-follow push (D5) — handled BEFORE the normal open/load-more path so it
+    // never force-scrolls to the bottom. Own stale-guard + no-op detection inside.
+    if (msg.followUpdate) {
+      this.handleFollowUpdate(msg);
       return;
     }
     if (msg.entryId !== this.activePreviewEntryId || !this.activePreviewEntry) {
@@ -303,6 +325,69 @@ export class PreviewController {
     }
   }
 
+  /**
+   * Live-follow push (D5): the host re-read the followed session after a file
+   * change. Detect a real change via a tail fingerprint (NOT length/timestamp);
+   * if the reader is at/near the bottom, re-render + re-pin to the newest message
+   * (auto-scroll); otherwise preserve the viewport and raise a "N new messages"
+   * pill. A no-change push, an error, or an in-flight load-more/scroll-walk no-ops.
+   */
+  private handleFollowUpdate(msg: VaultSessionDetailResponseMessage): void {
+    if (msg.entryId !== this.activePreviewEntryId || !this.activePreviewEntry) {
+      return; // the user switched/closed before this follow push landed — stale.
+    }
+    if (msg.error || !msg.detail) {
+      return; // a follow re-read error keeps the current view (silent).
+    }
+    if (this.previewLoadingMore || this.previewScrollToTopPending) {
+      return; // don't fight an in-progress load-more / scroll-to-first walk.
+    }
+    const detail = msg.detail;
+    const fingerprint = tailFingerprint(detail.timeline ?? []);
+    if (fingerprint === this.followTailFingerprint) {
+      return; // tail unchanged — nothing new to show (D5: fingerprint, not length).
+    }
+
+    const body = this.shell.el.querySelector<HTMLElement>(".vault-preview-body");
+    const atBottom = body ? isNearBottom(body) : true;
+    const prevScrollTop = body?.scrollTop ?? 0;
+    const prevCount = this.activePreviewDetail?.timeline?.length ?? 0;
+    const newCount = detail.timeline?.length ?? 0;
+
+    // The reader is up in loaded history and this bounded re-read would return a
+    // SHORTER window (they had loaded older messages) — leave their view intact;
+    // they'll catch up when they scroll back down.
+    if (!atBottom && newCount < prevCount) {
+      return;
+    }
+
+    this.renderPreviewDetail(this.activePreviewEntry, detail); // updates followTailFingerprint
+    const bodyAfter = this.shell.el.querySelector<HTMLElement>(".vault-preview-body");
+    if (atBottom) {
+      // Following the tail → keep pinned to the newest message.
+      this.followPillCount = 0;
+      this.shell.scrollNav.clearNewMessages();
+      if (bodyAfter) {
+        bodyAfter.scrollTop = bodyAfter.scrollHeight;
+      }
+    } else {
+      // Scrolled up → keep the viewport (new items appended below) + raise the pill.
+      if (bodyAfter) {
+        bodyAfter.scrollTop = prevScrollTop;
+      }
+      const delta = newCount - prevCount;
+      this.followPillCount += delta > 0 ? delta : 1; // content changed even at equal length
+      this.shell.scrollNav.setNewMessages(this.followPillCount, () => this.scrollFollowToLatest());
+    }
+  }
+
+  /** Pill click / caught-up: jump to the newest message and dismiss the pill. */
+  private scrollFollowToLatest(): void {
+    this.followPillCount = 0;
+    this.shell.scrollNav.clearNewMessages();
+    this.shell.scrollNav.scrollBody("end");
+  }
+
   private buildPreviewHeader(entry: VaultSessionEntry, detail?: VaultSessionDetail): HTMLElement {
     // Tear down the prior build's tooltips before the new build attaches its own.
     this.shell.disposeTooltips();
@@ -310,7 +395,9 @@ export class PreviewController {
     const { element, disposers } = buildPreviewHeaderDom(
       {
         badge: { icon: getAgentIcon(entry.agent), ariaLabel: label, fallbackText: label.slice(0, 2) },
-        title: entry.title || "(untitled session)",
+        // A user rename overrides the derived title everywhere it's shown (D1).
+        title: entry.customName || entry.title || "(untitled session)",
+        branch: entry.gitBranch,
         meta: buildPreviewMeta(entry, detail),
       },
       {
@@ -343,6 +430,8 @@ export class PreviewController {
 
   private renderPreviewDetail(entry: VaultSessionEntry, detail: VaultSessionDetail): void {
     this.activePreviewDetail = detail; // kept so "Show more" can re-render in place
+    // Track the tail so the next live-follow push can no-op when nothing changed (D5).
+    this.followTailFingerprint = tailFingerprint(detail.timeline ?? []);
     const body = document.createElement("div");
     body.className = "vault-preview-body";
 
@@ -368,9 +457,14 @@ export class PreviewController {
     renderTimelineInto(body, detail.timeline ?? [], "root", this.timelineBag);
 
     // Scroll to the top → load older messages (incremental, while more remain).
+    // Scroll back to the bottom → the reader is caught up: dismiss the follow pill.
     body.addEventListener("scroll", () => {
       if (body.scrollTop <= 48 && this.activePreviewDetail?.truncated && !this.previewLoadingMore) {
         this.requestMorePreview();
+      }
+      if (this.followPillCount > 0 && isNearBottom(body)) {
+        this.followPillCount = 0;
+        this.shell.scrollNav.clearNewMessages();
       }
     });
 
@@ -424,6 +518,40 @@ export class PreviewController {
       this.deps.postMessage({ type: "requestVaultSessionDetail", entryId });
     }
   }
+}
+
+/** Whether a scroll container is at/near its bottom edge — the "following the
+ *  tail" threshold that decides auto-scroll vs. the "N new messages" pill (D5). */
+function isNearBottom(el: HTMLElement, threshold = 60): boolean {
+  return el.scrollHeight - el.scrollTop - el.clientHeight <= threshold;
+}
+
+/** A stable fingerprint over the last K timeline items — `kind|role|timestamp|
+ *  text-prefix` per item, plus the total length. Detects new/changed tail content
+ *  where a bounded window can shift at equal length, so live-follow (D5) can no-op
+ *  a push that changed nothing. NOT length/timestamp alone (both are unreliable). */
+function tailFingerprint(timeline: readonly VaultTimelineItem[], k = 8): string {
+  return `${timeline.slice(-k).map(itemTail).join("§")}#${timeline.length}`;
+}
+
+/** One timeline item's tail signature. Reads the common discriminating fields
+ *  (role/timestamp/text|title|preview) generically so every item kind contributes.
+ *  Includes the text length + a trailing slice (not just a 48-char prefix) so an
+ *  assistant message assembled IN PLACE across re-reads — same item, growing text,
+ *  unchanged prefix — still changes the fingerprint and live-follow keeps up (W3). */
+function itemTail(item: VaultTimelineItem): string {
+  const it = item as Record<string, unknown>;
+  const role = typeof it.role === "string" ? it.role : "";
+  const ts = typeof it.timestamp === "number" ? String(it.timestamp) : "";
+  const text =
+    typeof it.text === "string"
+      ? it.text
+      : typeof it.title === "string"
+        ? it.title
+        : typeof it.preview === "string"
+          ? it.preview
+          : "";
+  return `${item.kind}|${role}|${ts}|${text.length}|${text.slice(0, 32)}|${text.slice(-24)}`;
 }
 
 /** After a workflow-board agent's transcript renders into `container`, jump its

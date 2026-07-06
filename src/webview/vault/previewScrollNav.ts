@@ -17,6 +17,11 @@ export class PreviewScrollNav {
   private readonly el: HTMLElement;
   private readonly topBtn: HTMLButtonElement;
   private readonly bottomBtn: HTMLButtonElement;
+  /** Live-follow "N new messages" pill (enhance-vault-sessions D5) — shown while
+   *  scrolled up and newer content has arrived; always visible when armed (it
+   *  does NOT fade with the idle FABs). */
+  private readonly pillBtn: HTMLButtonElement;
+  private pillOnClick: (() => void) | null = null;
   private active = false;
   private hovering = false;
   private idleTimer: ReturnType<typeof setTimeout> | null = null;
@@ -55,8 +60,29 @@ export class PreviewScrollNav {
     this.bottomBtn = make("vault-preview-scroll-bottom", "Scroll to latest message", ICON_SCROLL_BOTTOM, () =>
       this.scrollBody("end"),
     );
-    nav.append(this.topBtn, this.bottomBtn);
+    this.pillBtn = document.createElement("button");
+    this.pillBtn.type = "button";
+    this.pillBtn.className = "vault-preview-newmsg-pill";
+    this.pillBtn.addEventListener("mousedown", (e) => e.stopPropagation());
+    this.pillBtn.addEventListener("click", () => this.pillOnClick?.());
+    nav.append(this.pillBtn, this.topBtn, this.bottomBtn);
     this.element = nav;
+  }
+
+  /** Arm the live-follow pill with a new-message count + jump handler (D5). */
+  setNewMessages(count: number, onClick: () => void): void {
+    this.pillOnClick = onClick;
+    const label = count > 1 ? `${count} new messages` : "New message";
+    this.pillBtn.textContent = `↓ ${label}`;
+    this.pillBtn.title = "Jump to the latest message";
+    this.pillBtn.setAttribute("aria-label", label);
+    this.pillBtn.classList.add("is-visible");
+  }
+
+  /** Dismiss the live-follow pill (caught up / preview closed). */
+  clearNewMessages(): void {
+    this.pillOnClick = null;
+    this.pillBtn.classList.remove("is-visible");
   }
 
   private body(): HTMLElement | null {
@@ -77,7 +103,7 @@ export class PreviewScrollNav {
     this.updateVisibility(body);
   }
 
-  /** Clear transient state (timer + flags). Called on preview reopen/close. */
+  /** Clear transient state (timer + flags + the follow pill). Called on reopen/close. */
   reset(): void {
     if (this.idleTimer) {
       clearTimeout(this.idleTimer);
@@ -85,6 +111,7 @@ export class PreviewScrollNav {
     }
     this.active = false;
     this.hovering = false;
+    this.clearNewMessages();
   }
 
   /** Smooth-scroll the body to top (0) or end. */
