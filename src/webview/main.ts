@@ -36,6 +36,13 @@ import { formatRestoreDivider } from "./terminal/restoreDivider";
 import { TerminalFactory } from "./terminal/TerminalFactory";
 import { ThemeManager } from "./theme/ThemeManager";
 import { showBanner } from "./ui/BannerService";
+import {
+  extractImageBlobFromClipboardItems,
+  forwardImagePaste,
+  ImagePasteDeduper,
+  isPasteShortcut,
+  probeClipboardForImageBlob,
+} from "./imagePasteBridge";
 import { VaultPanel } from "./vault/VaultPanel";
 
 // Inject the vendored Seti icon-font @font-face rule (with the woff embedded
@@ -1073,11 +1080,41 @@ function bootstrap(): void {
     }
   });
 
-  // Capture-phase paste listener: when the clipboard carries an image, snapshot
-  // it into the active pane's cache so hovering the CLI's [Image #N] placeholder
-  // can preview it. Observe-only — never preventDefault/stopPropagation, so the
-  // native paste still reaches xterm and the CLI's own out-of-band clipboard
-  // read (which renders the placeholder) is unaffected. See preview-pasted-images D1.
+  // Image paste bridge: AI CLIs (Claude Code, Codex, Grok) read images from the
+  // OS clipboard out-of-band after a paste trigger (\x16 or bracketed paste).
+  // The webview mirrors the blob to the host, which syncs OS clipboard + PTY.
+  const imagePasteDeduper = new ImagePasteDeduper();
+
+  const handleImagePasteBlob = (blob: File, targetId: string): void => {
+    factory.getPastedImageStore(targetId)?.add(blob);
+    imagePasteDeduper.markHandled();
+    void forwardImagePaste(blob, targetId, isMac, (msg) => vscode.postMessage(msg));
+  };
+
+  document.addEventListener(
+    "keydown",
+    (e: KeyboardEvent) => {
+      if (!isPasteShortcut(e, isMac)) {
+        return;
+      }
+      imagePasteDeduper.reset();
+      const tabId = store.activeTabId;
+      const targetId = tabId ? (store.tabActivePaneIds.get(tabId) ?? tabId) : null;
+      if (!targetId) {
+        return;
+      }
+      // Fallback when Chromium never fires `paste` for image clipboards.
+      void probeClipboardForImageBlob().then((blob) => {
+        if (!blob || imagePasteDeduper.wasHandled()) {
+          return;
+        }
+        const file = blob instanceof File ? blob : new File([blob], "clipboard.png", { type: blob.type || "image/png" });
+        handleImagePasteBlob(file, targetId);
+      });
+    },
+    true,
+  );
+
   document.addEventListener(
     "paste",
     (e: ClipboardEvent) => {
@@ -1085,13 +1122,7 @@ function bootstrap(): void {
       if (!items) {
         return;
       }
-      let blob: File | null = null;
-      for (let i = 0; i < items.length; i++) {
-        if (items[i].type.startsWith("image/")) {
-          blob = items[i].getAsFile();
-          break;
-        }
-      }
+      const blob = extractImageBlobFromClipboardItems(items);
       if (!blob) {
         return;
       }
@@ -1100,7 +1131,11 @@ function bootstrap(): void {
       if (!targetId) {
         return;
       }
-      factory.getPastedImageStore(targetId)?.add(blob);
+      // Consume image paste so xterm does not also emit an empty bracketed paste
+      // (double-trigger). Text paste is unchanged — this handler returns early.
+      e.preventDefault();
+      e.stopPropagation();
+      handleImagePasteBlob(blob, targetId);
     },
     true,
   );

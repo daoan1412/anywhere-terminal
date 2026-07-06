@@ -12,6 +12,7 @@ import { resolveSubagentDetail, resolveSubagentDetailByEntryId } from "../vault/
 import type { VaultSessionEntry } from "../vault/types";
 import type { VaultLauncher } from "../vault/VaultLauncher";
 import type { VaultService } from "../vault/VaultService";
+import { handlePasteClipboardImage } from "./clipboardImageSync";
 import { FileTreeHost } from "./fileTreeHost";
 import type { WatcherPool } from "./fsWatcherPool";
 import type { GitDecorationProvider } from "./gitDecorationProvider";
@@ -653,6 +654,24 @@ export class TerminalViewProvider implements vscode.WebviewViewProvider {
         case "input":
           if (typeof message.tabId === "string" && typeof message.data === "string") {
             this.sessionManager.writeToSession(message.tabId, message.data);
+          }
+          break;
+
+        case "pasteClipboardImage":
+          if (
+            typeof message.tabId === "string" &&
+            typeof message.data === "string" &&
+            typeof message.trigger === "string"
+          ) {
+            void handlePasteClipboardImage(
+              {
+                tabId: message.tabId,
+                mimeType: typeof message.mimeType === "string" ? message.mimeType : "image/png",
+                data: message.data,
+                trigger: message.trigger,
+              },
+              (tabId, data) => this.sessionManager.writeToSession(tabId, data),
+            );
           }
           break;
 
