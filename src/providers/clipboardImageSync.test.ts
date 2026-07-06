@@ -44,11 +44,10 @@ describe("handlePasteClipboardImage", () => {
     const writeToSession = vi.fn();
 
     // Codex keys off a fixed Ctrl+V even on macOS.
-    await handlePasteClipboardImage(
-      { tabId: "session-a", mimeType: "image/png", data: PNG_BASE64 },
-      writeToSession,
-      { agentKind: "codex", isMac: true },
-    );
+    await handlePasteClipboardImage({ tabId: "session-a", mimeType: "image/png", data: PNG_BASE64 }, writeToSession, {
+      agentKind: "codex",
+      isMac: true,
+    });
 
     expect(writeToSession).toHaveBeenCalledWith("session-a", CTRL_V_PASTE);
   });
@@ -56,11 +55,10 @@ describe("handlePasteClipboardImage", () => {
   it("uses the OS-native trigger for Claude / unknown sessions", async () => {
     const writeToSession = vi.fn();
 
-    await handlePasteClipboardImage(
-      { tabId: "session-a", mimeType: "image/png", data: PNG_BASE64 },
-      writeToSession,
-      { agentKind: "claude", isMac: true },
-    );
+    await handlePasteClipboardImage({ tabId: "session-a", mimeType: "image/png", data: PNG_BASE64 }, writeToSession, {
+      agentKind: "claude",
+      isMac: true,
+    });
 
     expect(writeToSession).toHaveBeenCalledWith("session-a", BRACKETED_EMPTY_PASTE);
   });
@@ -72,11 +70,10 @@ describe("handlePasteClipboardImage", () => {
     const writeToSession = vi.fn();
     mocks.mkdtemp.mockRejectedValue(new Error("ENOSPC"));
 
-    await handlePasteClipboardImage(
-      { tabId: "session-a", mimeType: "image/png", data: PNG_BASE64 },
-      writeToSession,
-      { agentKind: "codex", isMac: true },
-    );
+    await handlePasteClipboardImage({ tabId: "session-a", mimeType: "image/png", data: PNG_BASE64 }, writeToSession, {
+      agentKind: "codex",
+      isMac: true,
+    });
 
     expect(writeToSession).toHaveBeenCalledWith("session-a", CTRL_V_PASTE);
   });

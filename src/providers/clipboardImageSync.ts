@@ -80,11 +80,9 @@ async function writeLinuxClipboard(mimeType: string, data: Buffer, tmpPath: stri
 
 async function writeDarwinClipboard(tmpPath: string): Promise<boolean> {
   try {
-    await execFileAsync(
-      "osascript",
-      ["-e", `set the clipboard to (read (POSIX file "${tmpPath}") as «class PNGf»)`],
-      { timeout: 2000 },
-    );
+    await execFileAsync("osascript", ["-e", `set the clipboard to (read (POSIX file "${tmpPath}") as «class PNGf»)`], {
+      timeout: 2000,
+    });
     return true;
   } catch {
     return false;
@@ -179,11 +177,9 @@ function imageMimeFromPath(filePath: string): string | null {
  */
 async function readDarwinClipboardFileUrl(): Promise<string | null> {
   try {
-    const { stdout } = await execFileAsync(
-      "osascript",
-      ["-e", "POSIX path of (the clipboard as «class furl»)"],
-      { timeout: 2000 },
-    );
+    const { stdout } = await execFileAsync("osascript", ["-e", "POSIX path of (the clipboard as «class furl»)"], {
+      timeout: 2000,
+    });
     const filePath = stdout.trim();
     return filePath.length > 0 ? filePath : null;
   } catch {

@@ -4,6 +4,12 @@ All notable changes to **AnyWhere Terminal** are documented in this file.
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.17.6] — 2026-07-07
+
+### Added
+
+- **Paste images directly into Claude Code, Codex, and OpenCode.** Copy an image — a screenshot, an image from the browser, or an image file in Finder/Explorer — and paste it into an AI CLI running in the terminal; the CLI receives it as `[Image #N]`. The image bytes never cross the PTY: the extension mirrors the pasted image onto your OS clipboard (macOS, Linux via `wl-copy`/`xclip`, Windows via PowerShell) and emits the paste signal each CLI expects — Codex and OpenCode read a fixed Ctrl+V on every platform, while Claude uses its OS-native signal. Hovering the `[Image #N]` placeholder shows a preview of what you pasted. On macOS this also works with **Ctrl+V** (which isn't the system paste shortcut): the extension reads the clipboard image host-side for the preview, correctly resolving a copied image *file* to its contents rather than its generic file icon.
+
 ## [0.17.5] — 2026-06-28
 
 ### Fixed
