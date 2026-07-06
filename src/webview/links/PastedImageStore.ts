@@ -21,7 +21,16 @@ export interface PastedImagePreview {
  * close), not only the root close.
  */
 export class PastedImageStore {
+  /**
+   * Cap on retained entries. Each pins its blob (via the object URL) until
+   * revoked, so an uncapped store grows webview memory for the whole session.
+   * `resolveRecent` only ever maps into the most-recent batch, so evicting the
+   * oldest beyond this window preserves hover-preview behavior.
+   */
+  private static readonly MAX_ENTRIES = 16;
+
   private readonly images: PastedImagePreview[] = [];
+  private nextIndex = 1;
   private disposed = false;
 
   /** Capture a pasted image; assigns the next 1-based index + a blob: URL. */
@@ -30,9 +39,19 @@ export class PastedImageStore {
       url: URL.createObjectURL(blob),
       mimeType: blob.type || "image/png",
       byteSize: blob.size,
-      index: this.images.length + 1,
+      index: this.nextIndex++,
     };
     this.images.push(entry);
+    while (this.images.length > PastedImageStore.MAX_ENTRIES) {
+      const evicted = this.images.shift();
+      if (evicted) {
+        try {
+          URL.revokeObjectURL(evicted.url);
+        } catch {
+          // Best-effort — revoke must not throw out of add().
+        }
+      }
+    }
     return entry;
   }
 

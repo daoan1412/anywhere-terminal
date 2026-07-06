@@ -1,12 +1,10 @@
 // Webview helpers for AI-CLI image paste (Claude Code, Codex, Grok).
 // CLIs read images from the OS clipboard out-of-band; the webview must (1) cache
 // the blob for hover preview and (2) ask the extension host to sync it to the OS
-// clipboard, then forward the paste trigger bytes to the PTY.
+// clipboard and signal the PTY. The host picks the PTY trigger — it knows both
+// the running CLI and its platform (see clipboardImageSync).
 
-import { getImagePastePtyTrigger } from "../shared/imagePasteTrigger";
 import type { PasteClipboardImageMessage } from "../types/messages";
-
-export { getImagePastePtyTrigger };
 
 /** First image/* item from a paste event, if any. */
 export function extractImageBlobFromClipboardItems(items: DataTransferItemList): File | null {
@@ -19,12 +17,16 @@ export function extractImageBlobFromClipboardItems(items: DataTransferItemList):
   return null;
 }
 
-/** Whether the key event is the platform paste shortcut (Cmd+V / Ctrl+V). */
+/** Whether the key event is a paste shortcut we should capture for preview. */
 export function isPasteShortcut(event: KeyboardEvent, isMac: boolean): boolean {
   if (event.type !== "keydown" || event.altKey || event.shiftKey) {
     return false;
   }
-  const modifier = isMac ? event.metaKey : event.ctrlKey;
+  // macOS: accept BOTH Cmd+V (the OS paste accelerator — fires a `paste` event)
+  // and Ctrl+V (no `paste` event; xterm sends \x16, which OpenCode/Codex use to
+  // read the OS clipboard themselves). Without the Ctrl+V branch the preview
+  // blob is never captured for those CLIs. Elsewhere, Ctrl+V is the OS paste.
+  const modifier = isMac ? event.metaKey || event.ctrlKey : event.ctrlKey;
   return modifier && event.key.toLowerCase() === "v";
 }
 
@@ -40,25 +42,69 @@ export async function blobToBase64(blob: Blob): Promise<string> {
   return btoa(binary);
 }
 
+/** Decode host-supplied base64 image bytes into a Blob for the preview cache. */
+export function base64ToBlob(data: string, mimeType: string): Blob | null {
+  try {
+    const binary = atob(data);
+    const bytes = new Uint8Array(binary.length);
+    for (let i = 0; i < binary.length; i++) {
+      bytes[i] = binary.charCodeAt(i);
+    }
+    return new Blob([bytes], { type: mimeType || "image/png" });
+  } catch {
+    return null;
+  }
+}
+
 export type { PasteClipboardImageMessage };
 
 /**
- * Cache the image for hover preview and ask the extension host to mirror it to
- * the OS clipboard, then emit the PTY paste trigger for the active pane.
+ * Re-encode a non-PNG image as PNG. Every target CLI reads the OS clipboard as
+ * PNG (osascript «class PNGf», arboard, `-t image/png`), so a pasted
+ * JPEG/GIF/WebP would otherwise land as corrupt PNG-labeled bytes (or not decode
+ * at all). Falls back to the original blob when the canvas APIs are unavailable
+ * (e.g. the test env) or re-encoding fails.
+ */
+export async function ensurePngBlob(blob: Blob): Promise<Blob> {
+  if (blob.type === "image/png") {
+    return blob;
+  }
+  if (typeof createImageBitmap !== "function" || typeof OffscreenCanvas === "undefined") {
+    return blob;
+  }
+  try {
+    const bitmap = await createImageBitmap(blob);
+    const canvas = new OffscreenCanvas(bitmap.width, bitmap.height);
+    const ctx = canvas.getContext("2d");
+    if (!ctx) {
+      bitmap.close();
+      return blob;
+    }
+    ctx.drawImage(bitmap, 0, 0);
+    bitmap.close();
+    return await canvas.convertToBlob({ type: "image/png" });
+  } catch {
+    return blob;
+  }
+}
+
+/**
+ * Ask the extension host to mirror a captured image to the OS clipboard and
+ * signal the PTY for the active pane. The image is normalized to PNG first; the
+ * host resolves the PTY trigger from the running CLI + platform.
  */
 export async function forwardImagePaste(
   blob: File,
   tabId: string,
-  isMac: boolean,
   postMessage: (msg: PasteClipboardImageMessage) => void,
 ): Promise<void> {
-  const data = await blobToBase64(blob);
+  const png = await ensurePngBlob(blob);
+  const data = await blobToBase64(png);
   postMessage({
     type: "pasteClipboardImage",
     tabId,
-    mimeType: blob.type || "image/png",
+    mimeType: png.type || "image/png",
     data,
-    trigger: getImagePastePtyTrigger(isMac),
   });
 }
 

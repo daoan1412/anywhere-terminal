@@ -19,7 +19,10 @@ export type SessionStoreFormat = "jsonl" | "sqlite";
  *   3. add list + detail readers to VaultService's reader maps (+ a reader module);
  *   4. add an `AGENT_ICONS` entry — icon + accent + displayName (webview/agentIcons.ts);
  *   5. add `.vault-badge--<id>` / `.vault-row-dot--<id>` / `.vault-preview--<id>`
- *      accent CSS — NOT type-checkable (it's CSS); the single manual step.
+ *      accent CSS — NOT type-checkable (it's CSS); a manual step.
+ *   6. if the CLI reads pasted images off a fixed Ctrl+V (not the OS-native
+ *      signal), add its id to `CTRL_V_AGENTS` in shared/imagePasteTrigger.ts —
+ *      also NOT compile-enforced; omitting it silently sends the wrong trigger.
  */
 export const VAULT_AGENT_IDS = ["claude", "codex", "opencode"] as const;
 export type VaultAgentId = (typeof VAULT_AGENT_IDS)[number];

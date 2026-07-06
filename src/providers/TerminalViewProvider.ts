@@ -9,10 +9,11 @@ import { buildResumeCommandString, type LaunchMode } from "../vault/LaunchBuilde
 import { readClaudeSessions, resolveClaudeSessionPath } from "../vault/readers/claudeReader";
 import { listRunningClaudeSessions } from "../vault/readers/runningSessions";
 import { resolveSubagentDetail, resolveSubagentDetailByEntryId } from "../vault/readers/subagentLookup";
+import { agentKindForExecutable } from "../vault/registry";
 import type { VaultSessionEntry } from "../vault/types";
 import type { VaultLauncher } from "../vault/VaultLauncher";
 import type { VaultService } from "../vault/VaultService";
-import { handlePasteClipboardImage } from "./clipboardImageSync";
+import { handlePasteClipboardImage, readImageFromOsClipboard } from "./clipboardImageSync";
 import { FileTreeHost } from "./fileTreeHost";
 import type { WatcherPool } from "./fsWatcherPool";
 import type { GitDecorationProvider } from "./gitDecorationProvider";
@@ -658,20 +659,36 @@ export class TerminalViewProvider implements vscode.WebviewViewProvider {
           break;
 
         case "pasteClipboardImage":
-          if (
-            typeof message.tabId === "string" &&
-            typeof message.data === "string" &&
-            typeof message.trigger === "string"
-          ) {
+          if (typeof message.tabId === "string" && typeof message.data === "string") {
+            const session = this.sessionManager.getSession(message.tabId);
+            const agentKind = session?.isAgentLaunch ? agentKindForExecutable(session.shell) : undefined;
             void handlePasteClipboardImage(
               {
                 tabId: message.tabId,
                 mimeType: typeof message.mimeType === "string" ? message.mimeType : "image/png",
                 data: message.data,
-                trigger: message.trigger,
               },
               (tabId, data) => this.sessionManager.writeToSession(tabId, data),
+              { agentKind, isMac: process.platform === "darwin" },
             );
+          }
+          break;
+
+        case "requestClipboardImagePreview":
+          if (typeof message.tabId === "string") {
+            // No agent gate: the CLI may be launched by hand (session.shell is the
+            // plain shell, not the agent executable), so we can't detect "is an
+            // agent" host-side. The webview only sends this for a macOS Ctrl+V it
+            // couldn't read itself, and readImageFromOsClipboard no-ops off macOS.
+            const tabId = message.tabId;
+            void readImageFromOsClipboard().then((img) => {
+              this.safePostMessage(webviewView.webview, {
+                type: "clipboardImagePreview",
+                tabId,
+                mimeType: img?.mimeType ?? "image/png",
+                data: img?.data ?? "",
+              });
+            });
           }
           break;
 

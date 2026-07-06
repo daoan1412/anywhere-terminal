@@ -12,6 +12,7 @@ declare function acquireVsCodeApi(): {
 };
 
 import { SerializeAddon } from "@xterm/addon-serialize";
+import { MAX_PASTE_IMAGE_BYTES } from "../shared/imagePasteTrigger";
 import type {
   ExtensionToWebViewMessage,
   HoverPreviewSettings,
@@ -23,6 +24,14 @@ import { SETI_FONT_CSS } from "../vendor/seti/setiFontCss";
 import { DragDropHandler } from "./DragDropHandler";
 import { FileTreeController } from "./fileTree/FileTreeController";
 import { FlowControl } from "./flow/FlowControl";
+import {
+  base64ToBlob,
+  extractImageBlobFromClipboardItems,
+  forwardImagePaste,
+  ImagePasteDeduper,
+  isPasteShortcut,
+  probeClipboardForImageBlob,
+} from "./imagePasteBridge";
 import type { HoverPreviewThemeKind } from "./links/HoverPreviewController";
 import { preloadSyntaxHighlighter } from "./links/syntaxRenderer";
 import { createMessageRouter } from "./messaging/MessageRouter";
@@ -36,13 +45,6 @@ import { formatRestoreDivider } from "./terminal/restoreDivider";
 import { TerminalFactory } from "./terminal/TerminalFactory";
 import { ThemeManager } from "./theme/ThemeManager";
 import { showBanner } from "./ui/BannerService";
-import {
-  extractImageBlobFromClipboardItems,
-  forwardImagePaste,
-  ImagePasteDeduper,
-  isPasteShortcut,
-  probeClipboardForImageBlob,
-} from "./imagePasteBridge";
 import { VaultPanel } from "./vault/VaultPanel";
 
 // Inject the vendored Seti icon-font @font-face rule (with the woff embedded
@@ -669,6 +671,20 @@ const routeMessage = createMessageRouter({
     // drill-down reply (routed to that block); else top-level, matched by requestId.
     factory.fillSubagentPreview(msg.requestId, msg.detail, msg.error, msg.entryId);
   },
+  onClipboardImagePreview(msg) {
+    // Host-read fallback for macOS Ctrl+V: the webview Clipboard API couldn't see
+    // the image, so cache the host-supplied bytes for hover preview only (the CLI
+    // already received the image natively via \x16).
+    if (!msg.data) {
+      return;
+    }
+    const blob = base64ToBlob(msg.data, msg.mimeType);
+    if (!blob) {
+      return;
+    }
+    const file = new File([blob], "clipboard.png", { type: blob.type || "image/png" });
+    factory.getPastedImageStore(msg.tabId)?.add(file);
+  },
   onVaultContextCwd(msg) {
     // Drop a reply for a pane that is no longer active (stale-guard): the user
     // switched panes before this resolved, and a later request owns the scope.
@@ -1084,11 +1100,29 @@ function bootstrap(): void {
   // OS clipboard out-of-band after a paste trigger (\x16 or bracketed paste).
   // The webview mirrors the blob to the host, which syncs OS clipboard + PTY.
   const imagePasteDeduper = new ImagePasteDeduper();
+  // Bumped on every paste-shortcut keydown; a probe launched under an older
+  // generation is stale (a newer Cmd+V superseded it) and must not re-forward.
+  let pasteProbeGeneration = 0;
+  // Trailing-debounce handle for the keydown clipboard probe (see below).
+  let pasteProbeTimer: ReturnType<typeof setTimeout> | undefined;
+  // Rapid Ctrl+V (vim visual-block, key-repeat) must collapse to a single probe:
+  // each macOS Ctrl+V otherwise costs the host ~2 osascript spawns just to learn
+  // there is no image. The cache is preview-only, so a small delay is invisible.
+  const PASTE_PROBE_DEBOUNCE_MS = 150;
 
-  const handleImagePasteBlob = (blob: File, targetId: string): void => {
+  // `forward` false = cache the blob for hover preview only, without asking the
+  // host to sync the OS clipboard + emit a PTY trigger. Used for macOS Ctrl+V,
+  // where xterm already delivers \x16 natively — forwarding would double-paste.
+  const handleImagePasteBlob = (blob: File, targetId: string, forward = true): void => {
+    if (blob.size > MAX_PASTE_IMAGE_BYTES) {
+      console.warn(`[AnyWhere Terminal] pasted image (${blob.size} bytes) exceeds the size cap — skipped`);
+      return;
+    }
     factory.getPastedImageStore(targetId)?.add(blob);
     imagePasteDeduper.markHandled();
-    void forwardImagePaste(blob, targetId, isMac, (msg) => vscode.postMessage(msg));
+    if (forward) {
+      void forwardImagePaste(blob, targetId, (msg) => vscode.postMessage(msg));
+    }
   };
 
   document.addEventListener(
@@ -1098,19 +1132,42 @@ function bootstrap(): void {
         return;
       }
       imagePasteDeduper.reset();
+      const probeGeneration = ++pasteProbeGeneration;
       const tabId = store.activeTabId;
       const targetId = tabId ? (store.tabActivePaneIds.get(tabId) ?? tabId) : null;
+      // macOS Ctrl+V isn't the OS paste accelerator: no `paste` event fires and
+      // xterm sends \x16, which OpenCode/Codex use to read the OS clipboard
+      // themselves. Capture the blob for preview ONLY — forwarding double-pastes.
+      const nativeDelivers = isMac && e.ctrlKey && !e.metaKey;
       if (!targetId) {
         return;
       }
-      // Fallback when Chromium never fires `paste` for image clipboards.
-      void probeClipboardForImageBlob().then((blob) => {
-        if (!blob || imagePasteDeduper.wasHandled()) {
-          return;
-        }
-        const file = blob instanceof File ? blob : new File([blob], "clipboard.png", { type: blob.type || "image/png" });
-        handleImagePasteBlob(file, targetId);
-      });
+      // Fallback when no `paste` event fires (image clipboards, or macOS Ctrl+V).
+      // Trailing-debounced so a burst of Ctrl+V collapses to one clipboard read.
+      if (pasteProbeTimer !== undefined) {
+        clearTimeout(pasteProbeTimer);
+      }
+      pasteProbeTimer = setTimeout(() => {
+        pasteProbeTimer = undefined;
+        void probeClipboardForImageBlob().then((blob) => {
+          if (probeGeneration !== pasteProbeGeneration || imagePasteDeduper.wasHandled()) {
+            return;
+          }
+          if (blob) {
+            const file =
+              blob instanceof File ? blob : new File([blob], "clipboard.png", { type: blob.type || "image/png" });
+            handleImagePasteBlob(file, targetId, !nativeDelivers);
+            return;
+          }
+          // Probe found no web-visible image. On macOS Ctrl+V the pasteboard holds
+          // the image in a format the Clipboard API hides (TIFF/screenshot/file);
+          // only the host can read it. Ask it for the preview cache (delivery to
+          // the CLI already happened natively via \x16).
+          if (nativeDelivers) {
+            vscode.postMessage({ type: "requestClipboardImagePreview", tabId: targetId });
+          }
+        });
+      }, PASTE_PROBE_DEBOUNCE_MS);
     },
     true,
   );
@@ -1119,10 +1176,7 @@ function bootstrap(): void {
     "paste",
     (e: ClipboardEvent) => {
       const items = e.clipboardData?.items;
-      if (!items) {
-        return;
-      }
-      const blob = extractImageBlobFromClipboardItems(items);
+      const blob = items ? extractImageBlobFromClipboardItems(items) : null;
       if (!blob) {
         return;
       }
@@ -1133,6 +1187,10 @@ function bootstrap(): void {
       }
       // Consume image paste so xterm does not also emit an empty bracketed paste
       // (double-trigger). Text paste is unchanged — this handler returns early.
+      // This `paste` event is authoritative: it fires before the keydown
+      // fallback's async clipboard probe resolves, and the probe defers to it via
+      // its own `wasHandled()` check — so this handler must never gate on the
+      // (sticky) dedup flag, or a context-menu paste with no keydown gets dropped.
       e.preventDefault();
       e.stopPropagation();
       handleImagePasteBlob(blob, targetId);

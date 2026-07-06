@@ -6,6 +6,7 @@
 // See: docs/design/message-protocol.md
 
 import type {
+  ClipboardImagePreviewMessage,
   CloseSplitPaneByIdMessage,
   ConfigUpdateMessage,
   CtxClearMessage,
@@ -99,6 +100,8 @@ export interface MessageHandlers {
   // ── Subagent preview popup (preview-subagent-popup) ──
   // Optional: a webview with no terminal factory mounted safely ignores it.
   onSubagentPreviewResponse?(msg: SubagentPreviewResponseMessage): void;
+  // ── Pasted-image preview, host-read fallback (macOS Ctrl+V) ──
+  onClipboardImagePreview?(msg: ClipboardImagePreviewMessage): void;
 }
 
 // ─── Factory ────────────────────────────────────────────────────────
@@ -223,6 +226,9 @@ export function createMessageRouter(handlers: MessageHandlers): (msg: ExtensionT
         break;
       case "subagentPreviewResponse":
         handlers.onSubagentPreviewResponse?.(msg);
+        break;
+      case "clipboardImagePreview":
+        handlers.onClipboardImagePreview?.(msg);
         break;
       case "init":
         // init is handled directly by main.ts — not routed

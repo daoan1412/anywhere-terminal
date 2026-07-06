@@ -37,6 +37,25 @@ describe("PastedImageStore.add", () => {
   });
 });
 
+describe("PastedImageStore.add (memory cap)", () => {
+  it("caps retained entries at 16, revoking the evicted head LRU-style", () => {
+    const store = new PastedImageStore();
+    for (let i = 0; i < 20; i++) {
+      store.add(pngBlob(1)); // urls blob:mock/1..20
+    }
+    // 20 − 16 = 4 oldest evicted + revoked; newer ones retained.
+    expect(revokeSpy).toHaveBeenCalledTimes(4);
+    expect(revokeSpy).toHaveBeenCalledWith("blob:mock/1");
+    expect(revokeSpy).toHaveBeenCalledWith("blob:mock/4");
+    expect(revokeSpy).not.toHaveBeenCalledWith("blob:mock/5");
+
+    const next = store.add(pngBlob(1)); // 21st: evicts blob:mock/5
+    expect(next.index).toBe(21); // index keeps counting past eviction
+    expect(revokeSpy).toHaveBeenCalledWith("blob:mock/5");
+    expect(store.resolveRecent(0, 1)).toBe(next);
+  });
+});
+
 describe("PastedImageStore.resolveRecent (D3 — recency-anchored)", () => {
   it("returns null when the cache is empty", () => {
     expect(new PastedImageStore().resolveRecent(0, 1)).toBeNull();

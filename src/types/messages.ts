@@ -465,8 +465,29 @@ export interface PasteClipboardImageMessage {
   mimeType: string;
   /** Base64-encoded image bytes from the webview clipboard. */
   data: string;
-  /** Raw PTY trigger after sync (`\x16` on Linux, empty bracketed paste on macOS). */
-  trigger: string;
+}
+
+/**
+ * Webview → host: read the current OS clipboard image so the webview can cache
+ * it for hover preview. Used for macOS Ctrl+V into OpenCode/Codex, where the CLI
+ * reads the pasteboard natively but the webview Clipboard API can't see the
+ * image (non-web format) — only the host can. The host always replies with
+ * `clipboardImagePreview`; its `data` is "" when the clipboard holds no image.
+ * Not gated — `readImageFromOsClipboard` is a no-op off macOS.
+ */
+export interface RequestClipboardImagePreviewMessage {
+  type: "requestClipboardImagePreview";
+  /** Active pane session id — echoed back so the reply routes to the right store. */
+  tabId: string;
+}
+
+/** Host → webview: OS clipboard image bytes for the preview cache (reply to the above). */
+export interface ClipboardImagePreviewMessage {
+  type: "clipboardImagePreview";
+  tabId: string;
+  mimeType: string;
+  /** Base64-encoded image bytes read from the OS clipboard by the host; "" on miss. */
+  data: string;
 }
 
 export interface RequestSubagentPreviewMessage {
@@ -534,7 +555,8 @@ export type WebViewToExtensionMessage =
   | VaultCopyFilePathMessage
   | RequestVaultContextCwdMessage
   | RequestSubagentPreviewMessage
-  | PasteClipboardImageMessage;
+  | PasteClipboardImageMessage
+  | RequestClipboardImagePreviewMessage;
 
 /**
  * Webview → Extension. Sent by the editor webview after it has merged the
@@ -1092,6 +1114,7 @@ export type ExtensionToWebViewMessage =
   | VaultSessionDetailResponseMessage
   | VaultContextCwdMessage
   | SubagentPreviewResponseMessage
+  | ClipboardImagePreviewMessage
   | OpenVaultMessage;
 
 /**

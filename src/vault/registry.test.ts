@@ -5,6 +5,7 @@ import { AGENT_ICONS } from "../webview/vault/agentIcons";
 import {
   AGENT_DEFINITIONS,
   AGENT_REGISTRY,
+  agentKindForExecutable,
   CLAUDE_AUTH_ENV_ALLOWLIST,
   getAgentDefinition,
   VAULT_AGENT_IDS,
@@ -103,5 +104,26 @@ describe("AGENT_REGISTRY", () => {
 
   it("getAgentDefinition returns undefined for unknown agents", () => {
     expect(getAgentDefinition("nope")).toBeUndefined();
+  });
+});
+
+describe("agentKindForExecutable", () => {
+  it("maps bare command names to the agent id", () => {
+    expect(agentKindForExecutable("claude")).toBe("claude");
+    expect(agentKindForExecutable("codex")).toBe("codex");
+    expect(agentKindForExecutable("opencode")).toBe("opencode");
+  });
+
+  it("strips directories and platform suffixes", () => {
+    expect(agentKindForExecutable("/usr/local/bin/codex")).toBe("codex");
+    expect(agentKindForExecutable("C:\\Program Files\\opencode\\opencode.cmd")).toBe("opencode");
+    expect(agentKindForExecutable("Claude.EXE")).toBe("claude");
+  });
+
+  it("returns undefined for shells, empty, or unknown commands", () => {
+    expect(agentKindForExecutable("/bin/zsh")).toBeUndefined();
+    expect(agentKindForExecutable("grok")).toBeUndefined();
+    expect(agentKindForExecutable("")).toBeUndefined();
+    expect(agentKindForExecutable(undefined)).toBeUndefined();
   });
 });

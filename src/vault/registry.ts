@@ -122,3 +122,25 @@ export const AGENT_DEFINITIONS: AgentVaultDefinition[] = VAULT_AGENT_IDS.map((id
 export function getAgentDefinition(id: string): AgentVaultDefinition | undefined {
   return AGENT_REGISTRY[id];
 }
+
+/**
+ * Map a launched executable (a session's `shell`) back to its agent id, e.g.
+ * "codex" / "/usr/local/bin/opencode" / "claude.cmd" → the VaultAgentId. Used to
+ * pick the correct image-paste PTY trigger per running CLI. Returns undefined for
+ * plain shells and unknown commands.
+ */
+export function agentKindForExecutable(executable: string | undefined): VaultAgentId | undefined {
+  if (!executable) {
+    return undefined;
+  }
+  const base = executable
+    .replace(/\\/g, "/")
+    .split("/")
+    .pop()
+    ?.replace(/\.(exe|cmd|bat|ps1)$/i, "")
+    .toLowerCase();
+  if (!base) {
+    return undefined;
+  }
+  return AGENT_DEFINITIONS.find((d) => d.id === base || d.detect.executable.toLowerCase() === base)?.id;
+}
