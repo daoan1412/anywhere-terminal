@@ -4,6 +4,19 @@ All notable changes to **AnyWhere Terminal** are documented in this file.
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.17.7] — 2026-07-08
+
+### Added
+
+- **Rename any session in the AI Vault.** Right-click a session — Claude Code, Codex, or OpenCode — and give it a name that sticks. For Codex and OpenCode, whose CLIs keep a real, user-editable title, the new name is written straight into the CLI's own store (its SQLite index) with a WAL-safe, parameterized write, so the rename is authoritative everywhere — the CLI shows it too, not just the vault. Claude Code has no writable title field (its title is derived from the summary/first prompt), so its rename is kept as a private overlay inside the extension. If a native write can't land — the store is locked or the row is gone — the vault falls back to the overlay so your name still shows.
+- **The vault is now live.** The session list auto-refreshes whenever any agent writes to its store on disk, so it stays current without a manual refresh (the refresh button remains as a fallback). Open a session's preview and it follows along: new messages append and auto-scroll while you're at the bottom, and a "N new messages" pill appears if you've scrolled up.
+- **More detail in the session preview.** Each assistant message now shows the model it used and its token usage (plus the context-window size where the agent records it), and the preview header shows the session's git branch as a chip for the agents that record it (Claude Code, Codex).
+- **A gentle highlight when something changes.** When a session in the list updates, or a new message lands in the open preview, it briefly glows in that agent's accent color and fades away — a quiet cue that something moved, easy to notice without pulling your focus. It honors the system "reduce motion" setting.
+
+### Fixed
+
+- **Pasting an image into Claude Code on Windows now works.** Claude Code binds image paste to **Alt+V** on Windows — plain Ctrl+V there is an ordinary text paste that never reads the clipboard image (Claude just prints "No image found in clipboard. Use alt+v…"). The extension had been sending Ctrl+V on every non-macOS platform, so image paste silently did nothing for Claude on Windows. The paste signal is now chosen per platform — empty bracketed paste on macOS, Alt+V on Windows, Ctrl+V on Linux — while Codex and OpenCode keep their fixed Ctrl+V everywhere. macOS and Linux behavior is unchanged.
+
 ## [0.17.6] — 2026-07-07
 
 ### Added
