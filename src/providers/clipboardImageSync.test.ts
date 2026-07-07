@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { BRACKETED_EMPTY_PASTE, CTRL_V_PASTE } from "../shared/imagePasteTrigger";
+import { ALT_V_PASTE, BRACKETED_EMPTY_PASTE, CTRL_V_PASTE } from "../shared/imagePasteTrigger";
 import { handlePasteClipboardImage, readImageFromOsClipboard } from "./clipboardImageSync";
 
 const mocks = vi.hoisted(() => ({
@@ -46,7 +46,7 @@ describe("handlePasteClipboardImage", () => {
     // Codex keys off a fixed Ctrl+V even on macOS.
     await handlePasteClipboardImage({ tabId: "session-a", mimeType: "image/png", data: PNG_BASE64 }, writeToSession, {
       agentKind: "codex",
-      isMac: true,
+      platform: "darwin",
     });
 
     expect(writeToSession).toHaveBeenCalledWith("session-a", CTRL_V_PASTE);
@@ -57,10 +57,21 @@ describe("handlePasteClipboardImage", () => {
 
     await handlePasteClipboardImage({ tabId: "session-a", mimeType: "image/png", data: PNG_BASE64 }, writeToSession, {
       agentKind: "claude",
-      isMac: true,
+      platform: "darwin",
     });
 
     expect(writeToSession).toHaveBeenCalledWith("session-a", BRACKETED_EMPTY_PASTE);
+  });
+
+  it("sends Alt+V for Claude on Windows (Ctrl+V there is a plain paste)", async () => {
+    const writeToSession = vi.fn();
+
+    await handlePasteClipboardImage({ tabId: "session-a", mimeType: "image/png", data: PNG_BASE64 }, writeToSession, {
+      agentKind: "claude",
+      platform: "win32",
+    });
+
+    expect(writeToSession).toHaveBeenCalledWith("session-a", ALT_V_PASTE);
   });
 
   it("still fires the PTY trigger when the OS clipboard write fails", async () => {
@@ -72,7 +83,7 @@ describe("handlePasteClipboardImage", () => {
 
     await handlePasteClipboardImage({ tabId: "session-a", mimeType: "image/png", data: PNG_BASE64 }, writeToSession, {
       agentKind: "codex",
-      isMac: true,
+      platform: "darwin",
     });
 
     expect(writeToSession).toHaveBeenCalledWith("session-a", CTRL_V_PASTE);
@@ -84,7 +95,7 @@ describe("handlePasteClipboardImage", () => {
     await handlePasteClipboardImage(
       { tabId: "session-a", mimeType: "image/png", data: "%%%not-base64%%%" },
       writeToSession,
-      { isMac: false },
+      { platform: "win32" },
     );
 
     expect(writeToSession).not.toHaveBeenCalled();

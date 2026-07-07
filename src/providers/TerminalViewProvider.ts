@@ -669,7 +669,7 @@ export class TerminalViewProvider implements vscode.WebviewViewProvider {
                 data: message.data,
               },
               (tabId, data) => this.sessionManager.writeToSession(tabId, data),
-              { agentKind, isMac: process.platform === "darwin" },
+              { agentKind, platform: process.platform },
             );
           }
           break;

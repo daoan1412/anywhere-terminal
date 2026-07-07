@@ -1,0 +1,16 @@
+# Normalize all text to LF in the repo and working tree. Matches Biome's
+# lineEnding: "lf" so `biome format` on Windows no longer flips the whole tree
+# CRLF -> LF against a core.autocrlf=true checkout.
+* text=auto eol=lf
+
+# Binary assets: never touch line endings.
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.webp binary
+*.ico binary
+*.vsix binary
+*.woff binary
+*.woff2 binary
+*.ttf binary

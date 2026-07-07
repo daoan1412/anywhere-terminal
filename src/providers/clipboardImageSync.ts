@@ -278,8 +278,8 @@ export interface PasteClipboardImagePayload {
 export interface PasteClipboardImageContext {
   /** Running CLI in this session, when it is a vault agent launch. */
   agentKind?: string;
-  /** Whether the extension host (where the CLI runs) is macOS. */
-  isMac?: boolean;
+  /** Platform of the extension host (where the CLI runs). Picks the PTY trigger. */
+  platform?: NodeJS.Platform;
 }
 
 /**
@@ -311,6 +311,6 @@ export async function handlePasteClipboardImage(
   const mimeType = payload.mimeType?.trim() || "image/png";
   await writeImageToOsClipboard(mimeType, buffer);
 
-  const isMac = context.isMac ?? process.platform === "darwin";
-  writeToSession(tabId, getImagePastePtyTrigger(context.agentKind, isMac));
+  const platform = context.platform ?? process.platform;
+  writeToSession(tabId, getImagePastePtyTrigger(context.agentKind, platform));
 }
