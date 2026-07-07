@@ -308,3 +308,104 @@ async function readSqliteViaCopy(
     }
   }
 }
+
+// ── WRITE PATH (write-vault-rename-to-store D2) ──────────────────────────────
+// The read path above queries a TEMP COPY on purpose, so a write there would be
+// discarded. A rename must instead mutate the LIVE store: open it read-write via
+// `node:sqlite` with a short `busy_timeout` (so a running agent's WAL lock doesn't
+// fail the write) and run ONE parameterized UPDATE in autocommit — the name is a
+// BOUND parameter, never interpolated. `node:sqlite`-only: the `sqlite3` CLI's
+// parameter binding is clunky/injection-prone, and the host Node 22 runtime
+// (engines.vscode ^1.105) guarantees the built-in. When it's unavailable the write
+// is a no-op (`no-sqlite3`) and the caller falls back to the sidecar overlay,
+// preserving the read-only guarantee. Never throws.
+
+export type SqliteWriteStatus = "ok" | "no-sqlite3" | "no-db" | "not-found" | "write-error";
+export type SqliteWriteParam = string | number;
+
+export interface SqliteWriteResult {
+  status: SqliteWriteStatus;
+  /** Rows modified by the UPDATE (0 → `not-found`). */
+  changes: number;
+  /** Populated only for `write-error`. */
+  error?: string;
+}
+
+/** Injectable IO for the write path — tests stub this to avoid a real DB. */
+export interface SqliteWriteDeps {
+  exists(p: string): Promise<boolean>;
+  /** Whether `node:sqlite` is usable; defaults to the memoized real probe. */
+  hasNodeSqlite?(): Promise<boolean>;
+  /** Run the parameterized UPDATE against the LIVE db; defaults to the real engine. */
+  runNodeWrite?(dbPath: string, sql: string, params: SqliteWriteParam[]): Promise<SqliteWriteResult>;
+}
+
+const defaultWriteDeps: SqliteWriteDeps = { exists: defaultDeps.exists };
+
+/** Cap the synchronous write's WAL-lock wait. `node:sqlite` is synchronous, so
+ *  this bounds how long a `run()` can block the extension-host event loop under
+ *  lock contention. Kept short (2s, not the agents' own 5s) because a rename is
+ *  best-effort — on timeout the write degrades to the sidecar overlay, which is far
+ *  better than freezing the UI (review S3). Agent write-locks are sub-100ms, so
+ *  this ceiling is essentially never reached in practice. */
+const WRITE_BUSY_TIMEOUT_MS = 2000;
+
+/**
+ * Run a parameterized `UPDATE` against the LIVE db at `dbPath` via `node:sqlite`,
+ * read-write, with a short `busy_timeout`. `changes === 0` maps to `not-found`
+ * (the row/id isn't present); any throw (incl. `no such table` if the file was
+ * created empty by a race) maps to `write-error`. Never throws.
+ */
+async function defaultRunNodeWrite(
+  dbPath: string,
+  sql: string,
+  params: SqliteWriteParam[],
+): Promise<SqliteWriteResult> {
+  try {
+    const { DatabaseSync } = await import("node:sqlite");
+    const db = new DatabaseSync(dbPath); // read-write (default open mode)
+    try {
+      db.exec(`PRAGMA busy_timeout = ${WRITE_BUSY_TIMEOUT_MS}`);
+      const info = db.prepare(sql).run(...params);
+      const changes = Number(info.changes);
+      return { status: changes > 0 ? "ok" : "not-found", changes };
+    } finally {
+      db.close();
+    }
+  } catch (err) {
+    return { status: "write-error", changes: 0, error: errorMessage(err) };
+  }
+}
+
+/**
+ * Write `sql` (a STATIC parameterized statement, e.g.
+ * `UPDATE session SET title = ? WHERE id = ?`) to the LIVE SQLite store at
+ * `dbPath` with `params` bound positionally. Never throws — every failure maps to
+ * a status:
+ * - `no-sqlite3` — the `node:sqlite` engine is unavailable (→ overlay fallback)
+ * - `no-db`      — the store file is absent
+ * - `not-found`  — the statement matched no row (`changes === 0`)
+ * - `write-error`— the write threw (the `error` field carries detail)
+ * - `ok`         — the row was updated (`changes > 0`)
+ */
+export async function writeSqlite(
+  dbPath: string,
+  sql: string,
+  params: SqliteWriteParam[],
+  deps: SqliteWriteDeps = defaultWriteDeps,
+): Promise<SqliteWriteResult> {
+  const hasNode = deps.hasNodeSqlite ? await deps.hasNodeSqlite() : await probeNodeSqlite(defaultDeps);
+  if (!hasNode) {
+    return { status: "no-sqlite3", changes: 0 };
+  }
+  let exists = false;
+  try {
+    exists = await deps.exists(dbPath);
+  } catch {
+    exists = false;
+  }
+  if (!exists) {
+    return { status: "no-db", changes: 0 };
+  }
+  return (deps.runNodeWrite ?? defaultRunNodeWrite)(dbPath, sql, params);
+}

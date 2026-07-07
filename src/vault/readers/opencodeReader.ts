@@ -10,7 +10,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import type { ReaderListCache, ReaderResultWithState } from "../cacheTypes";
 import { boundedPreview } from "../preview";
-import { readSqlite } from "../sqlite";
+import { readSqlite, writeSqlite } from "../sqlite";
 import { sameStamps, stampStoreFiles } from "../storeStamp";
 import {
   formatEntryId,
@@ -73,6 +73,8 @@ export interface OpenCodeReaderOptions {
   dataDir?: string;
   /** Injectable for tests; defaults to the real WAL-safe reader. */
   readSqliteFn?: typeof readSqlite;
+  /** Injectable for tests; defaults to the real live-DB writer. */
+  writeSqliteFn?: typeof writeSqlite;
 }
 
 function asString(v: unknown): string | undefined {
@@ -189,6 +191,35 @@ function resolveOpencodePaths(options: OpenCodeReaderOptions): {
 export function opencodeStoreDirs(options: OpenCodeReaderOptions = {}): { dbPath: string; dataDir: string } {
   const { dbPath } = resolveOpencodePaths(options);
   return { dbPath, dataDir: path.dirname(dbPath) };
+}
+
+/**
+ * Write a user-chosen title into OpenCode's own store (`session.title`), keyed by
+ * session id (write-vault-rename-to-store D1/D2). `name` is bound as a parameter;
+ * `sessionId` is guarded by `isSafeOpenCodeId` first. The write is scoped to ROOT
+ * sessions (`parent_id IS NULL OR parent_id = ''`) — the same visibility as the
+ * list query — so a forged/stale id for a hidden child (subagent) session can't
+ * mutate its title (review W2). Returns true iff a row was updated — false (→
+ * overlay fallback) for an unsafe id, a non-root id, or any non-`ok` write status.
+ * OpenCode's `ensureTitle` only runs while the title is its default placeholder, so
+ * an explicit title set here is not auto-regenerated.
+ */
+export async function renameOpenCodeSession(
+  sessionId: string,
+  name: string,
+  options: OpenCodeReaderOptions = {},
+): Promise<boolean> {
+  if (!isSafeOpenCodeId(sessionId)) {
+    return false;
+  }
+  const { dbPath } = resolveOpencodePaths(options);
+  const writeFn = options.writeSqliteFn ?? writeSqlite;
+  const result = await writeFn(
+    dbPath,
+    "UPDATE session SET title = ? WHERE id = ? AND (parent_id IS NULL OR parent_id = '')",
+    [name, sessionId],
+  );
+  return result.status === "ok" && result.changes > 0;
 }
 
 export async function readOpenCodeSessions(

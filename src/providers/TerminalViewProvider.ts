@@ -10,7 +10,8 @@ import { readClaudeSessions, resolveClaudeSessionPath } from "../vault/readers/c
 import { listRunningClaudeSessions } from "../vault/readers/runningSessions";
 import { resolveSubagentDetail, resolveSubagentDetailByEntryId } from "../vault/readers/subagentLookup";
 import { agentKindForExecutable } from "../vault/registry";
-import type { VaultSessionEntry } from "../vault/types";
+import { parseEntryId, type VaultSessionEntry } from "../vault/types";
+import { normalizeVaultCustomName } from "../vault/VaultCustomNameRegistry";
 import type { VaultLauncher } from "../vault/VaultLauncher";
 import type { VaultService } from "../vault/VaultService";
 import { handlePasteClipboardImage, readImageFromOsClipboard } from "./clipboardImageSync";
@@ -491,17 +492,60 @@ export class TerminalViewProvider implements vscode.WebviewViewProvider {
   }
 
   /**
-   * Set/clear a session's user custom name (enhance-vault-sessions D1/3_2) and
-   * push the overlaid list back. Routes through `_vaultRefreshSeq` so the rename
-   * push wins over any older in-flight refresh. Empty name clears → derived title
-   * returns. Served from `listCached()` (instant, overlaid); falls back to a full
-   * `refresh()` only when there is no cache yet.
+   * Rename a vault session (write-vault-rename-to-store D1/D3/D4). The name is
+   * normalized once (trim + cap) and routed by agent:
+   * - opencode/codex + non-empty name → write the real title into the agent's own
+   *   SQLite store. On success the agent title is authoritative, so any sidecar
+   *   overlay for this entry is cleared and the list is force-refreshed (a fresh
+   *   read strictly after the write, never a pre-write in-flight one).
+   * - native write failure, an empty (clearing) name, or claude/unknown agents →
+   *   the sidecar overlay path (unchanged): served from `listCached()` instantly,
+   *   falling back to `refresh()` when there is no cache yet.
+   * Routes through `_vaultRefreshSeq` so the rename push wins over an older refresh.
    */
   private async handleVaultRenameSession(entryId: string, name: string, webview: vscode.Webview): Promise<void> {
     if (!this.vaultService) {
       return;
     }
-    this.vaultService.setCustomName(entryId, name);
+    const normalized = normalizeVaultCustomName(name);
+    const agent = parseEntryId(entryId)?.agent;
+    const isSqliteAgent = agent === "opencode" || agent === "codex";
+
+    if (isSqliteAgent && normalized !== null) {
+      let wrote = false;
+      try {
+        wrote = await this.vaultService.writeNativeTitle(entryId, normalized);
+      } catch (err) {
+        console.error("[AnyWhere Terminal] Native vault rename failed:", err);
+      }
+      if (wrote) {
+        // Agent-owned title is now the single source of truth — drop any overlay
+        // for this entry and re-read the store fresh (force: skip a possibly
+        // pre-write in-flight refresh so the new title actually surfaces).
+        this.vaultService.setCustomName(entryId, "");
+        const token = ++this._vaultRefreshSeq;
+        try {
+          const result = await this.vaultService.refresh({ force: true });
+          if (token === this._vaultRefreshSeq) {
+            this.safePostMessage(webview, { type: "vaultSessionsResponse", result, fromCache: false });
+          }
+        } catch (err) {
+          console.error("[AnyWhere Terminal] Failed to refresh vault after native rename:", err);
+          // Best-effort: serve the cached list so the panel isn't left spinning —
+          // the native title lands on the next store-watcher refresh (review S2).
+          const cached = this.vaultService.listCached();
+          if (cached && token === this._vaultRefreshSeq) {
+            this.safePostMessage(webview, { type: "vaultSessionsResponse", result: cached, fromCache: true });
+          }
+        }
+        return;
+      }
+      // Native write did not stick → fall through to the overlay so the user still
+      // sees their name.
+    }
+
+    // Overlay path: claude/unknown agent, an empty (clearing) name, or native fallback.
+    this.vaultService.setCustomName(entryId, normalized ?? "");
     const token = ++this._vaultRefreshSeq;
     const cached = this.vaultService.listCached();
     if (cached) {

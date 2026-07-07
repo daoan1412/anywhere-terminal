@@ -1,5 +1,10 @@
 import { describe, expect, it } from "vitest";
-import { type VaultCustomNameStorage, VaultCustomNameRegistry } from "./VaultCustomNameRegistry";
+import {
+  CUSTOM_NAME_MAX_LENGTH,
+  normalizeVaultCustomName,
+  type VaultCustomNameStorage,
+  VaultCustomNameRegistry,
+} from "./VaultCustomNameRegistry";
 
 function fakeStorage(initial?: Record<string, unknown>): {
   storage: VaultCustomNameStorage;
@@ -59,5 +64,25 @@ describe("VaultCustomNameRegistry", () => {
     const { storage } = fakeStorage({ "anywhereTerminal.vaultCustomNames": ["not", "a", "map"] });
     const reg = new VaultCustomNameRegistry(storage);
     expect(reg.all()).toEqual({});
+  });
+});
+
+describe("normalizeVaultCustomName (shared by overlay + native write)", () => {
+  it("trims surrounding whitespace", () => {
+    expect(normalizeVaultCustomName("  hello  ")).toBe("hello");
+  });
+
+  it("returns null for empty-after-trim", () => {
+    expect(normalizeVaultCustomName("   ")).toBeNull();
+    expect(normalizeVaultCustomName("")).toBeNull();
+  });
+
+  it("caps at CUSTOM_NAME_MAX_LENGTH", () => {
+    const out = normalizeVaultCustomName("x".repeat(200));
+    expect(out).toHaveLength(CUSTOM_NAME_MAX_LENGTH);
+  });
+
+  it("leaves a within-cap name unchanged", () => {
+    expect(normalizeVaultCustomName("Renamed session")).toBe("Renamed session");
   });
 });

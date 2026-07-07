@@ -14,7 +14,7 @@ import * as path from "node:path";
 import * as readline from "node:readline";
 import type { ReaderListCache, ReaderResultWithState } from "../cacheTypes";
 import { boundedPreview } from "../preview";
-import { readSqlite } from "../sqlite";
+import { readSqlite, writeSqlite } from "../sqlite";
 import { sameStamps, stampStoreFiles } from "../storeStamp";
 import {
   formatEntryId,
@@ -71,6 +71,8 @@ export interface CodexReaderOptions {
   codexDir?: string;
   /** Injectable for tests; defaults to the real WAL-safe reader. */
   readSqliteFn?: typeof readSqlite;
+  /** Injectable for tests; defaults to the real live-DB writer. */
+  writeSqliteFn?: typeof writeSqlite;
 }
 
 function asString(v: unknown): string | undefined {
@@ -466,6 +468,29 @@ function codexDirs(options: CodexReaderOptions): { dbPath: string; sessionsDir: 
  *  single source of truth so watchers don't drift from the reader's resolution. */
 export function codexStoreDirs(options: CodexReaderOptions = {}): { dbPath: string; sessionsDir: string } {
   return codexDirs(options);
+}
+
+/**
+ * Write a user-chosen title into Codex's own store (`threads.title`), keyed by
+ * thread id and scoped `AND archived = 0` so a stale/forged id can't rename an
+ * archived (list-hidden) thread (write-vault-rename-to-store D1/D3). `name` is a
+ * bound parameter; `id` is guarded by `isSafeCodexId` first. Returns true iff a
+ * row was updated — false (→ overlay fallback) otherwise. DB-only: the vault reads
+ * `threads.title`, which reconcile preserves via `prefer_existing_explicit_title`;
+ * Codex's `session_index.jsonl` is intentionally not mirrored (see design Risk Map).
+ */
+export async function renameCodexThread(
+  threadId: string,
+  name: string,
+  options: CodexReaderOptions = {},
+): Promise<boolean> {
+  if (!isSafeCodexId(threadId)) {
+    return false;
+  }
+  const { dbPath } = codexDirs(options);
+  const writeFn = options.writeSqliteFn ?? writeSqlite;
+  const result = await writeFn(dbPath, "UPDATE threads SET title = ? WHERE id = ? AND archived = 0", [name, threadId]);
+  return result.status === "ok" && result.changes > 0;
 }
 
 export async function readCodexSessions(

@@ -14,18 +14,19 @@ import {
 import { canForkOpenCode } from "./forkSupport";
 import { claudeRoots, resolveClaudeSessionPath } from "./readers/claudePaths";
 import { readClaudeDetail, readClaudeEntry, readClaudeSessions } from "./readers/claudeReader";
-import { codexStoreDirs, readCodexDetail, readCodexEntry, readCodexSessions } from "./readers/codexReader";
+import { codexStoreDirs, readCodexDetail, readCodexEntry, readCodexSessions, renameCodexThread } from "./readers/codexReader";
 import { clampDetailLimit } from "./readers/detail";
 import {
   opencodeStoreDirs,
   readOpenCodeDetail,
   readOpenCodeEntry,
   readOpenCodeSessions,
+  renameOpenCodeSession,
 } from "./readers/opencodeReader";
 import { getAgentDefinition, VAULT_AGENT_IDS, type VaultAgentId } from "./registry";
 import { parseEntryId, type VaultListResult, type VaultSessionDetail, type VaultSessionEntry } from "./types";
 import type { VaultCacheStore } from "./VaultCacheStore";
-import type { VaultCustomNameRegistry } from "./VaultCustomNameRegistry";
+import { normalizeVaultCustomName, type VaultCustomNameRegistry } from "./VaultCustomNameRegistry";
 
 // Agent identity is a single source of truth in `registry.ts`: `VaultAgentId`
 // is derived from `VAULT_AGENT_IDS`, and the keyed reader records below are
@@ -57,6 +58,11 @@ export type VaultDetailReaders = Record<
  *  Backs `getEntry`, the fast path for resume/fork. */
 export type VaultEntryReaders = Record<VaultAgentId, (sessionId: string) => Promise<VaultSessionEntry | null>>;
 
+/** Writes a user-chosen title into an agent's own store; true iff a row was
+ *  updated (write-vault-rename-to-store D1). Only the SQLite agents have one —
+ *  Claude has no writable title field. */
+export type VaultNativeRenamer = (sessionId: string, name: string) => Promise<boolean>;
+
 export interface VaultServiceDeps {
   readers?: VaultReaders;
   detailReaders?: VaultDetailReaders;
@@ -75,6 +81,12 @@ export interface VaultServiceDeps {
    * the cache. When omitted, no overlay is applied.
    */
   customNames?: VaultCustomNameRegistry;
+  /**
+   * Per-agent native title writers (write-vault-rename-to-store D1). Only opencode
+   * and codex have one; claude is absent (no writable title field). Injectable for
+   * tests; defaults to the real reader writers.
+   */
+  nativeRenamers?: Partial<Record<VaultAgentId, VaultNativeRenamer>>;
 }
 
 // Readers stay option-first for back-compat; adapt them to the prev-only ListReader
@@ -97,6 +109,12 @@ const defaultEntryReaders = {
   opencode: (sessionId) => readOpenCodeEntry(sessionId),
 } satisfies VaultEntryReaders;
 
+/** Native title writers — only the SQLite agents (claude has no writable title). */
+const defaultNativeRenamers: Partial<Record<VaultAgentId, VaultNativeRenamer>> = {
+  codex: (sessionId, name) => renameCodexThread(sessionId, name),
+  opencode: (sessionId, name) => renameOpenCodeSession(sessionId, name),
+};
+
 /** A directory + glob to hand to `WatcherPool.subscribePattern` (enhance-vault-sessions
  *  D4/D5). Resolved from the reader path helpers so watch targets never drift. */
 export interface VaultWatchTarget {
@@ -117,6 +135,7 @@ export class VaultService {
   private readonly canForkOpenCodeFn: (minVersion: string) => Promise<boolean>;
   private readonly cacheStore?: VaultCacheStore;
   private readonly customNames?: VaultCustomNameRegistry;
+  private readonly nativeRenamers: Partial<Record<VaultAgentId, VaultNativeRenamer>>;
 
   /** In-memory copy of the persisted cache, lazily loaded from `cacheStore`. */
   private mem: VaultListCacheFileV1 | null = null;
@@ -131,6 +150,7 @@ export class VaultService {
     this.canForkOpenCodeFn = deps.canForkOpenCodeFn ?? ((min) => canForkOpenCode(min));
     this.cacheStore = deps.cacheStore;
     this.customNames = deps.customNames;
+    this.nativeRenamers = deps.nativeRenamers ?? defaultNativeRenamers;
   }
 
   /**
@@ -140,6 +160,27 @@ export class VaultService {
    */
   setCustomName(entryId: string, name: string): void {
     this.customNames?.set(entryId, name);
+  }
+
+  /**
+   * Write a user-chosen title into the agent's OWN store for a SQLite agent
+   * (opencode/codex), keyed off the entry id's agent (write-vault-rename-to-store
+   * D1). Returns true iff a store row was updated; false for claude/unknown agents,
+   * an empty (after-trim) name, or any failed write — the caller then falls back to
+   * the sidecar overlay. The name is normalized (trim + cap) here too so the store
+   * title obeys the same bound regardless of caller (review S1).
+   */
+  async writeNativeTitle(entryId: string, name: string): Promise<boolean> {
+    const normalized = normalizeVaultCustomName(name);
+    if (normalized === null) {
+      return false;
+    }
+    const parsed = parseEntryId(entryId);
+    if (!parsed || !isVaultAgentId(parsed.agent)) {
+      return false;
+    }
+    const renamer = this.nativeRenamers[parsed.agent];
+    return renamer ? renamer(parsed.sessionId, normalized) : false;
   }
 
   /**
@@ -273,9 +314,18 @@ export class VaultService {
    * promise resolves so a later refresh can never persist ahead of an earlier one
    * and overwrite it with stale data; a write failure is logged, not thrown.
    */
-  async refresh(): Promise<VaultListResult> {
-    if (this.inflightRefresh) {
+  async refresh(opts?: { force?: boolean }): Promise<VaultListResult> {
+    if (this.inflightRefresh && !opts?.force) {
+      // Default: concurrent callers share the in-flight read.
       return this.inflightRefresh;
+    }
+    // `force` (used right after a native title write) must NOT join an in-flight
+    // read — it may have started BEFORE the write and would return the pre-write
+    // title. Drain ALL in-flight reads (including one a concurrent force started)
+    // so this read begins strictly after the write, and force refreshes stay
+    // serialized — never two `run`s persisting out of order (D4, review W1).
+    while (this.inflightRefresh) {
+      await this.inflightRefresh.catch(() => {});
     }
     const run = (async (): Promise<VaultListResult> => {
       this.ensureMemLoaded();
@@ -296,7 +346,10 @@ export class VaultService {
     try {
       return await run;
     } finally {
-      this.inflightRefresh = null;
+      // Only clear if still ours — a concurrent force-refresh may have replaced it.
+      if (this.inflightRefresh === run) {
+        this.inflightRefresh = null;
+      }
     }
   }
 

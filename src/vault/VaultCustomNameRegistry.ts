@@ -7,7 +7,21 @@
 // overlay in VaultService — it NEVER writes an agent's own session store.
 
 /** Hard cap for a custom name; longer input is silently truncated. Mirrors CustomNameRegistry. */
-const CUSTOM_NAME_MAX_LENGTH = 80;
+export const CUSTOM_NAME_MAX_LENGTH = 80;
+
+/**
+ * Normalize a user-supplied vault name: trim, then cap at CUSTOM_NAME_MAX_LENGTH.
+ * Returns null when empty after trimming (the caller clears the name). Shared by
+ * this registry AND the rename handler's native-write path so a natively-written
+ * title gets the exact same trim + cap as an overlay name (write-vault-rename-to-store D3).
+ */
+export function normalizeVaultCustomName(input: string): string | null {
+  const trimmed = input.trim();
+  if (trimmed.length === 0) {
+    return null;
+  }
+  return trimmed.length > CUSTOM_NAME_MAX_LENGTH ? trimmed.slice(0, CUSTOM_NAME_MAX_LENGTH) : trimmed;
+}
 
 /** globalState key for the vault custom-name record. */
 const VAULT_CUSTOM_NAMES_STORAGE_KEY = "anywhereTerminal.vaultCustomNames";
@@ -64,14 +78,7 @@ export class VaultCustomNameRegistry {
   }
 
   private normalize(input: string): string | null {
-    const trimmed = input.trim();
-    if (trimmed.length === 0) {
-      return null;
-    }
-    if (trimmed.length > CUSTOM_NAME_MAX_LENGTH) {
-      return trimmed.slice(0, CUSTOM_NAME_MAX_LENGTH);
-    }
-    return trimmed;
+    return normalizeVaultCustomName(input);
   }
 
   private loadFromStorage(): Map<string, string> {

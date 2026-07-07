@@ -393,3 +393,102 @@ describe("forkSupport helpers", () => {
     expect(await canForkOpenCode("1.14.50", deps)).toBe(false);
   });
 });
+
+describe("VaultService.writeNativeTitle (write-vault-rename-to-store 3_1)", () => {
+  it("dispatches opencode/codex to their native renamer and propagates the result", async () => {
+    const opencode = vi.fn(async () => true);
+    const codex = vi.fn(async () => false);
+    const svc = new VaultService({ nativeRenamers: { opencode, codex } });
+
+    expect(await svc.writeNativeTitle("opencode:o1", "Name")).toBe(true);
+    expect(opencode).toHaveBeenCalledWith("o1", "Name");
+
+    expect(await svc.writeNativeTitle("codex:x1", "Name")).toBe(false);
+    expect(codex).toHaveBeenCalledWith("x1", "Name");
+  });
+
+  it("returns false for claude (no native renamer) without calling any writer", async () => {
+    const opencode = vi.fn(async () => true);
+    const svc = new VaultService({ nativeRenamers: { opencode } });
+    expect(await svc.writeNativeTitle("claude:c1", "Name")).toBe(false);
+    expect(opencode).not.toHaveBeenCalled();
+  });
+
+  it("returns false for an unparseable or unknown-agent entry id", async () => {
+    const svc = new VaultService({ nativeRenamers: { opencode: vi.fn(async () => true) } });
+    expect(await svc.writeNativeTitle("garbage-no-colon", "Name")).toBe(false);
+    expect(await svc.writeNativeTitle("bogus:sess", "Name")).toBe(false);
+  });
+
+  it("normalizes the name (trim + cap) before dispatching, and rejects empty (review S1)", async () => {
+    const opencode = vi.fn(async (_id: string, _name: string) => true);
+    const svc = new VaultService({ nativeRenamers: { opencode } });
+
+    expect(await svc.writeNativeTitle("opencode:o1", "   ")).toBe(false);
+    expect(opencode).not.toHaveBeenCalled();
+
+    await svc.writeNativeTitle("opencode:o1", `  ${"x".repeat(200)}  `);
+    const written = opencode.mock.calls[0][1];
+    expect(written).toHaveLength(80);
+  });
+});
+
+describe("VaultService.refresh: force bypasses in-flight (write-vault-rename-to-store 3_2/D4)", () => {
+  it("force refresh reads AFTER the in-flight refresh, never joining its pre-write result", async () => {
+    let call = 0;
+    const readers = makeReaders({
+      claude: vi.fn(async () => {
+        call++;
+        return result([entry("claude", call === 1 ? "old" : "new", call)]);
+      }),
+    });
+    const svc = new VaultService({ readers, canForkOpenCodeFn: async () => false });
+
+    const p1 = svc.refresh(); // run1 → reads "old"
+    const forced = await svc.refresh({ force: true }); // waits for run1, then reads "new"
+    expect(forced.entries.map((e) => e.sessionId)).toEqual(["new"]);
+
+    const first = await p1;
+    expect(first.entries.map((e) => e.sessionId)).toEqual(["old"]);
+    expect(call).toBe(2);
+  });
+
+  it("non-force concurrent refresh joins the single in-flight read", async () => {
+    let call = 0;
+    const readers = makeReaders({
+      claude: vi.fn(async () => {
+        call++;
+        return result([entry("claude", "c", call)]);
+      }),
+    });
+    const svc = new VaultService({ readers, canForkOpenCodeFn: async () => false });
+
+    const [a, b] = await Promise.all([svc.refresh(), svc.refresh()]);
+    expect(call).toBe(1);
+    expect(a).toEqual(b);
+  });
+
+  it("two concurrent force refreshes serialize — no interleaved reads (review W1)", async () => {
+    let active = 0;
+    let maxActive = 0;
+    let call = 0;
+    const readers = makeReaders({
+      claude: vi.fn(async () => {
+        active++;
+        maxActive = Math.max(maxActive, active);
+        await new Promise((r) => setTimeout(r, 5));
+        active--;
+        return result([entry("claude", `r${++call}`, call)]);
+      }),
+    });
+    const svc = new VaultService({ readers, canForkOpenCodeFn: async () => false });
+
+    const p0 = svc.refresh(); // seed one in-flight read
+    const [f1, f2] = await Promise.all([svc.refresh({ force: true }), svc.refresh({ force: true })]);
+    await p0;
+
+    // Never two reads running at once; both force reads produced fresh, distinct lists.
+    expect(maxActive).toBe(1);
+    expect(f1.entries[0].sessionId).not.toEqual(f2.entries[0].sessionId);
+  });
+});
