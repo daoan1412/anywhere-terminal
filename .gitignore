@@ -14,6 +14,10 @@ media/xterm.css
 # Test coverage
 coverage/
 
+# Local watch/build logs (npm run watch redirects)
+.watch-*.log
+.watch-*.err
+
 # cyberk-flow
 cyberk-flow/memory.db*
 session-ses_*
