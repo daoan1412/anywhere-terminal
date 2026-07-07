@@ -107,13 +107,11 @@ export class TerminalViewProvider implements vscode.WebviewViewProvider {
 
   /**
    * Vault live-follow (enhance-vault-sessions D5): AT MOST ONE follow watcher is
-   * active — the previewed session. `_vaultFollowEntryId` is the session it
-   * covers; both are torn down on `vaultWatchSession {entryId:null}` and on view
-   * dispose.
+   * active — the previewed session. It is torn down on
+   * `vaultWatchSession {entryId:null}` and on view dispose.
    */
   private _vaultFollowWatchers: vscode.Disposable[] = [];
   private _vaultFollowRefreshTimer: ReturnType<typeof setTimeout> | undefined;
-  private _vaultFollowEntryId: string | null = null;
   /** Monotonic guard so a stale follow subscription (after a rapid switch) can't
    *  push a detail for a session that is no longer the followed one. */
   private _vaultFollowSeq = 0;
@@ -648,7 +646,6 @@ export class TerminalViewProvider implements vscode.WebviewViewProvider {
     }
     this.disposeVaultFollowWatchers();
     const seq = ++this._vaultFollowSeq;
-    this._vaultFollowEntryId = entryId;
     if (!entryId) {
       return;
     }
@@ -712,7 +709,6 @@ export class TerminalViewProvider implements vscode.WebviewViewProvider {
       d.dispose();
     }
     this._vaultFollowWatchers = [];
-    this._vaultFollowEntryId = null;
   }
 
   /**

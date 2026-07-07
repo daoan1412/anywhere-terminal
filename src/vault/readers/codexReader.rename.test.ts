@@ -28,7 +28,10 @@ describe("renameCodexThread", () => {
   });
 
   it("returns false when the write reports not-found (archived/missing row → overlay fallback)", async () => {
-    const writeSqliteFn = vi.fn(async () => ({ status: "not-found" as const, changes: 0 })) as unknown as typeof writeSqlite;
+    const writeSqliteFn = vi.fn(async () => ({
+      status: "not-found" as const,
+      changes: 0,
+    })) as unknown as typeof writeSqlite;
     const ok = await renameCodexThread("thread-1", "X", { codexDir: "/fake/codex", writeSqliteFn });
     expect(ok).toBe(false);
   });

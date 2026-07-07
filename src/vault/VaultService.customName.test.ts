@@ -4,10 +4,10 @@
 import { describe, expect, it } from "vitest";
 import type { VaultListCacheFileV1 } from "./cacheTypes";
 import { VAULT_CACHE_VERSION } from "./cacheTypes";
+import type { VaultSessionEntry } from "./types";
 import type { VaultCacheStore } from "./VaultCacheStore";
 import { VaultCustomNameRegistry } from "./VaultCustomNameRegistry";
 import { VaultService } from "./VaultService";
-import type { VaultSessionEntry } from "./types";
 
 function entry(id: string, title: string): VaultSessionEntry {
   const [agent, sessionId] = id.split(":");

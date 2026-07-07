@@ -32,9 +32,7 @@ describe("VaultService.getStoreWatchTargets", () => {
 describe("VaultService.resolveSessionWatchTargets", () => {
   it("scopes codex to the session's rollout file + the index db", async () => {
     const targets = await svc.resolveSessionWatchTargets("codex:abc-123");
-    expect(targets.map((t) => t.glob)).toEqual(
-      expect.arrayContaining(["**/*-abc-123.jsonl", "state_5.sqlite*"]),
-    );
+    expect(targets.map((t) => t.glob)).toEqual(expect.arrayContaining(["**/*-abc-123.jsonl", "state_5.sqlite*"]));
   });
 
   it("watches the opencode db for an opencode session", async () => {

@@ -115,9 +115,7 @@ describe("handleVaultRenameSession routing", () => {
     expect(vault.writeNativeTitle).toHaveBeenCalledWith("opencode:o1", "New Name");
     expect(vault.setCustomName).toHaveBeenCalledWith("opencode:o1", ""); // overlay cleared
     expect(vault.refresh).toHaveBeenCalledWith({ force: true });
-    const posts = postMessageSpy.mock.calls.filter(
-      ([m]) => (m as { type?: string }).type === "vaultSessionsResponse",
-    );
+    const posts = postMessageSpy.mock.calls.filter(([m]) => (m as { type?: string }).type === "vaultSessionsResponse");
     expect(posts).toHaveLength(1);
     expect((posts[0][0] as { fromCache: boolean }).fromCache).toBe(false);
     dispose();
@@ -136,9 +134,7 @@ describe("handleVaultRenameSession routing", () => {
     expect(vault.writeNativeTitle).toHaveBeenCalledWith("codex:x1", "New Name");
     expect(vault.setCustomName).toHaveBeenCalledWith("codex:x1", "New Name"); // overlay fallback
     expect(vault.refresh).not.toHaveBeenCalled(); // served from listCached
-    const posts = postMessageSpy.mock.calls.filter(
-      ([m]) => (m as { type?: string }).type === "vaultSessionsResponse",
-    );
+    const posts = postMessageSpy.mock.calls.filter(([m]) => (m as { type?: string }).type === "vaultSessionsResponse");
     expect((posts[0][0] as { fromCache: boolean }).fromCache).toBe(true);
     dispose();
   });

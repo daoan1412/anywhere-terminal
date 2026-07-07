@@ -96,10 +96,8 @@ export class VaultCustomNameRegistry {
   }
 
   private saveSnapshot(): void {
-    void this.storage
-      .update(VAULT_CUSTOM_NAMES_STORAGE_KEY, this.all())
-      .then(undefined, (err) => {
-        console.error("[AnyWhere Terminal] Failed to persist vault custom names:", err);
-      });
+    void this.storage.update(VAULT_CUSTOM_NAMES_STORAGE_KEY, this.all()).then(undefined, (err) => {
+      console.error("[AnyWhere Terminal] Failed to persist vault custom names:", err);
+    });
   }
 }

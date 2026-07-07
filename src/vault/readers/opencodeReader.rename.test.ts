@@ -29,13 +29,19 @@ describe("renameOpenCodeSession", () => {
   });
 
   it("returns false when the write reports not-found (no row / overlay fallback)", async () => {
-    const writeSqliteFn = vi.fn(async () => ({ status: "not-found" as const, changes: 0 })) as unknown as typeof writeSqlite;
+    const writeSqliteFn = vi.fn(async () => ({
+      status: "not-found" as const,
+      changes: 0,
+    })) as unknown as typeof writeSqlite;
     const ok = await renameOpenCodeSession("sess-1", "X", { dataDir: "/fake/oc", writeSqliteFn });
     expect(ok).toBe(false);
   });
 
   it("returns false when the write reports no-sqlite3 (engine absent → overlay fallback)", async () => {
-    const writeSqliteFn = vi.fn(async () => ({ status: "no-sqlite3" as const, changes: 0 })) as unknown as typeof writeSqlite;
+    const writeSqliteFn = vi.fn(async () => ({
+      status: "no-sqlite3" as const,
+      changes: 0,
+    })) as unknown as typeof writeSqlite;
     const ok = await renameOpenCodeSession("sess-1", "X", { dataDir: "/fake/oc", writeSqliteFn });
     expect(ok).toBe(false);
   });

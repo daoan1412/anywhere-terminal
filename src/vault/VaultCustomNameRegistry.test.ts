@@ -2,8 +2,8 @@ import { describe, expect, it } from "vitest";
 import {
   CUSTOM_NAME_MAX_LENGTH,
   normalizeVaultCustomName,
-  type VaultCustomNameStorage,
   VaultCustomNameRegistry,
+  type VaultCustomNameStorage,
 } from "./VaultCustomNameRegistry";
 
 function fakeStorage(initial?: Record<string, unknown>): {

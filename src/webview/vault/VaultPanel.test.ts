@@ -417,7 +417,10 @@ describe("VaultPanel context menu (redesign 5_1)", () => {
     return host.querySelector(".vault-context-menu");
   }
 
-  function _mount(entryOver: Partial<VaultSessionEntry>, posted: { type: string; entryId?: string | null }[]): VaultPanel {
+  function _mount(
+    entryOver: Partial<VaultSessionEntry>,
+    posted: { type: string; entryId?: string | null }[],
+  ): VaultPanel {
     const host = createHost();
     const panel = new VaultPanel({ host, postMessage: (m) => posted.push(m), getInitialCollapsed: () => false });
     panel.render(result([entry({ id: "claude:a", ...entryOver })]));

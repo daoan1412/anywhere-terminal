@@ -14,7 +14,13 @@ import {
 import { canForkOpenCode } from "./forkSupport";
 import { claudeRoots, resolveClaudeSessionPath } from "./readers/claudePaths";
 import { readClaudeDetail, readClaudeEntry, readClaudeSessions } from "./readers/claudeReader";
-import { codexStoreDirs, readCodexDetail, readCodexEntry, readCodexSessions, renameCodexThread } from "./readers/codexReader";
+import {
+  codexStoreDirs,
+  readCodexDetail,
+  readCodexEntry,
+  readCodexSessions,
+  renameCodexThread,
+} from "./readers/codexReader";
 import { clampDetailLimit } from "./readers/detail";
 import {
   opencodeStoreDirs,
@@ -302,9 +308,7 @@ export class VaultService {
    */
   listCached(): VaultListResult | null {
     this.ensureMemLoaded();
-    return this.mem
-      ? this.overlayCustomNames({ entries: this.mem.entries, unreadable: this.mem.unreadable })
-      : null;
+    return this.mem ? this.overlayCustomNames({ entries: this.mem.entries, unreadable: this.mem.unreadable }) : null;
   }
 
   /**
