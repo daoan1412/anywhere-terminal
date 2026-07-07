@@ -137,6 +137,15 @@ export class VaultPanel {
    *  matches skips the re-render (cache-vault-load D6) so the cache→fresh refresh
    *  is invisible when nothing changed, preserving an open preview + scroll. */
   private lastRenderSig: string | null = null;
+  /** Per-entry `modified` snapshot from the last painted render. A row whose
+   *  `modified` grew — or a session id not in this map — gets a one-shot "just
+   *  updated" flash. Empty until the first paint, so the initial list (incl. the
+   *  cache paint) never flashes wholesale. */
+  private readonly modifiedById = new Map<string, number>();
+  /** Ids to flash on the NEXT renderList, computed in render() only on a real data
+   *  change. renderList consumes and clears it, so a local re-render (search /
+   *  folder / group) never re-flashes rows that didn't actually update. */
+  private pendingFreshIds: Set<string> | null = null;
   private query = "";
   private collapsed = true;
   /** Whether the inline header search is open. Transient — never persisted. */
@@ -606,7 +615,28 @@ export class VaultPanel {
     if (this.currentSignature() === this.lastRenderSig) {
       return;
     }
+    // A real data change reached the DOM — flag rows whose `modified` grew (or
+    // brand-new sessions) so renderList paints them with a one-shot flash. Empty on
+    // the first paint (empty snapshot) so the initial list never flashes wholesale.
+    this.pendingFreshIds = this.computeFreshIds();
     this.renderList();
+  }
+
+  /** Ids whose `modified` increased since the last painted snapshot, plus sessions
+   *  not previously seen — the set renderList flashes. Empty on the first paint so
+   *  the initial list (including the cache paint) doesn't flash every row. */
+  private computeFreshIds(): Set<string> {
+    const fresh = new Set<string>();
+    if (this.modifiedById.size === 0) {
+      return fresh;
+    }
+    for (const e of this.entries) {
+      const prev = this.modifiedById.get(e.id);
+      if (prev === undefined || e.modified > prev) {
+        fresh.add(e.id);
+      }
+    }
+    return fresh;
   }
 
   /** Signature of the full rendered projection: entries + every input renderList
@@ -699,7 +729,8 @@ export class VaultPanel {
       const overflow = group.entries.length - MAX_VISIBLE_PER_GROUP;
       const shown = expanded || overflow <= 0 ? group.entries : group.entries.slice(0, MAX_VISIBLE_PER_GROUP);
       for (const entry of shown) {
-        this.listEl.appendChild(renderRow(entry, { hideCwd: group.hideCwd }, this.rowCallbacks));
+        const fresh = this.pendingFreshIds?.has(entry.id) ?? false;
+        this.listEl.appendChild(renderRow(entry, { hideCwd: group.hideCwd, fresh }, this.rowCallbacks));
       }
       if (!expanded && overflow > 0) {
         const key = group.key;
@@ -726,6 +757,15 @@ export class VaultPanel {
     // against the ACTUAL DOM projection — including renders triggered by local UI
     // changes (search/filter/group), which call renderList directly.
     this.lastRenderSig = this.currentSignature();
+
+    // Snapshot the painted `modified` values so the NEXT data change can detect
+    // grown / new rows; clear the one-shot flash set so a following local re-render
+    // (search / folder / group) doesn't re-flash rows that didn't actually update.
+    this.modifiedById.clear();
+    for (const e of this.entries) {
+      this.modifiedById.set(e.id, e.modified);
+    }
+    this.pendingFreshIds = null;
   }
 
   /** The list row for an entryId (or null). Matches on `dataset.entryId` rather

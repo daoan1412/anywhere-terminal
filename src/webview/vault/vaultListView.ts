@@ -24,7 +24,11 @@ export interface VaultRowCallbacks {
  * Single-line CSS-grid row: badge | title | cwd-chip | time, with an icon-only
  * Resume revealed on hover/focus (no fork — D8).
  */
-export function renderRow(entry: VaultSessionEntry, opts: { hideCwd?: boolean }, cb: VaultRowCallbacks): HTMLElement {
+export function renderRow(
+  entry: VaultSessionEntry,
+  opts: { hideCwd?: boolean; fresh?: boolean },
+  cb: VaultRowCallbacks,
+): HTMLElement {
   const row = document.createElement("div");
   row.className = "vault-row";
   row.setAttribute("role", "option");
@@ -59,6 +63,16 @@ export function renderRow(entry: VaultSessionEntry, opts: { hideCwd?: boolean },
     dot.classList.add(`vault-row-dot--${accent}`);
   }
   row.appendChild(dot);
+
+  // Just-updated flash: the panel flags a row whose `modified` grew (or a newly
+  // appeared session). The accent var feeds the `::after` overlay in CSS; only a
+  // known, closed accent may become one (never a raw session-derived string, W6).
+  if (opts.fresh) {
+    row.classList.add("is-fresh");
+    if (accent) {
+      row.style.setProperty("--_accent", `var(--vault-accent-${accent})`);
+    }
+  }
 
   const titleEl = document.createElement("span");
   titleEl.className = "vault-row-title";

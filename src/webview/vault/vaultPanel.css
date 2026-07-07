@@ -422,6 +422,44 @@
   color: var(--vscode-list-activeSelectionForeground);
 }
 
+/* Fresh-update flash — a session row (or a newly-arrived preview message) that
+   just updated gets a gentle agent-accent wash that fades to transparent. Painted
+   as a fading `::after` overlay so it never clobbers the row's own background /
+   the aria-selected highlight; the row/message keeps its real background once the
+   overlay fades. Accent comes from `--_accent` (row, set per-agent inline) or
+   `--vault-user-accent` (preview, set on the preview root). */
+.vault-row.is-fresh::after,
+.vault-preview-message.is-fresh::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  pointer-events: none;
+  background: color-mix(in srgb, var(--_accent, var(--vscode-focusBorder)) 20%, transparent);
+  animation: vault-fresh-fade 1.4s ease-out forwards;
+}
+.vault-preview-message.is-fresh {
+  position: relative;
+}
+.vault-preview-message.is-fresh::after {
+  background: color-mix(in srgb, var(--vault-user-accent, var(--vscode-focusBorder)) 16%, transparent);
+}
+@keyframes vault-fresh-fade {
+  from {
+    opacity: 1;
+  }
+  to {
+    opacity: 0;
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .vault-row.is-fresh::after,
+  .vault-preview-message.is-fresh::after {
+    animation: none;
+    opacity: 0;
+  }
+}
+
 /* Agent badge — accent-tinted square holding the real brand SVG. */
 .vault-badge {
   width: 20px;

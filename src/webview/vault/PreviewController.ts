@@ -363,6 +363,10 @@ export class PreviewController {
 
     this.renderPreviewDetail(this.activePreviewEntry, detail); // updates followTailFingerprint
     const bodyAfter = this.shell.el.querySelector<HTMLElement>(".vault-preview-body");
+    // The tail genuinely changed → flash the newest message so a new reply is easy
+    // to spot without stealing focus. Only on this live-follow path — never on the
+    // initial open or a load-more (those aren't "new chat arrived" events).
+    this.flashNewestMessage(bodyAfter);
     if (atBottom) {
       // Following the tail → keep pinned to the newest message.
       this.followPillCount = 0;
@@ -386,6 +390,30 @@ export class PreviewController {
     this.followPillCount = 0;
     this.shell.scrollNav.clearNewMessages();
     this.shell.scrollNav.scrollBody("end");
+  }
+
+  /** Add a one-shot "just arrived" flash to the newest real message in the preview
+   *  body (CSS fades the accent overlay out). Prefers a non-thinking message so the
+   *  reply — not a thinking block — is what lights up; falls back to the last message
+   *  of any kind. No-op when the body has no message element. */
+  private flashNewestMessage(body: HTMLElement | null): void {
+    if (!body) {
+      return;
+    }
+    const messages = Array.from(body.querySelectorAll<HTMLElement>(".vault-preview-message"));
+    if (messages.length === 0) {
+      return;
+    }
+    // Newest real message: scan from the end, skipping thinking blocks so the reply
+    // lights up rather than a thinking block; fall back to the last message.
+    let target = messages[messages.length - 1];
+    for (let k = messages.length - 1; k >= 0; k--) {
+      if (!messages[k].classList.contains("vault-preview-message-thinking")) {
+        target = messages[k];
+        break;
+      }
+    }
+    target.classList.add("is-fresh");
   }
 
   private buildPreviewHeader(entry: VaultSessionEntry, detail?: VaultSessionDetail): HTMLElement {

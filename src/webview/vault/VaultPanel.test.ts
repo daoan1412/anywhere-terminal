@@ -2378,3 +2378,98 @@ describe("VaultPanel dispose", () => {
     }).not.toThrow();
   });
 });
+
+describe("VaultPanel fresh-update flash", () => {
+  function mkDetail(over: Partial<import("../../vault/types").VaultSessionDetail> = {}) {
+    return {
+      entryId: "claude:a",
+      recentActivity: [],
+      timeline: [],
+      stats: { messageCount: 0, toolCount: 0, subagentCount: 0 },
+      ...over,
+    } as import("../../vault/types").VaultSessionDetail;
+  }
+
+  it("does not flash any row on the first paint", () => {
+    const host = createHost();
+    const panel = new VaultPanel({ host, postMessage: () => {} });
+    panel.render(
+      result([entry({ id: "claude:a", modified: 1000 }), entry({ id: "codex:b", agent: "codex", modified: 1000 })]),
+    );
+    expect(host.querySelectorAll(".vault-row.is-fresh")).toHaveLength(0);
+  });
+
+  it("flashes only the row whose modified increased on a later render", () => {
+    const host = createHost();
+    const panel = new VaultPanel({ host, postMessage: () => {} });
+    panel.render(
+      result([entry({ id: "claude:a", modified: 1000 }), entry({ id: "codex:b", agent: "codex", modified: 1000 })]),
+    );
+    // b's transcript grew; a is untouched.
+    panel.render(
+      result([entry({ id: "claude:a", modified: 1000 }), entry({ id: "codex:b", agent: "codex", modified: 2000 })]),
+    );
+    const fresh = Array.from(host.querySelectorAll<HTMLElement>(".vault-row.is-fresh"));
+    expect(fresh.map((r) => r.dataset.entryId)).toEqual(["codex:b"]);
+    // The flash overlay is tinted with the agent's accent (closed set → CSS var).
+    expect(fresh[0].style.getPropertyValue("--_accent")).toContain("vault-accent-codex");
+  });
+
+  it("flashes a newly appeared session row", () => {
+    const host = createHost();
+    const panel = new VaultPanel({ host, postMessage: () => {} });
+    panel.render(result([entry({ id: "claude:a", modified: 1000 })]));
+    panel.render(
+      result([entry({ id: "claude:a", modified: 1000 }), entry({ id: "codex:b", agent: "codex", modified: 1500 })]),
+    );
+    const fresh = Array.from(host.querySelectorAll<HTMLElement>(".vault-row.is-fresh"));
+    expect(fresh.map((r) => r.dataset.entryId)).toEqual(["codex:b"]);
+  });
+
+  it("does not re-flash rows on a local re-render (group-mode change, no data change)", () => {
+    const host = createHost();
+    const panel = new VaultPanel({ host, postMessage: () => {} });
+    panel.render(result([entry({ id: "claude:a", modified: 1000 })]));
+    panel.render(result([entry({ id: "claude:a", modified: 2000 })])); // a real update → flashes
+    expect(host.querySelectorAll(".vault-row.is-fresh")).toHaveLength(1);
+    panel.setGroupMode("agent"); // local rebuild, no new data
+    expect(host.querySelectorAll(".vault-row.is-fresh")).toHaveLength(0);
+  });
+
+  it("flashes the newest message on a live-follow update, but not on the initial detail", () => {
+    const host = createHost();
+    const panel = new VaultPanel({ host, postMessage: () => {}, getInitialCollapsed: () => false });
+    panel.render(result([entry({ id: "claude:a" })]));
+    host.querySelector<HTMLElement>(".vault-row")?.click();
+
+    // Initial detail render must NOT flash — it isn't a "new chat arrived" event.
+    panel.handleSessionDetailResponse({
+      type: "vaultSessionDetailResponse",
+      entryId: "claude:a",
+      detail: mkDetail({
+        timeline: [
+          { kind: "message", role: "user", text: "go", timestamp: 1 },
+          { kind: "message", role: "assistant", text: "first reply", timestamp: 2 },
+        ],
+      }),
+    });
+    expect(host.querySelectorAll(".vault-preview-message.is-fresh")).toHaveLength(0);
+
+    // A live-follow push appends a new assistant message → only its bubble flashes.
+    panel.handleSessionDetailResponse({
+      type: "vaultSessionDetailResponse",
+      entryId: "claude:a",
+      followUpdate: true,
+      detail: mkDetail({
+        timeline: [
+          { kind: "message", role: "user", text: "go", timestamp: 1 },
+          { kind: "message", role: "assistant", text: "first reply", timestamp: 2 },
+          { kind: "message", role: "assistant", text: "second reply", timestamp: 3 },
+        ],
+      }),
+    });
+    const flashed = Array.from(host.querySelectorAll<HTMLElement>(".vault-preview-message.is-fresh"));
+    expect(flashed).toHaveLength(1);
+    expect(flashed[0].textContent).toContain("second reply");
+  });
+});
