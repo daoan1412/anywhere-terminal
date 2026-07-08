@@ -251,22 +251,79 @@ async function readDarwinClipboardImage(): Promise<{ mimeType: string; buffer: B
   return buffer ? { mimeType: "image/png", buffer } : null;
 }
 
+async function readWindowsClipboardImage(): Promise<Buffer | null> {
+  let dir: string | undefined;
+  try {
+    dir = await fs.mkdtemp(path.join(os.tmpdir(), "awt-clipread-"));
+    const tmpPath = path.join(dir, "clip.png");
+    const ps = [
+      "Add-Type -AssemblyName System.Windows.Forms",
+      "Add-Type -AssemblyName System.Drawing",
+      "if (-not [System.Windows.Forms.Clipboard]::ContainsImage()) { exit 1 }",
+      "$img = [System.Windows.Forms.Clipboard]::GetImage()",
+      "$img.Save($env:AWT_CLIP_PATH, [System.Drawing.Imaging.ImageFormat]::Png)",
+      "$img.Dispose()",
+    ].join("; ");
+    await execFileAsync("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command", ps], {
+      env: { ...process.env, AWT_CLIP_PATH: tmpPath },
+      timeout: 5000,
+    });
+    const data = await fs.readFile(tmpPath);
+    return data.length > 0 ? data : null;
+  } catch {
+    return null;
+  } finally {
+    if (dir) {
+      await fs.rm(dir, { recursive: true, force: true }).catch(() => undefined);
+    }
+  }
+}
+
 /**
- * Read the current OS clipboard image, for the hover-preview cache only. Needed
- * on macOS Ctrl+V into OpenCode/Codex: the CLI reads the pasteboard natively but
- * the webview Clipboard API can't see a non-web image format. Returns null when
- * no image is present or the platform isn't supported here (elsewhere the webview
- * captures the blob from its own paste event).
+ * Read the current OS clipboard image. Needed when the webview Clipboard API can't
+ * see the image (macOS Ctrl+V TIFF/screenshot formats; Windows DIB/CF_BITMAP that
+ * never surfaces as `image/*` in the webview paste event). Returns null when no
+ * image is present or the platform isn't supported here (Linux: webview probe).
  */
 export async function readImageFromOsClipboard(): Promise<{ mimeType: string; data: string } | null> {
-  if (process.platform !== "darwin") {
+  let buffer: Buffer | null = null;
+  let mimeType = "image/png";
+
+  if (process.platform === "darwin") {
+    const result = await readDarwinClipboardImage();
+    if (!result) {
+      return null;
+    }
+    buffer = result.buffer;
+    mimeType = result.mimeType;
+  } else if (process.platform === "win32") {
+    buffer = await readWindowsClipboardImage();
+  } else {
     return null;
   }
-  const result = await readDarwinClipboardImage();
-  if (!result || result.buffer.length === 0 || result.buffer.length > MAX_PASTE_IMAGE_BYTES) {
+
+  if (!buffer || buffer.length === 0 || buffer.length > MAX_PASTE_IMAGE_BYTES) {
     return null;
   }
-  return { mimeType: result.mimeType, data: result.buffer.toString("base64") };
+  return { mimeType, data: buffer.toString("base64") };
+}
+
+/**
+ * Host-read fallback for Ctrl+V when the webview can't see the clipboard image:
+ * read from the OS clipboard, mirror it back (idempotent), emit the PTY trigger,
+ * and return the bytes so the webview can cache them for hover preview.
+ */
+export async function handlePasteOsClipboardImage(
+  tabId: string,
+  writeToSession: (tabId: string, data: string) => void,
+  context: PasteClipboardImageContext = {},
+): Promise<{ mimeType: string; data: string } | null> {
+  const img = await readImageFromOsClipboard();
+  if (!img?.data) {
+    return null;
+  }
+  await handlePasteClipboardImage({ tabId, mimeType: img.mimeType, data: img.data }, writeToSession, context);
+  return img;
 }
 
 export interface PasteClipboardImagePayload {

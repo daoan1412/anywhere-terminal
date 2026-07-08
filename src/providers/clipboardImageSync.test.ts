@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { ALT_V_PASTE, BRACKETED_EMPTY_PASTE, CTRL_V_PASTE } from "../shared/imagePasteTrigger";
-import { handlePasteClipboardImage, readImageFromOsClipboard } from "./clipboardImageSync";
+import { handlePasteClipboardImage, handlePasteOsClipboardImage, readImageFromOsClipboard } from "./clipboardImageSync";
 
 const mocks = vi.hoisted(() => ({
   execFile: vi.fn(),
@@ -121,8 +121,34 @@ describe("readImageFromOsClipboard", () => {
     setPlatform(origPlatform);
   });
 
-  it("returns null off macOS (webview captures the blob itself there)", async () => {
+  it("returns null on Linux (webview captures the blob from its paste event)", async () => {
     setPlatform("linux");
+    expect(await readImageFromOsClipboard()).toBeNull();
+  });
+
+  it("reads a DIB/CF_BITMAP image from the Windows clipboard via PowerShell", async () => {
+    setPlatform("win32");
+    const png = Buffer.from([0x89, 0x50, 0x4e, 0x47]);
+    mocks.execFile.mockImplementation((...args: unknown[]) => {
+      const cb = args[args.length - 1] as (e: unknown, r: unknown) => void;
+      cb(null, { stdout: "", stderr: "" });
+    });
+    mocks.readFile.mockResolvedValue(png);
+
+    const result = await readImageFromOsClipboard();
+
+    expect(result).toEqual({ mimeType: "image/png", data: png.toString("base64") });
+    const argv = mocks.execFile.mock.calls[0]?.[1] as string[];
+    expect(argv[0]).toBe("powershell.exe");
+  });
+
+  it("returns null on Windows when the clipboard holds no image", async () => {
+    setPlatform("win32");
+    mocks.execFile.mockImplementation((...args: unknown[]) => {
+      const cb = args[args.length - 1] as (e: unknown, r: unknown) => void;
+      cb(new Error("exit 1"), null);
+    });
+
     expect(await readImageFromOsClipboard()).toBeNull();
   });
 
@@ -200,5 +226,47 @@ describe("readImageFromOsClipboard", () => {
     mocks.mkdtemp.mockRejectedValue(new Error("EACCES"));
 
     await expect(readImageFromOsClipboard()).resolves.toBeNull();
+  });
+});
+
+describe("handlePasteOsClipboardImage", () => {
+  const origPlatform = process.platform;
+  const setPlatform = (value: string): void => {
+    Object.defineProperty(process, "platform", { value });
+  };
+
+  afterEach(() => {
+    setPlatform(origPlatform);
+  });
+
+  it("reads from the OS clipboard, syncs, and emits the PTY trigger on Windows", async () => {
+    setPlatform("win32");
+    const writeToSession = vi.fn();
+    const png = Buffer.from([0x89, 0x50, 0x4e, 0x47]);
+    mocks.execFile.mockImplementation((...args: unknown[]) => {
+      const cb = args[args.length - 1] as (e: unknown, r: unknown) => void;
+      cb(null, { stdout: "", stderr: "" });
+    });
+    mocks.readFile.mockResolvedValue(png);
+
+    const result = await handlePasteOsClipboardImage("session-a", writeToSession, {
+      agentKind: "claude",
+      platform: "win32",
+    });
+
+    expect(result).toEqual({ mimeType: "image/png", data: png.toString("base64") });
+    expect(writeToSession).toHaveBeenCalledWith("session-a", ALT_V_PASTE);
+  });
+
+  it("returns null when the OS clipboard holds no image", async () => {
+    setPlatform("win32");
+    const writeToSession = vi.fn();
+    mocks.execFile.mockImplementation((...args: unknown[]) => {
+      const cb = args[args.length - 1] as (e: unknown, r: unknown) => void;
+      cb(new Error("no image"), null);
+    });
+
+    expect(await handlePasteOsClipboardImage("session-a", writeToSession)).toBeNull();
+    expect(writeToSession).not.toHaveBeenCalled();
   });
 });

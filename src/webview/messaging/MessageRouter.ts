@@ -21,6 +21,7 @@ import type {
   GitStatusChangedMessage,
   HoverPreviewSettingsMessage,
   InsertPathEffectMessage,
+  OsClipboardPasteMissMessage,
   OpenVaultMessage,
   OutputMessage,
   ReadDirectoryResponseMessage,
@@ -100,8 +101,9 @@ export interface MessageHandlers {
   // ── Subagent preview popup (preview-subagent-popup) ──
   // Optional: a webview with no terminal factory mounted safely ignores it.
   onSubagentPreviewResponse?(msg: SubagentPreviewResponseMessage): void;
-  // ── Pasted-image preview, host-read fallback (macOS Ctrl+V) ──
+  // ── Pasted-image preview + host-read fallback (macOS Ctrl+V / Windows Ctrl+V) ──
   onClipboardImagePreview?(msg: ClipboardImagePreviewMessage): void;
+  onOsClipboardPasteMiss?(msg: OsClipboardPasteMissMessage): void;
 }
 
 // ─── Factory ────────────────────────────────────────────────────────
@@ -229,6 +231,9 @@ export function createMessageRouter(handlers: MessageHandlers): (msg: ExtensionT
         break;
       case "clipboardImagePreview":
         handlers.onClipboardImagePreview?.(msg);
+        break;
+      case "osClipboardPasteMiss":
+        handlers.onOsClipboardPasteMiss?.(msg);
         break;
       case "init":
         // init is handled directly by main.ts — not routed
