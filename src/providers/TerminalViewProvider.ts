@@ -14,7 +14,7 @@ import { parseEntryId, type VaultSessionEntry } from "../vault/types";
 import { normalizeVaultCustomName } from "../vault/VaultCustomNameRegistry";
 import type { VaultLauncher } from "../vault/VaultLauncher";
 import type { VaultService } from "../vault/VaultService";
-import { handlePasteClipboardImage, readImageFromOsClipboard } from "./clipboardImageSync";
+import { handlePasteClipboardImage, handlePasteOsClipboardImage, readImageFromOsClipboard } from "./clipboardImageSync";
 import { FileTreeHost } from "./fileTreeHost";
 import type { WatcherPool } from "./fsWatcherPool";
 import type { GitDecorationProvider } from "./gitDecorationProvider";
@@ -936,8 +936,8 @@ export class TerminalViewProvider implements vscode.WebviewViewProvider {
           if (typeof message.tabId === "string") {
             // No agent gate: the CLI may be launched by hand (session.shell is the
             // plain shell, not the agent executable), so we can't detect "is an
-            // agent" host-side. The webview only sends this for a macOS Ctrl+V it
-            // couldn't read itself, and readImageFromOsClipboard no-ops off macOS.
+            // agent" host-side. Preview-only — the CLI already received the image
+            // natively (macOS Ctrl+V → \x16).
             const tabId = message.tabId;
             void readImageFromOsClipboard().then((img) => {
               this.safePostMessage(webviewView.webview, {
@@ -946,6 +946,30 @@ export class TerminalViewProvider implements vscode.WebviewViewProvider {
                 mimeType: img?.mimeType ?? "image/png",
                 data: img?.data ?? "",
               });
+            });
+          }
+          break;
+
+        case "pasteOsClipboardImage":
+          if (typeof message.tabId === "string") {
+            const tabId = message.tabId;
+            const session = this.sessionManager.getSession(tabId);
+            const agentKind = session?.isAgentLaunch ? agentKindForExecutable(session.shell) : undefined;
+            void handlePasteOsClipboardImage(
+              tabId,
+              (tid, data) => this.sessionManager.writeToSession(tid, data),
+              { agentKind, platform: process.platform },
+            ).then((img) => {
+              if (img) {
+                this.safePostMessage(webviewView.webview, {
+                  type: "clipboardImagePreview",
+                  tabId,
+                  mimeType: img.mimeType,
+                  data: img.data,
+                });
+              } else {
+                this.safePostMessage(webviewView.webview, { type: "osClipboardPasteMiss", tabId });
+              }
             });
           }
           break;

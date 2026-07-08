@@ -496,11 +496,28 @@ export interface PasteClipboardImageMessage {
  * reads the pasteboard natively but the webview Clipboard API can't see the
  * image (non-web format) — only the host can. The host always replies with
  * `clipboardImagePreview`; its `data` is "" when the clipboard holds no image.
- * Not gated — `readImageFromOsClipboard` is a no-op off macOS.
  */
 export interface RequestClipboardImagePreviewMessage {
   type: "requestClipboardImagePreview";
   /** Active pane session id — echoed back so the reply routes to the right store. */
+  tabId: string;
+}
+
+/**
+ * Webview → host: the webview couldn't read an image on Ctrl+V (common on Windows
+ * where DIB/CF_BITMAP never surfaces as `image/*`). The host reads the OS
+ * clipboard, mirrors it + emits the PTY trigger on hit, and replies with
+ * `clipboardImagePreview` (cache) or `osClipboardPasteMiss` (paste text instead).
+ */
+export interface PasteOsClipboardImageMessage {
+  type: "pasteOsClipboardImage";
+  /** Active pane session id — echoed back so the reply routes to the right store. */
+  tabId: string;
+}
+
+/** Host → webview: OS clipboard held no image after a `pasteOsClipboardImage` request. */
+export interface OsClipboardPasteMissMessage {
+  type: "osClipboardPasteMiss";
   tabId: string;
 }
 
@@ -581,7 +598,8 @@ export type WebViewToExtensionMessage =
   | RequestVaultContextCwdMessage
   | RequestSubagentPreviewMessage
   | PasteClipboardImageMessage
-  | RequestClipboardImagePreviewMessage;
+  | RequestClipboardImagePreviewMessage
+  | PasteOsClipboardImageMessage;
 
 /**
  * Webview → Extension. Sent by the editor webview after it has merged the
@@ -1147,6 +1165,7 @@ export type ExtensionToWebViewMessage =
   | VaultContextCwdMessage
   | SubagentPreviewResponseMessage
   | ClipboardImagePreviewMessage
+  | OsClipboardPasteMissMessage
   | OpenVaultMessage;
 
 /**

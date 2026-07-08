@@ -672,9 +672,7 @@ const routeMessage = createMessageRouter({
     factory.fillSubagentPreview(msg.requestId, msg.detail, msg.error, msg.entryId);
   },
   onClipboardImagePreview(msg) {
-    // Host-read fallback for macOS Ctrl+V: the webview Clipboard API couldn't see
-    // the image, so cache the host-supplied bytes for hover preview only (the CLI
-    // already received the image natively via \x16).
+    // Host-read fallback: cache bytes the webview Clipboard API couldn't see.
     if (!msg.data) {
       return;
     }
@@ -684,6 +682,18 @@ const routeMessage = createMessageRouter({
     }
     const file = new File([blob], "clipboard.png", { type: blob.type || "image/png" });
     factory.getPastedImageStore(msg.tabId)?.add(file);
+  },
+  onOsClipboardPasteMiss(msg) {
+    // Host found no image after we intercepted Ctrl+V — paste text instead.
+    const terminal = store.terminals.get(msg.tabId)?.terminal;
+    if (!terminal || !navigator.clipboard?.readText) {
+      return;
+    }
+    void navigator.clipboard.readText().then((text) => {
+      if (text) {
+        terminal.paste(text);
+      }
+    });
   },
   onVaultContextCwd(msg) {
     // Drop a reply for a pane that is no longer active (stale-guard): the user
@@ -1139,6 +1149,14 @@ function bootstrap(): void {
       // xterm sends \x16, which OpenCode/Codex use to read the OS clipboard
       // themselves. Capture the blob for preview ONLY — forwarding double-pastes.
       const nativeDelivers = isMac && e.ctrlKey && !e.metaKey;
+      // Windows/Linux: the webview paste event often carries text (or nothing)
+      // even when the OS clipboard holds a DIB image — block native paste so we
+      // can read the image host-side and emit the correct PTY trigger (Alt+V on
+      // Windows for Claude). Text paste is restored on `osClipboardPasteMiss`.
+      if (!isMac) {
+        e.preventDefault();
+        e.stopPropagation();
+      }
       if (!targetId) {
         return;
       }
@@ -1159,12 +1177,13 @@ function bootstrap(): void {
             handleImagePasteBlob(file, targetId, !nativeDelivers);
             return;
           }
-          // Probe found no web-visible image. On macOS Ctrl+V the pasteboard holds
-          // the image in a format the Clipboard API hides (TIFF/screenshot/file);
-          // only the host can read it. Ask it for the preview cache (delivery to
-          // the CLI already happened natively via \x16).
+          // Probe found no web-visible image — ask the host, which can read OS
+          // clipboard formats the webview hides (macOS TIFF/screenshot/file;
+          // Windows DIB/CF_BITMAP).
           if (nativeDelivers) {
             vscode.postMessage({ type: "requestClipboardImagePreview", tabId: targetId });
+          } else {
+            vscode.postMessage({ type: "pasteOsClipboardImage", tabId: targetId });
           }
         });
       }, PASTE_PROBE_DEBOUNCE_MS);
