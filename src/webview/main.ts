@@ -42,6 +42,7 @@ import { WebviewStateStore } from "./state/WebviewStateStore";
 import { buildTabBarData, handleTabKeyboardShortcut, renderTabBar } from "./TabBarUtils";
 import { hideRenameOverlay, repositionRenameOverlay, showRenameOverlay } from "./tabRenameOverlay";
 import { formatRestoreDivider } from "./terminal/restoreDivider";
+import { TerminalActivityTracker } from "./terminal/TerminalActivityTracker";
 import { TerminalFactory } from "./terminal/TerminalFactory";
 import { ThemeManager } from "./theme/ThemeManager";
 import { showBanner } from "./ui/BannerService";
@@ -89,6 +90,10 @@ const vscode = acquireVsCodeApi();
 const store = new WebviewStateStore(vscode);
 const themeManager = new ThemeManager("sidebar");
 let isComposing = false;
+const activityTracker = new TerminalActivityTracker({
+  getTerminal: (sessionId) => store.terminals.get(sessionId),
+  onStatusChange: () => updateTabBar(),
+});
 
 const flowControl = new FlowControl((msg) => vscode.postMessage(msg));
 const factory = new TerminalFactory({
@@ -425,6 +430,7 @@ function removeTerminal(id: string): void {
   instance.terminal.dispose();
   instance.container.remove();
   store.terminals.delete(id);
+  activityTracker.delete(id);
   flowControl.delete(id);
 
   // Delegate split cleanup to renderer; dispose the hover-preview controller of
@@ -432,6 +438,7 @@ function removeTerminal(id: string): void {
   // removing the pane container no longer removes its popup — the controller
   // (and its body-level overlay) must be disposed explicitly.
   for (const splitId of splitRenderer.removeTab(id)) {
+    activityTracker.delete(splitId);
     factory.disposeHoverController(splitId);
   }
   store.persist();
@@ -468,6 +475,7 @@ const handleScrollbackDump = createScrollbackDumpHandler({
 
 const routeMessage = createMessageRouter({
   onOutput(msg) {
+    activityTracker.markOutput(msg.tabId);
     const dataLen = msg.data.length;
     const instance = store.terminals.get(msg.tabId);
     if (instance) {
@@ -481,6 +489,7 @@ const routeMessage = createMessageRouter({
     scheduleVaultCwdReprobe(msg.tabId);
   },
   onExit(msg) {
+    activityTracker.delete(msg.tabId);
     const instance = store.terminals.get(msg.tabId);
     if (instance) {
       instance.exited = true;
@@ -548,6 +557,7 @@ const routeMessage = createMessageRouter({
     }
     const closed = splitRenderer.closeSplitPaneById(store.tabActivePaneIds.get(store.activeTabId) ?? store.activeTabId);
     if (closed) {
+      activityTracker.delete(closed);
       factory.disposeHoverController(closed);
     }
     factory.disposeSubagentPopup(); // closing any pane dismisses the singleton popup (D7)
@@ -556,6 +566,7 @@ const routeMessage = createMessageRouter({
     if (msg.sessionId) {
       const closed = splitRenderer.closeSplitPaneById(msg.sessionId);
       if (closed) {
+        activityTracker.delete(closed);
         factory.disposeHoverController(closed);
       }
       factory.disposeSubagentPopup(); // closing any pane dismisses the singleton popup (D7)
