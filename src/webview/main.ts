@@ -26,11 +26,13 @@ import { FileTreeController } from "./fileTree/FileTreeController";
 import { FlowControl } from "./flow/FlowControl";
 import {
   base64ToBlob,
+  clipboardEventHasPlainText,
   extractImageBlobFromClipboardItems,
   forwardImagePaste,
   ImagePasteDeduper,
   isPasteShortcut,
   probeClipboardForImageBlob,
+  shouldHostReadOsClipboardImage,
 } from "./imagePasteBridge";
 import type { HoverPreviewThemeKind } from "./links/HoverPreviewController";
 import { preloadSyntaxHighlighter } from "./links/syntaxRenderer";
@@ -694,17 +696,9 @@ const routeMessage = createMessageRouter({
     const file = new File([blob], "clipboard.png", { type: blob.type || "image/png" });
     factory.getPastedImageStore(msg.tabId)?.add(file);
   },
-  onOsClipboardPasteMiss(msg) {
-    // Host found no image after we intercepted Ctrl+V — paste text instead.
-    const terminal = store.terminals.get(msg.tabId)?.terminal;
-    if (!terminal || !navigator.clipboard?.readText) {
-      return;
-    }
-    void navigator.clipboard.readText().then((text) => {
-      if (text) {
-        terminal.paste(text);
-      }
-    });
+  onOsClipboardPasteMiss(_msg) {
+    // Empty-paste host probe found no image. Text paste never reaches here
+    // (it stays on the native paste path); nothing to restore.
   },
   onVaultContextCwd(msg) {
     // Drop a reply for a pane that is no longer active (stale-guard): the user
@@ -1040,6 +1034,7 @@ function bootstrap(): void {
   //   word-jump (backward-word / forward-word). xterm.js's default
   //   behavior with `macOptionIsMeta: false` does not produce these.
   const isMac = navigator.platform.includes("Mac");
+  const isWindows = navigator.platform.includes("Win");
   document.addEventListener(
     "keydown",
     (e: KeyboardEvent) => {
@@ -1160,14 +1155,9 @@ function bootstrap(): void {
       // xterm sends \x16, which OpenCode/Codex use to read the OS clipboard
       // themselves. Capture the blob for preview ONLY — forwarding double-pastes.
       const nativeDelivers = isMac && e.ctrlKey && !e.metaKey;
-      // Windows/Linux: the webview paste event often carries text (or nothing)
-      // even when the OS clipboard holds a DIB image — block native paste so we
-      // can read the image host-side and emit the correct PTY trigger (Alt+V on
-      // Windows for Claude). Text paste is restored on `osClipboardPasteMiss`.
-      if (!isMac) {
-        e.preventDefault();
-        e.stopPropagation();
-      }
+      // Never preventDefault on the OS paste accelerator (Cmd+V / Ctrl+V).
+      // Text must stay on the native xterm path. Windows DIB image paste is
+      // handled in the `paste` listener only when the event has no text/image.
       if (!targetId) {
         return;
       }
@@ -1188,13 +1178,11 @@ function bootstrap(): void {
             handleImagePasteBlob(file, targetId, !nativeDelivers);
             return;
           }
-          // Probe found no web-visible image — ask the host, which can read OS
-          // clipboard formats the webview hides (macOS TIFF/screenshot/file;
-          // Windows DIB/CF_BITMAP).
+          // Preview-only host read for macOS Ctrl+V (CLI already got the image
+          // via \x16). Do NOT pasteOsClipboardImage from keydown — that would
+          // race with native text paste when the clipboard holds text.
           if (nativeDelivers) {
             vscode.postMessage({ type: "requestClipboardImagePreview", tabId: targetId });
-          } else {
-            vscode.postMessage({ type: "pasteOsClipboardImage", tabId: targetId });
           }
         });
       }, PASTE_PROBE_DEBOUNCE_MS);
@@ -1207,23 +1195,52 @@ function bootstrap(): void {
     (e: ClipboardEvent) => {
       const items = e.clipboardData?.items;
       const blob = items ? extractImageBlobFromClipboardItems(items) : null;
-      if (!blob) {
-        return;
-      }
       const tabId = store.activeTabId;
       const targetId = tabId ? (store.tabActivePaneIds.get(tabId) ?? tabId) : null;
       if (!targetId) {
         return;
       }
-      // Consume image paste so xterm does not also emit an empty bracketed paste
-      // (double-trigger). Text paste is unchanged — this handler returns early.
-      // This `paste` event is authoritative: it fires before the keydown
-      // fallback's async clipboard probe resolves, and the probe defers to it via
-      // its own `wasHandled()` check — so this handler must never gate on the
-      // (sticky) dedup flag, or a context-menu paste with no keydown gets dropped.
-      e.preventDefault();
-      e.stopPropagation();
-      handleImagePasteBlob(blob, targetId);
+
+      if (blob) {
+        // Consume image paste so xterm does not also emit an empty bracketed paste
+        // (double-trigger). This `paste` event is authoritative vs the keydown
+        // async probe (dedup via wasHandled) — never gate on the sticky dedup
+        // flag, or a context-menu paste with no keydown gets dropped.
+        e.preventDefault();
+        e.stopPropagation();
+        handleImagePasteBlob(blob, targetId);
+        return;
+      }
+
+      // Plain text → native xterm paste (instant). Do not wait for host.
+      const hasPlainText = clipboardEventHasPlainText(e.clipboardData);
+      if (hasPlainText) {
+        // The paste event is authoritative. Cancel the keydown fallback before
+        // native xterm paste runs so a delayed navigator.clipboard.read() cannot
+        // append an image from another clipboard representation or a newer copy.
+        imagePasteDeduper.markHandled();
+        pasteProbeGeneration += 1;
+        if (pasteProbeTimer !== undefined) {
+          clearTimeout(pasteProbeTimer);
+          pasteProbeTimer = undefined;
+        }
+        return;
+      }
+      if (
+        shouldHostReadOsClipboardImage({
+          isWindows,
+          hasImageBlob: false,
+          hasPlainText,
+        })
+      ) {
+        // Windows DIB/CF_BITMAP: webview sees neither image/* nor text. Block
+        // empty native paste and let the host read the OS clipboard + emit the
+        // PTY trigger (Alt+V for Claude). On miss there is nothing to restore.
+        e.preventDefault();
+        e.stopPropagation();
+        imagePasteDeduper.markHandled();
+        vscode.postMessage({ type: "pasteOsClipboardImage", tabId: targetId });
+      }
     },
     true,
   );

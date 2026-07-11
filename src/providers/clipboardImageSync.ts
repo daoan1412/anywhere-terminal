@@ -309,20 +309,28 @@ export async function readImageFromOsClipboard(): Promise<{ mimeType: string; da
 }
 
 /**
- * Host-read fallback for Ctrl+V when the webview can't see the clipboard image:
- * read from the OS clipboard, mirror it back (idempotent), emit the PTY trigger,
+ * Host-read fallback when the webview paste event has no image/* and no text
+ * (Windows DIB/CF_BITMAP). Read from the OS clipboard, emit the PTY trigger,
  * and return the bytes so the webview can cache them for hover preview.
+ *
+ * Does NOT re-write the image to the OS clipboard — it is already there (we
+ * just read it). Re-writing would spawn a second PowerShell on Windows for no
+ * functional gain and made image paste noticeably slower.
  */
 export async function handlePasteOsClipboardImage(
   tabId: string,
   writeToSession: (tabId: string, data: string) => void,
   context: PasteClipboardImageContext = {},
 ): Promise<{ mimeType: string; data: string } | null> {
+  if (!tabId) {
+    return null;
+  }
   const img = await readImageFromOsClipboard();
   if (!img?.data) {
     return null;
   }
-  await handlePasteClipboardImage({ tabId, mimeType: img.mimeType, data: img.data }, writeToSession, context);
+  const platform = context.platform ?? process.platform;
+  writeToSession(tabId, getImagePastePtyTrigger(context.agentKind, platform));
   return img;
 }
 

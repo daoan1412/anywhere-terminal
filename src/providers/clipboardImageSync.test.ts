@@ -138,8 +138,10 @@ describe("readImageFromOsClipboard", () => {
     const result = await readImageFromOsClipboard();
 
     expect(result).toEqual({ mimeType: "image/png", data: png.toString("base64") });
+    // execFile(cmd, args, opts, cb) — binary is the first positional arg.
+    expect(mocks.execFile.mock.calls[0]?.[0]).toBe("powershell.exe");
     const argv = mocks.execFile.mock.calls[0]?.[1] as string[];
-    expect(argv[0]).toBe("powershell.exe");
+    expect(argv[0]).toBe("-NoProfile");
   });
 
   it("returns null on Windows when the clipboard holds no image", async () => {
@@ -239,7 +241,7 @@ describe("handlePasteOsClipboardImage", () => {
     setPlatform(origPlatform);
   });
 
-  it("reads from the OS clipboard, syncs, and emits the PTY trigger on Windows", async () => {
+  it("reads from the OS clipboard and emits the PTY trigger without re-writing", async () => {
     setPlatform("win32");
     const writeToSession = vi.fn();
     const png = Buffer.from([0x89, 0x50, 0x4e, 0x47]);
@@ -256,6 +258,8 @@ describe("handlePasteOsClipboardImage", () => {
 
     expect(result).toEqual({ mimeType: "image/png", data: png.toString("base64") });
     expect(writeToSession).toHaveBeenCalledWith("session-a", ALT_V_PASTE);
+    // Read path only: no second PowerShell SetImage (writeImageToOsClipboard).
+    expect(mocks.writeFile).not.toHaveBeenCalled();
   });
 
   it("returns null when the OS clipboard holds no image", async () => {
