@@ -52,9 +52,43 @@ function writeWlCopy(mimeType: string, data: Buffer): Promise<boolean> {
   });
 }
 
-async function writeLinuxClipboard(mimeType: string, data: Buffer, tmpPath: string): Promise<boolean> {
-  await fs.writeFile(tmpPath, data);
+/**
+ * xclip forks into a clipboard-owner process by default. Its inherited stdout
+ * keeps `execFile` waiting even after the launcher has set the selection, which
+ * put a two-second timeout directly on the image-paste path. Give the launcher
+ * no inherited output pipes and wait only for it to report selection ownership.
+ */
+function writeXclip(mimeType: string, data: Buffer): Promise<boolean> {
+  return new Promise((resolve) => {
+    let settled = false;
+    let timeout: ReturnType<typeof setTimeout> | undefined;
+    const settle = (ok: boolean): void => {
+      if (!settled) {
+        settled = true;
+        if (timeout !== undefined) {
+          clearTimeout(timeout);
+        }
+        resolve(ok);
+      }
+    };
 
+    const proc = spawn("xclip", ["-selection", "clipboard", "-t", mimeType, "-i"], {
+      stdio: ["pipe", "ignore", "ignore"],
+    });
+    // A broken X server must not indefinitely delay the PTY trigger. The normal
+    // xclip launcher exits as soon as it has installed the clipboard owner.
+    timeout = setTimeout(() => {
+      proc.kill();
+      settle(false);
+    }, 2000);
+    proc.on("error", () => settle(false));
+    proc.on("exit", (code) => settle(code === 0));
+    proc.stdin.on("error", () => settle(false));
+    proc.stdin.end(data);
+  });
+}
+
+async function writeLinuxClipboard(mimeType: string, data: Buffer): Promise<boolean> {
   if (process.env.WAYLAND_DISPLAY) {
     if (await writeWlCopy(mimeType, data)) {
       return true;
@@ -62,16 +96,8 @@ async function writeLinuxClipboard(mimeType: string, data: Buffer, tmpPath: stri
   }
 
   if (process.env.DISPLAY) {
-    try {
-      // Timeout: xclip retains the X selection and keeps the inherited stdout fd
-      // open, so promisified execFile can hang waiting for stdio-close. Without a
-      // deadline a stuck xclip wedges the paste and leaks the temp dir.
-      await execFileAsync("xclip", ["-selection", "clipboard", "-t", mimeType, "-i", tmpPath], {
-        timeout: 2000,
-      });
+    if (await writeXclip(mimeType, data)) {
       return true;
-    } catch {
-      // xclip not installed, selection busy, or timed out.
     }
   }
 
@@ -122,6 +148,14 @@ export async function writeImageToOsClipboard(mimeType: string, data: Buffer): P
   }
 
   const normalizedMime = mimeType.trim() || "image/png";
+  if (process.platform === "linux") {
+    try {
+      return await writeLinuxClipboard(normalizedMime, data);
+    } catch {
+      return false;
+    }
+  }
+
   let dir: string | undefined;
   try {
     // Private per-write dir (mkdtemp is 0700) instead of a predictable name in the
@@ -132,8 +166,6 @@ export async function writeImageToOsClipboard(mimeType: string, data: Buffer): P
     dir = await fs.mkdtemp(path.join(os.tmpdir(), "awt-clipboard-"));
     const tmpPath = path.join(dir, `image.${fileExtensionForMime(normalizedMime)}`);
     switch (process.platform) {
-      case "linux":
-        return await writeLinuxClipboard(normalizedMime, data, tmpPath);
       case "darwin":
         await fs.writeFile(tmpPath, data);
         return await writeDarwinClipboard(tmpPath);
